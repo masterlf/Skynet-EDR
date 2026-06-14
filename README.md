@@ -87,6 +87,7 @@ cargo test --workspace --all-features
 - [Concept architecture](docs/ARCHITECTURE.md)
 - [Initial detection ideas](docs/DETECTION_RULES.md)
 - [Read-only MCP integration](docs/MCP_READ_ONLY.md)
+- [Linux lab and privileged sensor manual test plan](docs/LINUX_LAB_TESTING.md)
 
 ## Naming
 
