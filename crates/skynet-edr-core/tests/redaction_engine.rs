@@ -142,6 +142,55 @@ fn redacts_hostile_secret_variants_without_obeying_embedded_instructions() {
 }
 
 #[test]
+fn redacts_sensitive_key_value_pairs_after_safe_pairs() {
+    let input = "NORMAL=value API_TOKEN=fake_later_value_123456 OTHER=kept";
+
+    let redacted = redact_text(input);
+
+    assert_eq!(
+        redacted.value,
+        format!("NORMAL=value API_TOKEN={SECRET_REPLACEMENT} OTHER=kept")
+    );
+    assert!(!redacted.value.contains("fake_later_value_123456"));
+}
+
+#[test]
+fn redacts_quoted_secret_values_with_spaces_without_leaking_tail() {
+    let input = r#"PASSWORD="fake password with spaces" next=value"#;
+
+    let redacted = redact_text(input);
+
+    assert_eq!(
+        redacted.value,
+        format!(r#"PASSWORD="{SECRET_REPLACEMENT}" next=value"#)
+    );
+    assert!(!redacted.value.contains("fake password with spaces"));
+}
+
+#[test]
+fn redacts_sensitive_pairs_with_spaces_around_separator() {
+    let input = "NORMAL=value API_TOKEN = fake_spaced_value_123456 next=ok";
+
+    let redacted = redact_text(input);
+
+    assert_eq!(
+        redacted.value,
+        format!("NORMAL=value API_TOKEN = {SECRET_REPLACEMENT} next=ok")
+    );
+    assert!(!redacted.value.contains("fake_spaced_value_123456"));
+}
+
+#[test]
+fn redacts_quoted_authorization_values_with_spaces() {
+    let input = r#"Authorization: Bearer "fake bearer with spaces" next=value"#;
+
+    let redacted = redact_text(input);
+
+    assert!(redacted.value.contains(SECRET_REPLACEMENT));
+    assert!(!redacted.value.contains("fake bearer with spaces"));
+}
+
+#[test]
 fn preserves_safe_text_without_false_positive_metadata() {
     let input = "scan completed for process pid=4242";
 

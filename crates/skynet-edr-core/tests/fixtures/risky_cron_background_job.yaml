@@ -1,0 +1,15 @@
+id: risky_cron_background_job
+name: Risky cron background job
+severity: medium
+source_kinds:
+  - scheduled_task
+  - configuration
+conditions:
+  - field: attributes.schedule
+    contains: "* * * * *"
+  - field: attributes.command
+    contains: curl
+actions:
+  - alert
+  - pause_automation
+description: Detects unattended scheduled jobs that run frequent outbound commands.

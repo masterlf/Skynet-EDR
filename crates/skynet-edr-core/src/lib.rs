@@ -271,51 +271,147 @@ fn redact_text_line(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> 
 }
 
 fn redact_authorization_header(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
-    let lower = line.to_ascii_lowercase();
-    let needle = concat!("authorization", ": bearer ");
-    if let Some(index) = lower.find(needle) {
-        let value_start = index + needle.len();
-        let value_end = find_value_end(line, value_start);
-        let mut output = String::with_capacity(line.len());
-        output.push_str(&line[..value_start]);
-        output.push_str(SECRET_REPLACEMENT);
-        output.push_str(&line[value_end..]);
-        fields.push(redaction_field(
-            path,
-            RedactionReason::Secret,
-            SECRET_REPLACEMENT,
-        ));
-        return output;
+    let mut output = line.to_owned();
+    let mut search_from = 0;
+
+    while let Some(index) = output[search_from..]
+        .to_ascii_lowercase()
+        .find("authorization:")
+        .map(|offset| search_from + offset)
+    {
+        let value_start = index + "authorization:".len();
+        let token_start = authorization_token_start(&output, value_start);
+        let token_end = find_header_value_end(&output, token_start);
+        if token_start < token_end {
+            output.replace_range(token_start..token_end, SECRET_REPLACEMENT);
+            fields.push(redaction_field(
+                path,
+                RedactionReason::Secret,
+                SECRET_REPLACEMENT,
+            ));
+            search_from = token_start + SECRET_REPLACEMENT.len();
+        } else {
+            search_from = value_start;
+        }
     }
-    line.to_owned()
+
+    output
+}
+
+fn authorization_token_start(value: &str, start: usize) -> usize {
+    let mut cursor = skip_ascii_whitespace(value, start);
+    let scheme_end = value[cursor..]
+        .find(char::is_whitespace)
+        .map_or(cursor, |offset| cursor + offset);
+    if scheme_end > cursor {
+        cursor = skip_ascii_whitespace(value, scheme_end);
+    }
+    cursor
+}
+
+fn find_header_value_end(value: &str, start: usize) -> usize {
+    if value[start..].starts_with(['\'', '"']) {
+        return find_secret_value_bounds(value, start).1;
+    }
+    value[start..]
+        .find([';', ',', '"'])
+        .map_or(value.len(), |offset| start + offset)
+}
+
+fn skip_ascii_whitespace(value: &str, mut start: usize) -> usize {
+    while value[start..].starts_with(char::is_whitespace) {
+        start += value[start..].chars().next().map_or(0, char::len_utf8);
+    }
+    start
 }
 
 fn redact_key_value_secrets(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
     let mut output = line.to_owned();
-    for marker in ["=", ": "] {
-        let lower = output.to_ascii_lowercase();
-        let Some(marker_index) = lower.find(marker) else {
-            continue;
-        };
-        let key_start = lower[..marker_index]
-            .rfind(|character: char| character.is_whitespace() || character == ';')
+    let mut search_from = 0;
+
+    while let Some((separator, separator_len)) = find_next_key_value_separator(&output, search_from)
+    {
+        let key_end = output[..separator]
+            .trim_end_matches(char::is_whitespace)
+            .len();
+        let key_start = output[..key_end]
+            .rfind(|character: char| {
+                character.is_whitespace() || character == ';' || character == '&'
+            })
             .map_or(0, |index| index + 1);
-        let key = &output[key_start..marker_index];
-        if !is_sensitive_key(
-            key.trim_matches(|character| character == '-' || character == '\'' || character == '"'),
-        ) {
+        let key = output[key_start..key_end]
+            .trim_matches(|character| character == '-' || character == '\'' || character == '"');
+
+        if key.eq_ignore_ascii_case("authorization") {
+            search_from = separator + separator_len;
             continue;
         }
-        let value_start = marker_index + marker.len();
-        let value_end = find_value_end(&output, value_start);
-        output.replace_range(value_start..value_end, SECRET_REPLACEMENT);
-        fields.push(redaction_field(
-            path,
-            RedactionReason::Secret,
-            SECRET_REPLACEMENT,
-        ));
+
+        if is_sensitive_key(key) {
+            let raw_value_start = separator + separator_len;
+            let (value_start, value_end) = find_secret_value_bounds(&output, raw_value_start);
+            if value_start < value_end {
+                output.replace_range(value_start..value_end, SECRET_REPLACEMENT);
+                fields.push(redaction_field(
+                    path,
+                    RedactionReason::Secret,
+                    SECRET_REPLACEMENT,
+                ));
+                search_from = value_start + SECRET_REPLACEMENT.len();
+            } else {
+                search_from = raw_value_start;
+            }
+        } else {
+            search_from = separator + separator_len;
+        }
     }
+
     output
+}
+
+fn find_next_key_value_separator(value: &str, start: usize) -> Option<(usize, usize)> {
+    let equals = value[start..].find('=').map(|offset| (start + offset, 1));
+    let colon_space = value[start..].find(": ").map(|offset| (start + offset, 2));
+    match (equals, colon_space) {
+        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+        (Some(found), None) | (None, Some(found)) => Some(found),
+        (None, None) => None,
+    }
+}
+
+fn find_secret_value_bounds(value: &str, start: usize) -> (usize, usize) {
+    let mut value_start = start;
+    while value[value_start..].starts_with(char::is_whitespace) {
+        value_start += value[value_start..]
+            .chars()
+            .next()
+            .map_or(0, char::len_utf8);
+    }
+
+    let quote = value[value_start..]
+        .chars()
+        .next()
+        .filter(|character| *character == '\'' || *character == '"');
+    if let Some(quote) = quote {
+        let content_start = value_start + quote.len_utf8();
+        let mut escaped = false;
+        for (offset, character) in value[content_start..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if character == '\\' {
+                escaped = true;
+                continue;
+            }
+            if character == quote {
+                return (content_start, content_start + offset);
+            }
+        }
+        return (content_start, value.len());
+    }
+
+    (value_start, find_value_end(value, value_start))
 }
 
 fn redact_local_context(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
@@ -400,6 +496,157 @@ fn join_like_input(input: &str, lines: &[String]) -> String {
         output.push('\n');
     }
     output
+}
+
+/// Detection action requested when a rule matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectionAction {
+    /// Emit an alert for operator triage.
+    Alert,
+    /// Require explicit approval before continuing a risky operation.
+    RequireApproval,
+    /// Pause the related automation while an operator investigates.
+    PauseAutomation,
+}
+
+/// Stable platform-independent detection rule identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DetectionRuleId(String);
+
+impl DetectionRuleId {
+    /// Construct a rule identifier from a stable string.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the identifier string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One condition in a detection rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleCondition {
+    /// Dotted event or incident field path evaluated by the rule engine.
+    pub field: String,
+    /// Case-sensitive substring that must be present for the condition to match.
+    pub contains: String,
+}
+
+/// Platform-independent YAML detection rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectionRule {
+    /// Stable detection rule identifier.
+    pub id: DetectionRuleId,
+    /// Operator-facing name.
+    pub name: String,
+    /// Severity assigned when the rule matches.
+    pub severity: Severity,
+    /// Source kinds the rule can evaluate.
+    pub source_kinds: Vec<SourceKind>,
+    /// Conditions that must match. Empty conditions fail validation.
+    pub conditions: Vec<RuleCondition>,
+    /// Actions requested on match. Empty actions fail validation.
+    pub actions: Vec<DetectionAction>,
+    /// Optional longer rule description.
+    pub description: Option<String>,
+}
+
+impl DetectionRule {
+    /// Validate the rule fail-closed before it can be evaluated.
+    ///
+    /// Validation rejects structurally ambiguous rules before matching can start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DetectionRuleError::Validation`] when a required top-level field,
+    /// condition, or response action is empty.
+    pub fn validate(&self) -> Result<(), DetectionRuleError> {
+        if self.id.as_str().trim().is_empty() {
+            return Err(DetectionRuleError::Validation(
+                "id must not be empty".to_owned(),
+            ));
+        }
+        if self.name.trim().is_empty() {
+            return Err(DetectionRuleError::Validation(
+                "name must not be empty".to_owned(),
+            ));
+        }
+        if self.source_kinds.is_empty() {
+            return Err(DetectionRuleError::Validation(
+                "source_kinds must not be empty".to_owned(),
+            ));
+        }
+        if self.conditions.is_empty() {
+            return Err(DetectionRuleError::Validation(
+                "conditions must not be empty".to_owned(),
+            ));
+        }
+        if self.actions.is_empty() {
+            return Err(DetectionRuleError::Validation(
+                "actions must not be empty".to_owned(),
+            ));
+        }
+        for condition in &self.conditions {
+            if condition.field.trim().is_empty() {
+                return Err(DetectionRuleError::Validation(
+                    "condition field must not be empty".to_owned(),
+                ));
+            }
+            if condition.contains.is_empty() {
+                return Err(DetectionRuleError::Validation(
+                    "condition contains must not be empty".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Detection rule parsing and validation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetectionRuleError {
+    /// YAML parsing or schema deserialization failed.
+    Parse(String),
+    /// Rule parsed but failed fail-closed validation.
+    Validation(String),
+}
+
+impl std::fmt::Display for DetectionRuleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(error) => write!(formatter, "detection rule parse error: {error}"),
+            Self::Validation(error) => {
+                write!(formatter, "detection rule validation error: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DetectionRuleError {}
+
+/// Parse and validate one YAML detection rule.
+///
+/// Invalid YAML, unknown schema fields, unknown enum values, or validation failures
+/// return an error so callers can fail closed instead of silently disabling a rule.
+///
+/// # Errors
+///
+/// Returns [`DetectionRuleError::Parse`] for malformed YAML, unknown fields, or
+/// unknown enum values. Returns [`DetectionRuleError::Validation`] for parsed
+/// rules that are structurally empty or ambiguous.
+pub fn parse_detection_rule_yaml(input: &str) -> Result<DetectionRule, DetectionRuleError> {
+    let rule: DetectionRule = serde_yaml::from_str(input)
+        .map_err(|error| DetectionRuleError::Parse(error.to_string()))?;
+    rule.validate()?;
+    Ok(rule)
 }
 
 /// Stable platform-independent event identifier.
