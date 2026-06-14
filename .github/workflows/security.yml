@@ -1,69 +1,66 @@
 name: Security
-
 on:
   pull_request:
   push:
     branches: [main]
   schedule:
     - cron: '17 4 * * 1'
-
 permissions:
   contents: read
-  security-events: write
-  actions: read
-
 jobs:
   gitleaks:
     name: Gitleaks secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   trufflehog:
     name: TruffleHog verified secret scan
-    # The upstream action compares base/head commits. On a push to main, base and
-    # head can resolve to the same commit and fail with "BASE and HEAD commits
-    # are the same". Keep this as a PR gate where the diff is well-defined.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - uses: trufflesecurity/trufflehog@main
+      - uses: trufflesecurity/trufflehog@84a2b33c9f891494db6ebe02f2a55b19cdf38f25 # main, pinned 2026-06-14
         with:
           path: ./
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           extra_args: --only-verified
-
   semgrep:
     name: Semgrep OSS SAST
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Semgrep scan
         run: semgrep scan --config auto --sarif --output semgrep.sarif --error
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3
         with:
           sarif_file: semgrep.sarif
-
   trivy:
     name: Trivy filesystem scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@bfa4b33a029b9aa80ddb784b45574c30e072c59e # master, pinned 2026-06-14
         with:
           scan-type: fs
           scan-ref: .
@@ -72,33 +69,31 @@ jobs:
           severity: CRITICAL,HIGH
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3
         with:
           sarif_file: trivy-results.sarif
-
   osv:
     name: OSV dependency scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: google/osv-scanner-action/osv-scanner-action@v2.0.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: google/osv-scanner-action@6fc714450122bda9d00e4ad5d639ad6a39eedb1f # v2.0.1
         with:
           scan-args: |-
             --recursive
             .
-
   rust-security:
     name: Rust dependency policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Detect Rust workspace
         id: rust
         run: |
           if [ -f Cargo.toml ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
       - name: Install Rust
         if: steps.rust.outputs.present == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-audit and cargo-deny
         if: steps.rust.outputs.present == 'true'
         run: cargo install cargo-audit cargo-deny --locked

@@ -1,27 +1,26 @@
 name: CodeQL
-
 on:
   pull_request:
   push:
     branches: [main]
   schedule:
     - cron: '33 3 * * 2'
-
 permissions:
   contents: read
-  security-events: write
-  actions: read
-
 jobs:
   analyze:
     name: CodeQL analyze
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
         language: [rust, python]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Detect language files
         id: detect
         shell: bash
@@ -36,15 +35,15 @@ jobs:
           esac
       - name: Initialize CodeQL
         if: steps.detect.outputs.present == 'true'
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3
         with:
           languages: ${{ matrix.language }}
       - name: Autobuild
         if: steps.detect.outputs.present == 'true'
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3
       - name: Perform CodeQL Analysis
         if: steps.detect.outputs.present == 'true'
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3
       - name: No files for language yet
         if: steps.detect.outputs.present != 'true'
         run: echo "No ${{ matrix.language }} files yet; CodeQL will activate when code is added."
