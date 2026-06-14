@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Rust workspace
+        id: rust
+        run: |
+          if [ -f Cargo.toml ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Install Rust
+        if: steps.rust.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        if: steps.rust.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+      - name: Format check
+        if: steps.rust.outputs.present == 'true'
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        if: steps.rust.outputs.present == 'true'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Tests
+        if: steps.rust.outputs.present == 'true'
+        run: cargo test --workspace --all-features
+      - name: No Rust workspace yet
+        if: steps.rust.outputs.present != 'true'
+        run: echo "No Cargo.toml yet; Rust CI will activate when the workspace is added."
+
+  python:
+    name: Python integration quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Python integration
+        id: py
+        run: |
+          if find integrations -name 'pyproject.toml' -o -name 'requirements.txt' 2>/dev/null | grep -q .; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Set up Python
+        if: steps.py.outputs.present == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tools
+        if: steps.py.outputs.present == 'true'
+        run: python -m pip install --upgrade pip pytest ruff bandit
+      - name: Ruff lint
+        if: steps.py.outputs.present == 'true'
+        run: ruff check integrations
+      - name: Ruff format check
+        if: steps.py.outputs.present == 'true'
+        run: ruff format --check integrations
+      - name: Bandit
+        if: steps.py.outputs.present == 'true'
+        run: bandit -r integrations -q
+      - name: Pytest
+        if: steps.py.outputs.present == 'true'
+        run: python -m pytest integrations
+      - name: No Python integration yet
+        if: steps.py.outputs.present != 'true'
+        run: echo "No Python integration package yet; Python CI will activate when added."

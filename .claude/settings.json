@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)",
+      "Bash(cargo fmt*)",
+      "Bash(cargo clippy*)",
+      "Bash(cargo test*)",
+      "Bash(cargo audit*)",
+      "Bash(cargo deny*)",
+      "Bash(python -m pytest*)",
+      "Bash(ruff check*)",
+      "Bash(ruff format*)",
+      "Bash(semgrep*)",
+      "Bash(gitleaks*)",
+      "Bash(trivy*)"
+    ],
+    "ask": [
+      "Edit",
+      "Write",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(cargo install*)",
+      "Bash(pip install*)",
+      "Bash(uv add*)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/auth.json)",
+      "Read(**/.ssh/**)",
+      "Read(**/*token*)",
+      "Read(**/*secret*)",
+      "Bash(rm -rf*)",
+      "Bash(git push --force*)",
+      "Bash(curl *--data*)",
+      "Bash(wget *--post*)",
+      "Bash(nc *)",
+      "Bash(ncat *)",
+      "Bash(socat *)"
+    ]
+  }
+}
