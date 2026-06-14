@@ -1,3 +1,5 @@
+//! MCP surface tests for the read-only integration skeleton.
+
 use skynet_edr_mcp::{status_summary, McpServerInfo, READ_ONLY_TOOLS};
 
 #[test]

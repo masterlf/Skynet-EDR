@@ -1,3 +1,5 @@
+//! Daemon smoke tests for the passive, non-privileged skeleton.
+
 use std::process::Command;
 
 #[test]
