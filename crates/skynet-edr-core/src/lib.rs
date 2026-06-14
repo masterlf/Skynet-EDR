@@ -3,8 +3,14 @@
 //! Platform sensors, storage, and response actions build on these stable core
 //! types without coupling event or incident handling to privileged OS APIs.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Operator-facing Skynet-EDR runtime mode.
@@ -768,4 +774,285 @@ impl Default for ProductInfo {
             run_mode: RunMode::Passive,
         }
     }
+}
+
+/// Result type used by local storage operations.
+pub type StorageResult<T> = Result<T, StorageError>;
+
+/// Error returned by `SQLite` or JSONL local storage operations.
+#[derive(Debug)]
+pub enum StorageError {
+    /// `SQLite` schema migration, write, or query failed.
+    Sqlite(rusqlite::Error),
+    /// JSON serialization or deserialization failed.
+    Json(serde_json::Error),
+    /// Filesystem I/O failed for a database or JSONL export path.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sqlite(error) => write!(formatter, "sqlite storage error: {error}"),
+            Self::Json(error) => write!(formatter, "json storage error: {error}"),
+            Self::Io(error) => write!(formatter, "local storage I/O error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
+
+impl From<rusqlite::Error> for StorageError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
+    }
+}
+
+impl From<serde_json::Error> for StorageError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Local `SQLite` storage for redacted events and incidents.
+pub struct LocalStore {
+    path: PathBuf,
+    connection: Connection,
+}
+
+impl LocalStore {
+    /// Open or create a local `SQLite` store and apply the MVP schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when `SQLite` cannot open the database or migrate
+    /// the schema.
+    pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let connection = Connection::open(&path)?;
+        let store = Self { path, connection };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// Return the database path backing this local store.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Insert or replace one redacted event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when JSON serialization or `SQLite` persistence
+    /// fails.
+    pub fn insert_event(&self, event: &Event) -> StorageResult<()> {
+        let payload = serde_json::to_string(event)?;
+        let severity = serde_json::to_value(event.severity)?;
+        let source_kind = serde_json::to_value(event.source.kind)?;
+        self.connection.execute(
+            "INSERT INTO events (
+                id, observed_at_unix_ms, severity, source_kind, title, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                observed_at_unix_ms = excluded.observed_at_unix_ms,
+                severity = excluded.severity,
+                source_kind = excluded.source_kind,
+                title = excluded.title,
+                payload_json = excluded.payload_json",
+            params![
+                event.id.as_str(),
+                event.observed_at_unix_ms,
+                json_string_value(&severity),
+                json_string_value(&source_kind),
+                event.title,
+                payload,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Insert or replace one redacted incident and its embedded events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when embedded event persistence, JSON
+    /// serialization, or `SQLite` persistence fails.
+    pub fn insert_incident(&self, incident: &Incident) -> StorageResult<()> {
+        for event in &incident.events {
+            self.insert_event(event)?;
+        }
+
+        let payload = serde_json::to_string(incident)?;
+        let severity = serde_json::to_value(incident.severity)?;
+        let status = serde_json::to_value(incident.status)?;
+        self.connection.execute(
+            "INSERT INTO incidents (
+                id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                created_at_unix_ms = excluded.created_at_unix_ms,
+                updated_at_unix_ms = excluded.updated_at_unix_ms,
+                status = excluded.status,
+                severity = excluded.severity,
+                title = excluded.title,
+                payload_json = excluded.payload_json",
+            params![
+                incident.id.as_str(),
+                incident.created_at_unix_ms,
+                incident.updated_at_unix_ms,
+                json_string_value(&status),
+                json_string_value(&severity),
+                incident.title,
+                payload,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load one event by identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when `SQLite` query or JSON deserialization fails.
+    pub fn get_event(&self, id: &str) -> StorageResult<Option<Event>> {
+        self.connection
+            .query_row(
+                "SELECT payload_json FROM events WHERE id = ?1",
+                params![id],
+                |row| deserialize_row_json(row, 0),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// Load one incident by identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when `SQLite` query or JSON deserialization fails.
+    pub fn get_incident(&self, id: &str) -> StorageResult<Option<Incident>> {
+        self.connection
+            .query_row(
+                "SELECT payload_json FROM incidents WHERE id = ?1",
+                params![id],
+                |row| deserialize_row_json(row, 0),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// List all stored events ordered by observation time and identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when `SQLite` query or JSON deserialization fails.
+    pub fn list_events(&self) -> StorageResult<Vec<Event>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload_json FROM events ORDER BY observed_at_unix_ms ASC, id ASC")?;
+        collect_payload_rows(&mut statement, [])
+    }
+
+    /// List all stored incidents ordered by last update time and identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when `SQLite` query or JSON deserialization fails.
+    pub fn list_incidents(&self) -> StorageResult<Vec<Incident>> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload_json FROM incidents ORDER BY updated_at_unix_ms ASC, id ASC",
+        )?;
+        collect_payload_rows(&mut statement, [])
+    }
+
+    fn migrate(&self) -> StorageResult<()> {
+        self.connection.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY NOT NULL,
+                observed_at_unix_ms INTEGER NOT NULL,
+                severity TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_events_observed_at
+                ON events(observed_at_unix_ms);
+             CREATE TABLE IF NOT EXISTS incidents (
+                id TEXT PRIMARY KEY NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_incidents_updated_at
+                ON incidents(updated_at_unix_ms);",
+        )?;
+        Ok(())
+    }
+}
+
+/// Append one redacted event to a JSONL file.
+///
+/// # Errors
+///
+/// Returns [`StorageError`] when JSON serialization or file append fails.
+pub fn append_event_jsonl(path: impl AsRef<Path>, event: &Event) -> StorageResult<()> {
+    append_jsonl(path, event)
+}
+
+/// Append one redacted incident to a JSONL file.
+///
+/// # Errors
+///
+/// Returns [`StorageError`] when JSON serialization or file append fails.
+pub fn append_incident_jsonl(path: impl AsRef<Path>, incident: &Incident) -> StorageResult<()> {
+    append_jsonl(path, incident)
+}
+
+fn append_jsonl<T: Serialize>(path: impl AsRef<Path>, value: &T) -> StorageResult<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn json_string_value(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), ToOwned::to_owned)
+}
+
+fn deserialize_row_json<T: for<'de> Deserialize<'de>>(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<T> {
+    let payload: String = row.get(index)?;
+    serde_json::from_str(&payload).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+fn collect_payload_rows<T: for<'de> Deserialize<'de>, P: rusqlite::Params>(
+    statement: &mut rusqlite::Statement<'_>,
+    params: P,
+) -> StorageResult<Vec<T>> {
+    let rows = statement.query_map(params, |row| deserialize_row_json(row, 0))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::from)
 }

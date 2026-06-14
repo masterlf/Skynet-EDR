@@ -6,8 +6,8 @@ Skynet-EDR starts as a small Rust workspace. The core must remain platform-indep
 
 | Crate | Type | Purpose |
 |---|---|---|
-| `skynet-edr-core` | library | Shared product metadata and future platform-independent event/rule/incident primitives. |
-| `skynet-edr-cli` | binary | Operator CLI. Current skeleton supports `status`, `--help`, and `--version`. |
+| `skynet-edr-core` | library | Shared product metadata, platform-independent event/rule/incident primitives, and local SQLite/JSONL storage. |
+| `skynet-edr-cli` | binary | Operator CLI. Supports status/version/help plus local store initialization, incident ingestion, incident listing/showing, and JSONL export. |
 | `skynet-edr-daemon` | binary | Future long-running runtime monitor. Current skeleton exposes safe status only and starts no privileged sensors. |
 | `skynet-edr-mcp` | library | Future read-only MCP integration for Hermes visibility. Current skeleton defines read-only tool names and status metadata. |
 
