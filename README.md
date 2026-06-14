@@ -64,7 +64,7 @@ Current crates:
 - `skynet-edr-core`: shared product metadata and core runtime primitives.
 - `skynet-edr-cli`: `skynet-edr` command-line entry point with an initial `status` command.
 - `skynet-edr-daemon`: future runtime monitor entry point; current skeleton reports safe passive status only.
-- `skynet-edr-mcp`: future read-only MCP integration surface for Hermes visibility.
+- `skynet-edr-mcp`: read-only MCP integration surface for Hermes visibility: status, incidents, rules, sensors, and config-drift findings.
 
 See [Rust workspace](docs/WORKSPACE.md) for layout and commands.
 
@@ -86,6 +86,7 @@ cargo test --workspace --all-features
 - [Threat model](docs/THREAT_MODEL.md)
 - [Concept architecture](docs/ARCHITECTURE.md)
 - [Initial detection ideas](docs/DETECTION_RULES.md)
+- [Read-only MCP integration](docs/MCP_READ_ONLY.md)
 
 ## Naming
 

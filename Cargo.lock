@@ -253,6 +253,8 @@ dependencies = [
 name = "skynet-edr-mcp"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "skynet-edr-core",
 ]
 
