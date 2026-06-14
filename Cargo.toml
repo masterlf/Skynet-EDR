@@ -2,6 +2,8 @@
 members = [
     "crates/skynet-edr-core",
     "crates/skynet-edr-cli",
+    "crates/skynet-edr-daemon",
+    "crates/skynet-edr-mcp",
 ]
 resolver = "2"
 

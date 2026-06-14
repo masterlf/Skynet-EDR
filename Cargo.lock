@@ -12,3 +12,17 @@ dependencies = [
 [[package]]
 name = "skynet-edr-core"
 version = "0.1.0"
+
+[[package]]
+name = "skynet-edr-daemon"
+version = "0.1.0"
+dependencies = [
+ "skynet-edr-core",
+]
+
+[[package]]
+name = "skynet-edr-mcp"
+version = "0.1.0"
+dependencies = [
+ "skynet-edr-core",
+]

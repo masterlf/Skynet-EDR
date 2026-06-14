@@ -57,14 +57,18 @@ The first research/MVP scope is detection and alerting for:
 
 ## Status
 
-This repository now has an initial Rust workspace skeleton for the platform-independent core and CLI entry point.
+This repository now has an initial Rust workspace skeleton for the platform-independent core, CLI, daemon placeholder, and read-only MCP integration primitives.
 
 Current crates:
 
 - `skynet-edr-core`: shared product metadata and core runtime primitives.
 - `skynet-edr-cli`: `skynet-edr` command-line entry point with an initial `status` command.
+- `skynet-edr-daemon`: future runtime monitor entry point; current skeleton reports safe passive status only.
+- `skynet-edr-mcp`: future read-only MCP integration surface for Hermes visibility.
 
-The next implementation steps are to expand the core event schema, Hermes configuration scanners, detection rules, and storage model.
+See [Rust workspace](docs/WORKSPACE.md) for layout and commands.
+
+The next implementation steps are to expand the core event schema, redaction engine, detection rules, and storage model.
 
 ## Development
 
