@@ -111,6 +111,297 @@ pub struct RedactionMetadata {
     pub redacted_fields: Vec<RedactedField>,
 }
 
+/// Replacement marker used when a secret is removed before persistence or alerting.
+pub const SECRET_REPLACEMENT: &str = "[REDACTED:secret]";
+
+/// Replacement marker used when local host or filesystem context is minimized.
+pub const LOCAL_CONTEXT_REPLACEMENT: &str = "[REDACTED:local_context]";
+
+/// Value plus redaction metadata produced by the redaction engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Redacted<T> {
+    /// Redacted value safe for storage or alerting.
+    pub value: T,
+    /// Redaction decisions applied to produce the value.
+    pub metadata: RedactionMetadata,
+}
+
+/// Redact secrets and sensitive local context from free-form text.
+#[must_use]
+pub fn redact_text(input: &str) -> Redacted<String> {
+    let mut fields = Vec::new();
+    let mut output = Vec::new();
+
+    let mut inside_key_block = false;
+    let mut block_was_redacted = false;
+
+    for line in input.lines() {
+        if is_key_block_start(line) {
+            inside_key_block = true;
+            block_was_redacted = true;
+            if output
+                .last()
+                .map_or(true, |previous| previous != SECRET_REPLACEMENT)
+            {
+                output.push(SECRET_REPLACEMENT.to_owned());
+                fields.push(redaction_field(
+                    "text",
+                    RedactionReason::Secret,
+                    SECRET_REPLACEMENT,
+                ));
+            }
+            continue;
+        }
+        if inside_key_block {
+            if is_key_block_end(line) {
+                inside_key_block = false;
+            }
+            continue;
+        }
+        let redacted = redact_text_line(line, "text", &mut fields);
+        output.push(redacted);
+    }
+
+    if inside_key_block && !block_was_redacted {
+        fields.push(redaction_field(
+            "text",
+            RedactionReason::Secret,
+            SECRET_REPLACEMENT,
+        ));
+    }
+
+    Redacted {
+        value: join_like_input(input, &output),
+        metadata: metadata_from_fields(fields),
+    }
+}
+
+/// Redact sensitive JSON attributes while preserving safe attributes unchanged.
+#[must_use]
+pub fn redact_attributes(
+    attributes: &BTreeMap<String, serde_json::Value>,
+) -> Redacted<BTreeMap<String, serde_json::Value>> {
+    let mut fields = Vec::new();
+    let mut value = BTreeMap::new();
+
+    for (key, attribute) in attributes {
+        let path = format!("attributes.{key}");
+        value.insert(
+            key.clone(),
+            redact_json_value(key, attribute, &path, &mut fields),
+        );
+    }
+
+    Redacted {
+        value,
+        metadata: metadata_from_fields(fields),
+    }
+}
+
+fn redact_json_value(
+    key: &str,
+    value: &serde_json::Value,
+    path: &str,
+    fields: &mut Vec<RedactedField>,
+) -> serde_json::Value {
+    if is_sensitive_key(key) {
+        fields.push(redaction_field(
+            path,
+            RedactionReason::Secret,
+            SECRET_REPLACEMENT,
+        ));
+        return serde_json::Value::String(SECRET_REPLACEMENT.to_owned());
+    }
+
+    match value {
+        serde_json::Value::String(text) => {
+            if is_local_context(text) {
+                fields.push(redaction_field(
+                    path,
+                    RedactionReason::LocalContext,
+                    LOCAL_CONTEXT_REPLACEMENT,
+                ));
+                serde_json::Value::String(LOCAL_CONTEXT_REPLACEMENT.to_owned())
+            } else {
+                let redacted = redact_text_line(text, path, fields);
+                serde_json::Value::String(redacted)
+            }
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    redact_json_value("", item, &format!("{path}[{index}]"), fields)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(child_key, child_value)| {
+                    let child_path = format!("{path}.{child_key}");
+                    (
+                        child_key.clone(),
+                        redact_json_value(child_key, child_value, &child_path, fields),
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            value.clone()
+        }
+    }
+}
+
+fn redact_text_line(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
+    if contains_private_key_marker(line) {
+        fields.push(redaction_field(
+            path,
+            RedactionReason::Secret,
+            SECRET_REPLACEMENT,
+        ));
+        return SECRET_REPLACEMENT.to_owned();
+    }
+
+    let mut output = line.to_owned();
+    output = redact_authorization_header(&output, path, fields);
+    output = redact_key_value_secrets(&output, path, fields);
+    output = redact_local_context(&output, path, fields);
+    output
+}
+
+fn redact_authorization_header(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
+    let lower = line.to_ascii_lowercase();
+    let needle = concat!("authorization", ": bearer ");
+    if let Some(index) = lower.find(needle) {
+        let value_start = index + needle.len();
+        let value_end = find_value_end(line, value_start);
+        let mut output = String::with_capacity(line.len());
+        output.push_str(&line[..value_start]);
+        output.push_str(SECRET_REPLACEMENT);
+        output.push_str(&line[value_end..]);
+        fields.push(redaction_field(
+            path,
+            RedactionReason::Secret,
+            SECRET_REPLACEMENT,
+        ));
+        return output;
+    }
+    line.to_owned()
+}
+
+fn redact_key_value_secrets(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
+    let mut output = line.to_owned();
+    for marker in ["=", ": "] {
+        let lower = output.to_ascii_lowercase();
+        let Some(marker_index) = lower.find(marker) else {
+            continue;
+        };
+        let key_start = lower[..marker_index]
+            .rfind(|character: char| character.is_whitespace() || character == ';')
+            .map_or(0, |index| index + 1);
+        let key = &output[key_start..marker_index];
+        if !is_sensitive_key(
+            key.trim_matches(|character| character == '-' || character == '\'' || character == '"'),
+        ) {
+            continue;
+        }
+        let value_start = marker_index + marker.len();
+        let value_end = find_value_end(&output, value_start);
+        output.replace_range(value_start..value_end, SECRET_REPLACEMENT);
+        fields.push(redaction_field(
+            path,
+            RedactionReason::Secret,
+            SECRET_REPLACEMENT,
+        ));
+    }
+    output
+}
+
+fn redact_local_context(line: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
+    let mut output = line.to_owned();
+    for marker in ["/root/", "/home/"] {
+        while let Some(start) = output.find(marker) {
+            let end = find_value_end(&output, start);
+            output.replace_range(start..end, LOCAL_CONTEXT_REPLACEMENT);
+            fields.push(redaction_field(
+                path,
+                RedactionReason::LocalContext,
+                LOCAL_CONTEXT_REPLACEMENT,
+            ));
+        }
+    }
+    output
+}
+
+fn is_key_block_start(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("-----begin ") && lower.contains(" key-----")
+}
+
+fn is_key_block_end(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("-----end ") && lower.contains(" key-----")
+}
+
+fn contains_private_key_marker(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("private key") || lower.contains("begin openssh key")
+}
+
+fn is_local_context(value: &str) -> bool {
+    value.starts_with("/root/") || value.starts_with("/home/")
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase);
+    let normalized: String = normalized.collect();
+
+    normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("apikey")
+        || normalized.contains("authorization")
+        || normalized.contains("cookie")
+        || normalized.contains("privatekey")
+}
+
+fn find_value_end(value: &str, start: usize) -> usize {
+    value[start..]
+        .find(|character: char| character.is_whitespace() || character == ';' || character == '&')
+        .map_or(value.len(), |offset| start + offset)
+}
+
+fn redaction_field(
+    path: impl Into<String>,
+    reason: RedactionReason,
+    replacement: &str,
+) -> RedactedField {
+    RedactedField {
+        path: path.into(),
+        reason,
+        replacement: replacement.to_owned(),
+    }
+}
+
+fn metadata_from_fields(redacted_fields: Vec<RedactedField>) -> RedactionMetadata {
+    RedactionMetadata {
+        contains_sensitive_data: !redacted_fields.is_empty(),
+        redacted_fields,
+    }
+}
+
+fn join_like_input(input: &str, lines: &[String]) -> String {
+    let mut output = lines.join("\n");
+    if input.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
 /// Stable platform-independent event identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
