@@ -66,6 +66,9 @@ fn cli_help_lists_local_storage_commands() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
     assert!(stdout.contains("store init"));
     assert!(stdout.contains("events ingest"));
+    assert!(stdout.contains("events list"));
+    assert!(stdout.contains("events show"));
+    assert!(stdout.contains("events export"));
     assert!(stdout.contains("incidents list"));
     assert!(stdout.contains("incidents show"));
     assert!(stdout.contains("incidents export"));
@@ -103,6 +106,112 @@ fn cli_initializes_store_and_lists_imported_incident() {
     assert!(stdout.contains("inc_cli_1"));
     assert!(stdout.contains("high"));
     assert!(stdout.contains("Suspicious MCP tool chain"));
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+    fs::remove_file(incident_path).expect("temporary fixture is removed");
+}
+
+#[test]
+fn cli_lists_shows_and_exports_event_jsonl() {
+    let db_path = temp_path("event-show-export.sqlite");
+    let incident_path = temp_path("event-show-export-incident.json");
+    fs::write(&incident_path, INCIDENT_JSON).expect("fixture incident is written");
+
+    let ingest = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "ingest", "--db"])
+        .arg(&db_path)
+        .arg("--incident-json")
+        .arg(&incident_path)
+        .output()
+        .expect("events ingest runs");
+    assert!(ingest.status.success());
+
+    let list = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "list", "--db"])
+        .arg(&db_path)
+        .output()
+        .expect("events list runs");
+    assert!(list.status.success());
+    let stdout = String::from_utf8(list.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("evt_cli_1"));
+    assert!(stdout.contains("high"));
+    assert!(stdout.contains("MCP shell invocation"));
+
+    let show = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "show", "evt_cli_1", "--db"])
+        .arg(&db_path)
+        .output()
+        .expect("events show runs");
+    assert!(show.status.success());
+    let shown: serde_json::Value =
+        serde_json::from_slice(&show.stdout).expect("show prints event JSON");
+    assert_eq!(shown["id"], "evt_cli_1");
+
+    let export = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "export", "--db"])
+        .arg(&db_path)
+        .args(["--format", "jsonl"])
+        .output()
+        .expect("events export runs");
+    assert!(export.status.success());
+    let stdout = String::from_utf8(export.stdout).expect("stdout should be UTF-8");
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    let exported: serde_json::Value = serde_json::from_str(lines[0]).expect("export line is JSON");
+    assert_eq!(exported["id"], "evt_cli_1");
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+    fs::remove_file(incident_path).expect("temporary fixture is removed");
+}
+
+#[test]
+fn cli_redacts_untrusted_incident_before_showing_or_exporting() {
+    let db_path = temp_path("redacted-cli.sqlite");
+    let incident_path = temp_path("redacted-cli-incident.json");
+    let incident_json = INCIDENT_JSON
+        .replace(
+            "\"details\": null",
+            "\"details\": \"password=super-secret\"",
+        )
+        .replace(
+            "\"tool\": \"shell\"",
+            "\"api_token\": \"sk_liv...oken\", \"path\": \"/home/alice/.ssh/id_rsa\"",
+        );
+    fs::write(&incident_path, incident_json).expect("fixture incident is written");
+
+    let ingest = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "ingest", "--db"])
+        .arg(&db_path)
+        .arg("--incident-json")
+        .arg(&incident_path)
+        .output()
+        .expect("events ingest runs");
+    assert!(ingest.status.success());
+
+    let event_show = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "show", "evt_cli_1", "--db"])
+        .arg(&db_path)
+        .output()
+        .expect("events show runs");
+    assert!(event_show.status.success());
+    let event_stdout = String::from_utf8(event_show.stdout).expect("stdout should be UTF-8");
+    assert!(!event_stdout.contains("super-secret"));
+    assert!(!event_stdout.contains("sk_liv...oken"));
+    assert!(!event_stdout.contains("/home/alice"));
+    assert!(event_stdout.contains("[REDACTED:secret]"));
+
+    let incident_export = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["incidents", "export", "--db"])
+        .arg(&db_path)
+        .args(["--format", "jsonl"])
+        .output()
+        .expect("incidents export runs");
+    assert!(incident_export.status.success());
+    let export_stdout = String::from_utf8(incident_export.stdout).expect("stdout should be UTF-8");
+    assert!(!export_stdout.contains("super-secret"));
+    assert!(!export_stdout.contains("sk_liv...oken"));
+    assert!(!export_stdout.contains("/home/alice"));
+    assert!(export_stdout.contains("[REDACTED:secret]"));
 
     fs::remove_file(db_path).expect("temporary db is removed");
     fs::remove_file(incident_path).expect("temporary fixture is removed");

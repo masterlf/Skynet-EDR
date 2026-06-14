@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use skynet_edr_core::{
-    append_event_jsonl, Event, EventId, EventSource, Incident, IncidentId, IncidentStatus,
-    LocalStore, RedactionMetadata, Severity, SourceKind,
+    append_event_jsonl, append_incident_jsonl, Event, EventId, EventSource, Incident, IncidentId,
+    IncidentStatus, LocalStore, RedactionMetadata, Severity, SourceKind,
 };
 
 fn temp_path(name: &str) -> PathBuf {
@@ -66,6 +66,29 @@ fn sample_incident(id: &str, event: Event) -> Incident {
     }
 }
 
+fn unredacted_secret_event(id: &str) -> Event {
+    let mut attributes = BTreeMap::new();
+    attributes.insert(
+        "api_token".to_owned(),
+        serde_json::json!("sk_live_fake_token"),
+    );
+    attributes.insert(
+        "path".to_owned(),
+        serde_json::json!("/home/alice/.ssh/id_rsa"),
+    );
+
+    Event {
+        id: EventId::new(id),
+        observed_at_unix_ms: 1_781_440_125_000,
+        severity: Severity::Critical,
+        source: sample_source(),
+        title: "Authorization: Bearer fake-secret-title".to_owned(),
+        details: Some("password=super-secret Authorization: Bearer fake-secret".to_owned()),
+        attributes,
+        redaction: no_redaction(),
+    }
+}
+
 #[test]
 fn sqlite_store_persists_events_and_incidents() {
     let db_path = temp_path("store.sqlite");
@@ -92,6 +115,42 @@ fn sqlite_store_persists_events_and_incidents() {
 
     let incidents = store.list_incidents().expect("incidents list succeeds");
     assert_eq!(incidents, vec![incident]);
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
+fn sqlite_store_redacts_untrusted_event_payloads_before_persistence() {
+    let db_path = temp_path("redacted-store.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let event = unredacted_secret_event("evt_secret_storage");
+    let incident = sample_incident("inc_secret_storage", event);
+
+    store
+        .insert_incident(&incident)
+        .expect("incident with untrusted fields is persisted redacted");
+
+    let loaded_incident = store
+        .get_incident("inc_secret_storage")
+        .expect("incident query succeeds")
+        .expect("incident exists");
+    let loaded_event = store
+        .get_event("evt_secret_storage")
+        .expect("event query succeeds")
+        .expect("event exists");
+    let serialized_incident = serde_json::to_string(&loaded_incident).expect("incident serializes");
+    let serialized_event = serde_json::to_string(&loaded_event).expect("event serializes");
+
+    assert!(!serialized_incident.contains("fake-secret"));
+    assert!(!serialized_incident.contains("super-secret"));
+    assert!(!serialized_incident.contains("sk_live_fake_token"));
+    assert!(!serialized_incident.contains("/home/alice"));
+    assert!(!serialized_event.contains("fake-secret"));
+    assert!(!serialized_event.contains("super-secret"));
+    assert!(!serialized_event.contains("sk_live_fake_token"));
+    assert!(!serialized_event.contains("/home/alice"));
+    assert!(loaded_event.redaction.contains_sensitive_data);
+    assert!(loaded_incident.events[0].redaction.contains_sensitive_data);
 
     fs::remove_file(db_path).expect("temporary db is removed");
 }
@@ -129,6 +188,29 @@ fn jsonl_export_appends_one_event_per_line() {
     let decoded_second: Event = serde_json::from_str(lines[1]).expect("second line is event JSON");
     assert_eq!(decoded_first.id.as_str(), "evt_jsonl_1");
     assert_eq!(decoded_second.id.as_str(), "evt_jsonl_2");
+
+    fs::remove_file(jsonl_path).expect("temporary jsonl is removed");
+}
+
+#[test]
+fn jsonl_export_appends_one_incident_per_line() {
+    let jsonl_path = temp_path("incidents.jsonl");
+    let first = sample_incident("inc_jsonl_1", sample_event("evt_jsonl_incident_1"));
+    let second = sample_incident("inc_jsonl_2", sample_event("evt_jsonl_incident_2"));
+
+    append_incident_jsonl(&jsonl_path, &first).expect("first incident appends");
+    append_incident_jsonl(&jsonl_path, &second).expect("second incident appends");
+
+    let content = fs::read_to_string(&jsonl_path).expect("jsonl file is readable");
+    let lines = content.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+
+    let decoded_first: Incident =
+        serde_json::from_str(lines[0]).expect("first line is incident JSON");
+    let decoded_second: Incident =
+        serde_json::from_str(lines[1]).expect("second line is incident JSON");
+    assert_eq!(decoded_first.id.as_str(), "inc_jsonl_1");
+    assert_eq!(decoded_second.id.as_str(), "inc_jsonl_2");
 
     fs::remove_file(jsonl_path).expect("temporary jsonl is removed");
 }

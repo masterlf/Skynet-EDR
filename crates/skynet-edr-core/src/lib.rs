@@ -854,29 +854,8 @@ impl LocalStore {
     /// Returns [`StorageError`] when JSON serialization or `SQLite` persistence
     /// fails.
     pub fn insert_event(&self, event: &Event) -> StorageResult<()> {
-        let payload = serde_json::to_string(event)?;
-        let severity = serde_json::to_value(event.severity)?;
-        let source_kind = serde_json::to_value(event.source.kind)?;
-        self.connection.execute(
-            "INSERT INTO events (
-                id, observed_at_unix_ms, severity, source_kind, title, payload_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET
-                observed_at_unix_ms = excluded.observed_at_unix_ms,
-                severity = excluded.severity,
-                source_kind = excluded.source_kind,
-                title = excluded.title,
-                payload_json = excluded.payload_json",
-            params![
-                event.id.as_str(),
-                event.observed_at_unix_ms,
-                json_string_value(&severity),
-                json_string_value(&source_kind),
-                event.title,
-                payload,
-            ],
-        )?;
-        Ok(())
+        let event = sanitize_event_for_storage(event);
+        insert_event_on_connection(&self.connection, &event)
     }
 
     /// Insert or replace one redacted incident and its embedded events.
@@ -886,34 +865,13 @@ impl LocalStore {
     /// Returns [`StorageError`] when embedded event persistence, JSON
     /// serialization, or `SQLite` persistence fails.
     pub fn insert_incident(&self, incident: &Incident) -> StorageResult<()> {
+        let incident = sanitize_incident_for_storage(incident);
+        let transaction = self.connection.unchecked_transaction()?;
         for event in &incident.events {
-            self.insert_event(event)?;
+            insert_event_on_connection(&transaction, event)?;
         }
-
-        let payload = serde_json::to_string(incident)?;
-        let severity = serde_json::to_value(incident.severity)?;
-        let status = serde_json::to_value(incident.status)?;
-        self.connection.execute(
-            "INSERT INTO incidents (
-                id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET
-                created_at_unix_ms = excluded.created_at_unix_ms,
-                updated_at_unix_ms = excluded.updated_at_unix_ms,
-                status = excluded.status,
-                severity = excluded.severity,
-                title = excluded.title,
-                payload_json = excluded.payload_json",
-            params![
-                incident.id.as_str(),
-                incident.created_at_unix_ms,
-                incident.updated_at_unix_ms,
-                json_string_value(&status),
-                json_string_value(&severity),
-                incident.title,
-                payload,
-            ],
-        )?;
+        insert_incident_on_connection(&transaction, &incident)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1003,13 +961,139 @@ impl LocalStore {
     }
 }
 
+fn insert_event_on_connection(connection: &Connection, event: &Event) -> StorageResult<()> {
+    let payload = serde_json::to_string(event)?;
+    let severity = serde_json::to_value(event.severity)?;
+    let source_kind = serde_json::to_value(event.source.kind)?;
+    connection.execute(
+        "INSERT INTO events (
+            id, observed_at_unix_ms, severity, source_kind, title, payload_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+            observed_at_unix_ms = excluded.observed_at_unix_ms,
+            severity = excluded.severity,
+            source_kind = excluded.source_kind,
+            title = excluded.title,
+            payload_json = excluded.payload_json",
+        params![
+            event.id.as_str(),
+            event.observed_at_unix_ms,
+            json_string_value(&severity),
+            json_string_value(&source_kind),
+            event.title,
+            payload,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_incident_on_connection(
+    connection: &Connection,
+    incident: &Incident,
+) -> StorageResult<()> {
+    let payload = serde_json::to_string(incident)?;
+    let severity = serde_json::to_value(incident.severity)?;
+    let status = serde_json::to_value(incident.status)?;
+    connection.execute(
+        "INSERT INTO incidents (
+            id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+            created_at_unix_ms = excluded.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms,
+            status = excluded.status,
+            severity = excluded.severity,
+            title = excluded.title,
+            payload_json = excluded.payload_json",
+        params![
+            incident.id.as_str(),
+            incident.created_at_unix_ms,
+            incident.updated_at_unix_ms,
+            json_string_value(&status),
+            json_string_value(&severity),
+            incident.title,
+            payload,
+        ],
+    )?;
+    Ok(())
+}
+
+fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
+    let mut sanitized = incident.clone();
+    let mut fields = sanitized.redaction.redacted_fields.clone();
+
+    sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
+    sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut fields);
+    sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
+    sanitized.events = sanitized
+        .events
+        .iter()
+        .map(sanitize_event_for_storage)
+        .collect();
+    sanitized.redaction = metadata_from_fields(fields);
+    sanitized
+}
+
+fn sanitize_event_for_storage(event: &Event) -> Event {
+    let mut sanitized = event.clone();
+    let mut fields = sanitized.redaction.redacted_fields.clone();
+
+    sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
+    sanitized.details = sanitized
+        .details
+        .as_deref()
+        .map(|details| redact_text_field(details, "details", &mut fields));
+    sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
+
+    let attributes = redact_attributes(&sanitized.attributes);
+    sanitized.attributes = attributes.value;
+    fields.extend(attributes.metadata.redacted_fields);
+    sanitized.redaction = metadata_from_fields(fields);
+    sanitized
+}
+
+fn sanitize_source_for_storage(
+    source: &EventSource,
+    path: &str,
+    fields: &mut Vec<RedactedField>,
+) -> EventSource {
+    EventSource {
+        kind: source.kind,
+        sensor: redact_text_field(&source.sensor, &format!("{path}.sensor"), fields),
+        integration: source.integration.as_deref().map(|integration| {
+            redact_text_field(integration, &format!("{path}.integration"), fields)
+        }),
+    }
+}
+
+fn redact_text_field(text: &str, path: &str, fields: &mut Vec<RedactedField>) -> String {
+    let redacted = redact_text(text);
+    fields.extend(
+        redacted
+            .metadata
+            .redacted_fields
+            .into_iter()
+            .map(|field| RedactedField {
+                path: if field.path == "text" {
+                    path.to_owned()
+                } else {
+                    format!("{path}.{}", field.path)
+                },
+                reason: field.reason,
+                replacement: field.replacement,
+            }),
+    );
+    redacted.value
+}
+
 /// Append one redacted event to a JSONL file.
 ///
 /// # Errors
 ///
 /// Returns [`StorageError`] when JSON serialization or file append fails.
 pub fn append_event_jsonl(path: impl AsRef<Path>, event: &Event) -> StorageResult<()> {
-    append_jsonl(path, event)
+    let event = sanitize_event_for_storage(event);
+    append_jsonl(path, &event)
 }
 
 /// Append one redacted incident to a JSONL file.
@@ -1018,13 +1102,24 @@ pub fn append_event_jsonl(path: impl AsRef<Path>, event: &Event) -> StorageResul
 ///
 /// Returns [`StorageError`] when JSON serialization or file append fails.
 pub fn append_incident_jsonl(path: impl AsRef<Path>, incident: &Incident) -> StorageResult<()> {
-    append_jsonl(path, incident)
+    let incident = sanitize_incident_for_storage(incident);
+    append_jsonl(path, &incident)
 }
 
 fn append_jsonl<T: Serialize>(path: impl AsRef<Path>, value: &T) -> StorageResult<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
+    let mut record = serde_json::to_vec(value)?;
+    record.push(b'\n');
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    let start_len = file.metadata()?.len();
+    if let Err(error) = file.write_all(&record) {
+        let _ = file.set_len(start_len);
+        return Err(StorageError::Io(error));
+    }
     Ok(())
 }
 

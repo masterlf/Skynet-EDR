@@ -2,7 +2,7 @@
 
 use std::{env, fs, process::ExitCode};
 
-use skynet_edr_core::{Incident, LocalStore, ProductInfo};
+use skynet_edr_core::{Event, Incident, LocalStore, ProductInfo};
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec<_>>();
@@ -79,6 +79,43 @@ fn handle_events(args: &[String]) -> Result<(), CliError> {
                 incident.id.as_str(),
                 incident.events.len()
             );
+            Ok(())
+        }
+        Some("list") => {
+            let options = parse_options(&args[3..])?;
+            let db_path = required_option(&options, "--db")?;
+            let store = LocalStore::open(db_path)?;
+            for event in store.list_events()? {
+                print_event_row(&event)?;
+            }
+            Ok(())
+        }
+        Some("show") => {
+            let id = args
+                .get(3)
+                .ok_or_else(|| CliError::Usage("missing event id".to_owned()))?;
+            let options = parse_options(&args[4..])?;
+            let db_path = required_option(&options, "--db")?;
+            let store = LocalStore::open(db_path)?;
+            let event = store
+                .get_event(id)?
+                .ok_or_else(|| CliError::Usage(format!("event not found: {id}")))?;
+            println!("{}", serde_json::to_string_pretty(&event)?);
+            Ok(())
+        }
+        Some("export") => {
+            let options = parse_options(&args[3..])?;
+            let db_path = required_option(&options, "--db")?;
+            let format = required_option(&options, "--format")?;
+            if format != "jsonl" {
+                return Err(CliError::Usage(format!(
+                    "unsupported events export format: {format}"
+                )));
+            }
+            let store = LocalStore::open(db_path)?;
+            for event in store.list_events()? {
+                println!("{}", serde_json::to_string(&event)?);
+            }
             Ok(())
         }
         Some(command) => Err(CliError::Usage(format!(
@@ -180,6 +217,17 @@ fn print_status() {
     println!("{} status: mode={}", info.name, info.run_mode.as_str());
 }
 
+fn print_event_row(event: &Event) -> Result<(), CliError> {
+    let severity = serde_json::to_value(event.severity)?;
+    println!(
+        "{}\t{}\t{}",
+        event.id.as_str(),
+        string_value(&severity),
+        event.title
+    );
+    Ok(())
+}
+
 fn print_help(binary: &str) {
     println!("Usage: {binary} [status|store|events|incidents|--version|--help]");
     println!();
@@ -188,6 +236,10 @@ fn print_help(binary: &str) {
     println!("  store init --db <path>              Initialize local SQLite storage");
     println!("  events ingest --db <path> --incident-json <file>");
     println!("                                      Ingest one incident JSON document and embedded events");
+    println!("  events list --db <path>            List stored events");
+    println!("  events show <id> --db <path>       Print one event as JSON");
+    println!("  events export --db <path> --format jsonl");
+    println!("                                      Export events as one JSON object per line");
     println!("  incidents list --db <path>          List stored incidents");
     println!("  incidents show <id> --db <path>     Print one incident as JSON");
     println!("  incidents export --db <path> --format jsonl");
