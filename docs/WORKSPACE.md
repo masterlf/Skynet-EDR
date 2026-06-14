@@ -1,0 +1,30 @@
+# Rust Workspace
+
+Skynet-EDR starts as a small Rust workspace. The core must remain platform-independent; OS-specific collectors will be isolated later.
+
+## Crates
+
+| Crate | Type | Purpose |
+|---|---|---|
+| `skynet-edr-core` | library | Shared product metadata and future platform-independent event/rule/incident primitives. |
+| `skynet-edr-cli` | binary | Operator CLI. Current skeleton supports `status`, `--help`, and `--version`. |
+| `skynet-edr-daemon` | binary | Future long-running runtime monitor. Current skeleton exposes safe status only and starts no privileged sensors. |
+| `skynet-edr-mcp` | library | Future read-only MCP integration for Hermes visibility. Current skeleton defines read-only tool names and status metadata. |
+
+## Development commands
+
+Run before every PR:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+## Security constraints
+
+- No `unsafe` code.
+- No real external calls in tests.
+- No privileged sensor startup in skeleton binaries.
+- MCP starts read-only; response actions are future opt-in work.
+- Platform-specific code must not enter `skynet-edr-core` directly.

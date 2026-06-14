@@ -1,0 +1,18 @@
+[package]
+name = "skynet-edr-daemon"
+description = "Daemon entry point for Skynet-EDR runtime monitoring."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "skynet-edr-daemon"
+path = "src/main.rs"
+
+[dependencies]
+skynet-edr-core = { version = "0.1.0", path = "../skynet-edr-core" }
+
+[lints]
+workspace = true

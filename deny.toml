@@ -1,0 +1,17 @@
+# cargo-deny policy for the initial Rust workspace.
+# Keep this intentionally strict: dependencies must be reviewed and licenses must
+# be explicitly allowed before they enter a security product.
+
+[licenses]
+allow = [
+    "Apache-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
