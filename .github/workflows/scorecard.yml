@@ -22,7 +22,9 @@ jobs:
         with:
           results_file: results.sarif
           results_format: sarif
-          publish_results: true
+          # Publishing to the Scorecard webapp has stricter workflow permission
+          # requirements and failed while SARIF upload is the useful repo signal.
+          publish_results: false
       - name: Upload SARIF results
         uses: github/codeql-action/upload-sarif@v3
         with:
