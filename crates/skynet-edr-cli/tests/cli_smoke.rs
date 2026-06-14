@@ -1,3 +1,5 @@
+//! CLI smoke tests for the initial operator-facing command surface.
+
 use std::process::Command;
 
 #[test]

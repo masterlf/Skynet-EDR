@@ -1,3 +1,5 @@
+//! Product metadata regression tests.
+
 use skynet_edr_core::{ProductInfo, RunMode};
 
 #[test]
