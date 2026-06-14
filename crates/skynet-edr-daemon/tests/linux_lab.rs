@@ -66,3 +66,57 @@ fn privileged_sensor_start_is_rejected_until_explicit_future_design() {
         .to_string()
         .contains("privileged sensor start is not implemented"));
 }
+
+#[test]
+fn lab_plan_rejects_external_sink_labels() {
+    let plan = LinuxLabPlan {
+        disposable_vm_label: Some("frederic-lab-vm-01".to_owned()),
+        controlled_sink_label: Some("https://webhook.example/collect".to_owned()),
+        fake_honeytoken_labels: vec!["fake_aws_key".to_owned()],
+        manual_approval_reference: Some("discord-thread-approval".to_owned()),
+        allow_privileged_sensor_start: false,
+    };
+
+    let error = validate_linux_lab_plan(&plan).expect_err("external sink labels are unsafe");
+
+    assert!(error
+        .to_string()
+        .contains("loopback or controlled sink label"));
+}
+
+#[test]
+fn lab_plan_rejects_realistic_honeytoken_labels_without_fake_marker() {
+    let plan = LinuxLabPlan {
+        disposable_vm_label: Some("frederic-lab-vm-01".to_owned()),
+        controlled_sink_label: Some("127.0.0.1:18080".to_owned()),
+        fake_honeytoken_labels: vec!["AWS_ACCESS_KEY_ID".to_owned()],
+        manual_approval_reference: Some("discord-thread-approval".to_owned()),
+        allow_privileged_sensor_start: false,
+    };
+
+    let error = validate_linux_lab_plan(&plan).expect_err("fake marker is mandatory");
+
+    assert!(error
+        .to_string()
+        .contains("fake honeytoken labels must be obviously fake"));
+}
+
+#[test]
+fn rendered_lab_workflow_remains_non_executable_even_with_labels() {
+    let plan = LinuxLabPlan {
+        disposable_vm_label: Some("frederic-lab-vm-01".to_owned()),
+        controlled_sink_label: Some("loopback-sink-127.0.0.1".to_owned()),
+        fake_honeytoken_labels: vec!["fake_aws_key".to_owned()],
+        manual_approval_reference: Some("discord-thread-approval".to_owned()),
+        allow_privileged_sensor_start: false,
+    };
+
+    let workflow = build_manual_linux_lab_workflow(&plan).expect("workflow renders");
+
+    for forbidden in ["sudo ", "curl ", "http://", "https://"] {
+        assert!(
+            !workflow.contains(forbidden),
+            "workflow must not contain executable fragment: {forbidden}"
+        );
+    }
+}

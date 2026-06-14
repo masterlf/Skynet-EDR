@@ -65,6 +65,8 @@ pub fn validate_linux_lab_plan(plan: &LinuxLabPlan) -> Result<(), LinuxLabPlanEr
     }
     if blank(plan.controlled_sink_label.as_deref()) {
         missing_controls.push("controlled sink");
+    } else if !is_controlled_sink_label(plan.controlled_sink_label.as_deref().unwrap_or_default()) {
+        missing_controls.push("loopback or controlled sink label");
     }
     if plan.fake_honeytoken_labels.is_empty()
         || plan
@@ -73,6 +75,12 @@ pub fn validate_linux_lab_plan(plan: &LinuxLabPlan) -> Result<(), LinuxLabPlanEr
             .any(|label| label.trim().is_empty())
     {
         missing_controls.push("fake honeytokens");
+    } else if plan
+        .fake_honeytoken_labels
+        .iter()
+        .any(|label| !is_obviously_fake_honeytoken_label(label))
+    {
+        missing_controls.push("fake honeytoken labels must be obviously fake");
     }
     if blank(plan.manual_approval_reference.as_deref()) {
         missing_controls.push("manual approval");
@@ -124,6 +132,23 @@ pub fn build_manual_linux_lab_workflow(plan: &LinuxLabPlan) -> Result<String, Li
 
 fn blank(value: Option<&str>) -> bool {
     value.map_or(true, |value| value.trim().is_empty())
+}
+
+fn is_controlled_sink_label(label: &str) -> bool {
+    let lower = label.trim().to_ascii_lowercase();
+    !lower.contains("://")
+        && !lower.contains("webhook")
+        && !lower.contains("discord.com")
+        && !lower.contains("api.telegram.org")
+        && (lower.contains("127.0.0.1")
+            || lower.contains("localhost")
+            || lower.contains("loopback")
+            || lower.contains("sink"))
+}
+
+fn is_obviously_fake_honeytoken_label(label: &str) -> bool {
+    let lower = label.trim().to_ascii_lowercase();
+    lower.contains("fake") || lower.contains("honeytoken") || lower.contains("lab")
 }
 
 /// Root-scoped configuration for a passive Linux fixture scan.
