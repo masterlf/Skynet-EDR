@@ -57,9 +57,24 @@ The first research/MVP scope is detection and alerting for:
 
 ## Status
 
-This repository is currently in the concept and documentation phase.
+This repository now has an initial Rust workspace skeleton for the platform-independent core and CLI entry point.
 
-No production code exists yet. The next step is to define the MVP sensor model, event schema, detection rules, and Hermes integration points.
+Current crates:
+
+- `skynet-edr-core`: shared product metadata and core runtime primitives.
+- `skynet-edr-cli`: `skynet-edr` command-line entry point with an initial `status` command.
+
+The next implementation steps are to expand the core event schema, Hermes configuration scanners, detection rules, and storage model.
+
+## Development
+
+Rust quality gate:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
 
 ## Documentation
 
