@@ -1,0 +1,50 @@
+name: CodeQL
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '33 3 * * 2'
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL analyze
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, python]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect language files
+        id: detect
+        shell: bash
+        run: |
+          case "${{ matrix.language }}" in
+            rust)
+              if find . -name '*.rs' | grep -q .; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+              ;;
+            python)
+              if find . -name '*.py' | grep -q .; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+              ;;
+          esac
+      - name: Initialize CodeQL
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+      - name: Autobuild
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/autobuild@v3
+      - name: Perform CodeQL Analysis
+        if: steps.detect.outputs.present == 'true'
+        uses: github/codeql-action/analyze@v3
+      - name: No files for language yet
+        if: steps.detect.outputs.present != 'true'
+        run: echo "No ${{ matrix.language }} files yet; CodeQL will activate when code is added."

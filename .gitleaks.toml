@@ -1,0 +1,12 @@
+title = "Skynet-EDR Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow obvious fake placeholders only"
+regexes = [
+  "(?i)example(_|-)?(api|secret|token|key)",
+  "(?i)dummy(_|-)?(api|secret|token|key)",
+  "(?i)REPLACE_ME"
+]
