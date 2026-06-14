@@ -243,7 +243,7 @@ fn sample_mcp_event(id: &str, rule_id: &str) -> Event {
 fn sample_config_drift_event(id: &str) -> Event {
     let mut event = sample_mcp_event(id, "EDR-CONFIG-001");
     event.severity = Severity::High;
-    event.title = "Agent configuration drift detected".to_owned();
+    "Agent configuration drift detected".clone_into(&mut event.title);
     event
         .attributes
         .insert("drift_kind".to_owned(), serde_json::json!("changed"));
