@@ -73,7 +73,7 @@ pub struct EventSource {
     pub kind: SourceKind,
     /// Sensor, detector, or component name that produced the signal.
     pub sensor: String,
-    /// Optional upstream integration name, such as an MCP client or SaaS source.
+    /// Optional upstream integration name, such as an MCP client or `SaaS` source.
     pub integration: Option<String>,
 }
 
