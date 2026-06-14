@@ -12,7 +12,7 @@ name = "skynet-edr"
 path = "src/main.rs"
 
 [dependencies]
-skynet-edr-core = { path = "../skynet-edr-core" }
+skynet-edr-core = { version = "0.1.0", path = "../skynet-edr-core" }
 
 [lints]
 workspace = true
