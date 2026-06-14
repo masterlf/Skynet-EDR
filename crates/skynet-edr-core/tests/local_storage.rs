@@ -89,6 +89,19 @@ fn unredacted_secret_event(id: &str) -> Event {
     }
 }
 
+fn event_with_hostile_redaction_metadata(id: &str) -> Event {
+    let mut event = sample_event(id);
+    event.redaction = RedactionMetadata {
+        contains_sensitive_data: true,
+        redacted_fields: vec![skynet_edr_core::RedactedField {
+            path: "metadata.password".to_owned(),
+            reason: skynet_edr_core::RedactionReason::Secret,
+            replacement: "metadata-secret-value".to_owned(),
+        }],
+    };
+    event
+}
+
 #[test]
 fn sqlite_store_persists_events_and_incidents() {
     let db_path = temp_path("store.sqlite");
@@ -151,6 +164,31 @@ fn sqlite_store_redacts_untrusted_event_payloads_before_persistence() {
     assert!(!serialized_event.contains("/home/alice"));
     assert!(loaded_event.redaction.contains_sensitive_data);
     assert!(loaded_incident.events[0].redaction.contains_sensitive_data);
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
+fn sqlite_store_normalizes_hostile_redaction_metadata_before_persistence() {
+    let db_path = temp_path("metadata-redaction.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let incident = sample_incident(
+        "inc_metadata_redaction",
+        event_with_hostile_redaction_metadata("evt_metadata_redaction"),
+    );
+
+    store
+        .insert_incident(&incident)
+        .expect("incident with hostile metadata is persisted safely");
+
+    let loaded_incident = store
+        .get_incident("inc_metadata_redaction")
+        .expect("incident query succeeds")
+        .expect("incident exists");
+    let serialized = serde_json::to_string(&loaded_incident).expect("incident serializes");
+
+    assert!(!serialized.contains("metadata-secret-value"));
+    assert!(serialized.contains("[REDACTED:secret]"));
 
     fs::remove_file(db_path).expect("temporary db is removed");
 }

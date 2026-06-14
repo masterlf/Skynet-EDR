@@ -1020,7 +1020,7 @@ fn insert_incident_on_connection(
 
 fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
     let mut sanitized = incident.clone();
-    let mut fields = sanitized.redaction.redacted_fields.clone();
+    let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
 
     sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
     sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut fields);
@@ -1036,7 +1036,7 @@ fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
 
 fn sanitize_event_for_storage(event: &Event) -> Event {
     let mut sanitized = event.clone();
-    let mut fields = sanitized.redaction.redacted_fields.clone();
+    let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
 
     sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
     sanitized.details = sanitized
@@ -1050,6 +1050,26 @@ fn sanitize_event_for_storage(event: &Event) -> Event {
     fields.extend(attributes.metadata.redacted_fields);
     sanitized.redaction = metadata_from_fields(fields);
     sanitized
+}
+
+fn normalize_redaction_fields(fields: &[RedactedField]) -> Vec<RedactedField> {
+    fields
+        .iter()
+        .map(|field| RedactedField {
+            path: redact_text(&field.path).value,
+            reason: field.reason,
+            replacement: replacement_for_reason(field.reason).to_owned(),
+        })
+        .collect()
+}
+
+fn replacement_for_reason(reason: RedactionReason) -> &'static str {
+    match reason {
+        RedactionReason::Secret => SECRET_REPLACEMENT,
+        RedactionReason::LocalContext => LOCAL_CONTEXT_REPLACEMENT,
+        RedactionReason::PersonalData => "[REDACTED:personal_data]",
+        RedactionReason::Policy => "[REDACTED:policy]",
+    }
 }
 
 fn sanitize_source_for_storage(
