@@ -18,6 +18,139 @@ use skynet_edr_core::{
 const SENSOR_NAME: &str = "linux-passive-fixture";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 
+/// Manual Linux lab plan for future privileged sensor validation.
+///
+/// The current product deliberately does not start privileged sensors. This
+/// structure records the safety preconditions that must be true before a human
+/// operator runs disposable lab workflows outside CI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinuxLabPlan {
+    /// Human-provided disposable VM label or inventory reference.
+    pub disposable_vm_label: Option<String>,
+    /// Human-provided controlled sink label for network-egress tests.
+    pub controlled_sink_label: Option<String>,
+    /// Fake honeytoken names only; never real secrets.
+    pub fake_honeytoken_labels: Vec<String>,
+    /// Manual approval reference, such as a ticket or chat thread.
+    pub manual_approval_reference: Option<String>,
+    /// Reserved future flag. Must remain false until real privileged sensors exist.
+    pub allow_privileged_sensor_start: bool,
+}
+
+/// Linux lab plan validation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxLabPlanError {
+    missing_controls: Vec<&'static str>,
+}
+
+impl std::fmt::Display for LinuxLabPlanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Linux lab plan is not safe to run: ")?;
+        write!(formatter, "{}", self.missing_controls.join(", "))
+    }
+}
+
+impl std::error::Error for LinuxLabPlanError {}
+
+/// Validate the manual Linux lab plan fail-closed.
+///
+/// # Errors
+///
+/// Returns [`LinuxLabPlanError`] when any required human-provided safety control
+/// is absent, or when privileged sensor startup is requested before it exists.
+pub fn validate_linux_lab_plan(plan: &LinuxLabPlan) -> Result<(), LinuxLabPlanError> {
+    let mut missing_controls = Vec::new();
+    if blank(plan.disposable_vm_label.as_deref()) {
+        missing_controls.push("disposable VM details");
+    }
+    if blank(plan.controlled_sink_label.as_deref()) {
+        missing_controls.push("controlled sink");
+    }
+    if plan.fake_honeytoken_labels.is_empty()
+        || plan
+            .fake_honeytoken_labels
+            .iter()
+            .any(|label| label.trim().is_empty())
+    {
+        missing_controls.push("fake honeytokens");
+    } else if plan
+        .fake_honeytoken_labels
+        .iter()
+        .any(|label| !looks_fake_honeytoken_label(label))
+    {
+        missing_controls.push("fake honeytoken labels");
+    }
+    if let Some(sink) = plan.controlled_sink_label.as_deref() {
+        if !looks_controlled_sink_label(sink) {
+            missing_controls.push("controlled sink must be local or allowlisted");
+        }
+    }
+    if blank(plan.manual_approval_reference.as_deref()) {
+        missing_controls.push("manual approval");
+    }
+    if plan.allow_privileged_sensor_start {
+        missing_controls.push("privileged sensor start is not implemented");
+    }
+
+    if missing_controls.is_empty() {
+        Ok(())
+    } else {
+        Err(LinuxLabPlanError { missing_controls })
+    }
+}
+
+/// Build a manual-only Linux lab workflow summary from a validated plan.
+///
+/// The rendered text is intentionally non-executable: it uses checklist language
+/// and labels, not real shell commands, endpoints, credentials, or privileged
+/// invocations.
+///
+/// # Errors
+///
+/// Returns [`LinuxLabPlanError`] if the plan is missing safety controls.
+pub fn build_manual_linux_lab_workflow(plan: &LinuxLabPlan) -> Result<String, LinuxLabPlanError> {
+    validate_linux_lab_plan(plan)?;
+    let vm = plan.disposable_vm_label.as_deref().unwrap_or_default();
+    let sink = plan.controlled_sink_label.as_deref().unwrap_or_default();
+    let approval = plan
+        .manual_approval_reference
+        .as_deref()
+        .unwrap_or_default();
+    let honeytokens = plan.fake_honeytoken_labels.join(", ");
+
+    Ok(format!(
+        "manual-only Linux lab workflow\n\
+         approval: {approval}\n\
+         disposable_vm: {vm}\n\
+         controlled_sink: {sink}\n\
+         fake_honeytokens: {honeytokens}\n\
+         steps:\n\
+         1. Snapshot or rebuild the disposable VM.\n\
+         2. Place fake honeytokens only; never copy personal or production secrets.\n\
+         3. Point any egress simulation at the controlled sink label only.\n\
+         4. Run passive fixture scanner first and record redacted events.\n\
+         5. Stop and preserve evidence before any privileged sensor experiment."
+    ))
+}
+
+fn blank(value: Option<&str>) -> bool {
+    value.map_or(true, |value| value.trim().is_empty())
+}
+
+fn looks_fake_honeytoken_label(label: &str) -> bool {
+    let lower = label.to_ascii_lowercase();
+    lower.contains("fake") || lower.contains("honeytoken")
+}
+
+fn looks_controlled_sink_label(label: &str) -> bool {
+    let lower = label.trim().to_ascii_lowercase();
+    lower.contains("127.0.0.1")
+        || lower.contains("localhost")
+        || lower.contains("loopback")
+        || lower.contains("sinkhole")
+        || lower.contains("allowlisted")
+}
+
 /// Root-scoped configuration for a passive Linux fixture scan.
 #[derive(Debug, Clone)]
 pub struct LinuxPassiveScanConfig {
