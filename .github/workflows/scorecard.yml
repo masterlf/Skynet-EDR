@@ -1,31 +1,28 @@
 name: OpenSSF Scorecard
-
 on:
   branch_protection_rule:
   schedule:
     - cron: '45 5 * * 1'
   push:
     branches: [main]
-
 permissions:
   contents: read
-  security-events: write
-  id-token: write
-
 jobs:
   scorecard:
     name: OpenSSF Scorecard
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Run analysis
-        uses: ossf/scorecard-action@v2.4.0
+        uses: ossf/scorecard-action@ff5dd8929f96a8a4dc67d13f32b8c75057829621 # v2.4.0
         with:
           results_file: results.sarif
           results_format: sarif
-          # Publishing to the Scorecard webapp has stricter workflow permission
-          # requirements and failed while SARIF upload is the useful repo signal.
           publish_results: false
-      - name: Upload SARIF results
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
+      - name: Keep Scorecard as CI signal only
+        run: |
+          echo "Scorecard SARIF upload is intentionally disabled."
+          echo "Reason: Scorecard posture findings were flooding code scanning alerts."
+          echo "Use this workflow log as the posture report; keep CodeQL/Semgrep/Trivy for code scanning."

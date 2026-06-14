@@ -1,31 +1,28 @@
 name: CI
-
 on:
   pull_request:
   push:
     branches: [main]
-
 permissions:
   contents: read
-
 jobs:
   rust:
     name: Rust quality gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Detect Rust workspace
         id: rust
         run: |
           if [ -f Cargo.toml ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
       - name: Install Rust
         if: steps.rust.outputs.present == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
       - name: Cache cargo
         if: steps.rust.outputs.present == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - name: Format check
         if: steps.rust.outputs.present == 'true'
         run: cargo fmt --all -- --check
@@ -38,36 +35,21 @@ jobs:
       - name: No Rust workspace yet
         if: steps.rust.outputs.present != 'true'
         run: echo "No Cargo.toml yet; Rust CI will activate when the workspace is added."
-
   python:
     name: Python integration quality gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Detect Python integration
         id: py
         run: |
           if find integrations -name 'pyproject.toml' -o -name 'requirements.txt' 2>/dev/null | grep -q .; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
-      - name: Set up Python
-        if: steps.py.outputs.present == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install tools
-        if: steps.py.outputs.present == 'true'
-        run: python -m pip install --upgrade pip pytest ruff bandit
-      - name: Ruff lint
-        if: steps.py.outputs.present == 'true'
-        run: ruff check integrations
-      - name: Ruff format check
-        if: steps.py.outputs.present == 'true'
-        run: ruff format --check integrations
-      - name: Bandit
-        if: steps.py.outputs.present == 'true'
-        run: bandit -r integrations -q
-      - name: Pytest
-        if: steps.py.outputs.present == 'true'
-        run: python -m pytest integrations
       - name: No Python integration yet
         if: steps.py.outputs.present != 'true'
         run: echo "No Python integration package yet; Python CI will activate when added."
+      - name: Python checks deferred
+        if: steps.py.outputs.present == 'true'
+        run: |
+          echo "Python integration detected."
+          echo "Add a pinned Python toolchain workflow with hashed requirements before enabling checks."
+          exit 1
