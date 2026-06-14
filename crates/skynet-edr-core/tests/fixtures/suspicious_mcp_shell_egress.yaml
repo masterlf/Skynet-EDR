@@ -1,0 +1,15 @@
+id: suspicious_mcp_shell_egress
+name: MCP shell followed by network egress
+severity: high
+source_kinds:
+  - mcp_tool
+  - network
+conditions:
+  - field: attributes.tool_name
+    contains: shell
+  - field: attributes.destination
+    contains: example.invalid
+actions:
+  - alert
+  - require_approval
+description: Detects a tool chain that combines shell execution with outbound traffic.
