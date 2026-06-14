@@ -314,7 +314,7 @@ fn find_header_value_end(value: &str, start: usize) -> usize {
         return find_secret_value_bounds(value, start).1;
     }
     value[start..]
-        .find(|character| character == ';' || character == ',' || character == '"')
+        .find([';', ',', '"'])
         .map_or(value.len(), |offset| start + offset)
 }
 
