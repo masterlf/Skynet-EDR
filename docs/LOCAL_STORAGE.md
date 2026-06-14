@@ -19,13 +19,33 @@ skynet-edr store init --db ./skynet-edr.sqlite
 
 ## Ingesting incident JSON
 
-The current CLI ingests one incident JSON document and persists both the incident and its embedded events. Inputs are expected to conform to the platform-independent `Incident` schema and must already be redacted before storage.
+The current CLI ingests one incident JSON document and persists both the incident and its embedded events. Inputs are expected to conform to the platform-independent `Incident` schema. The local storage boundary re-applies the core redaction engine before writing SQLite rows or producing JSONL so caller mistakes do not persist obvious secrets. This is a safety net, not permission to send raw secrets casually.
 
 ```bash
 skynet-edr events ingest --db ./skynet-edr.sqlite --incident-json ./incident.json
 ```
 
 This command is intentionally explicit about `--incident-json`; future sensor adapters can add streaming event ingestion without changing the incident schema.
+
+## Event inspection commands
+
+List stored events:
+
+```bash
+skynet-edr events list --db ./skynet-edr.sqlite
+```
+
+Show one event as pretty JSON:
+
+```bash
+skynet-edr events show evt_123 --db ./skynet-edr.sqlite
+```
+
+Export all stored events as JSONL:
+
+```bash
+skynet-edr events export --db ./skynet-edr.sqlite --format jsonl
+```
 
 ## Incident triage commands
 
