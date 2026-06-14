@@ -516,6 +516,75 @@ pub enum DetectionAction {
     PauseAutomation,
 }
 
+/// Response action recorded on an emitted alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseAction {
+    /// Alert only; no runtime behavior changed.
+    EmitAlert,
+    /// Stop before a risky operation until an operator explicitly approves it.
+    RequireApproval,
+    /// Pause the related automation while an operator investigates.
+    PauseAutomation,
+    /// Block a suspected exfiltration network destination.
+    BlockNetworkEgress,
+}
+
+/// Approval boundary that constrains which response actions may run automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalBoundary {
+    /// Passive mode: alerting is allowed; containment or workflow changes are not.
+    PassiveOnly,
+    /// A human operator must approve disruptive or containment actions.
+    OperatorRequired,
+    /// Containment actions are pre-approved by local policy for high-confidence cases.
+    PreApprovedContainment,
+}
+
+impl ApprovalBoundary {
+    /// Return whether this boundary permits a response action.
+    #[must_use]
+    pub const fn allows(self, action: ResponseAction) -> bool {
+        matches!(
+            (self, action),
+            (
+                _,
+                ResponseAction::EmitAlert | ResponseAction::RequireApproval
+            ) | (Self::OperatorRequired, ResponseAction::PauseAutomation)
+                | (
+                    Self::PreApprovedContainment,
+                    ResponseAction::PauseAutomation | ResponseAction::BlockNetworkEgress,
+                )
+        )
+    }
+}
+
+/// Destination selected for alert delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AlertDestination {
+    /// Write the alert to stdout for CLI or daemon log forwarding.
+    Stdout,
+    /// Append the alert as one JSON object per line.
+    JsonlFile {
+        /// Relative or absolute JSONL output path supplied by configuration.
+        path: String,
+    },
+    /// Send the alert to a configured HTTPS webhook.
+    Webhook {
+        /// Operator-facing destination name.
+        name: String,
+        /// Webhook URL; rendered alerts redact embedded credentials.
+        url: String,
+    },
+    /// Send the alert by email through a configured mail backend.
+    Email {
+        /// Recipient address or alias.
+        to: String,
+    },
+}
+
 /// Stable platform-independent detection rule identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -532,6 +601,160 @@ impl DetectionRuleId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Stable platform-independent alert identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AlertId(String);
+
+impl AlertId {
+    /// Construct an alert identifier from a stable string.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the identifier string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Operator-facing alert assembled from a rule match or correlated incident.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Alert {
+    /// Stable alert identifier.
+    pub id: AlertId,
+    /// Alert creation timestamp in Unix epoch milliseconds.
+    pub created_at_unix_ms: u64,
+    /// Alert severity.
+    pub severity: Severity,
+    /// Detection rule that triggered the alert.
+    pub rule_id: DetectionRuleId,
+    /// Primary source or detector that produced the alert.
+    pub source: EventSource,
+    /// Originating session, profile, tenant, or integration context.
+    pub origin: String,
+    /// Redacted operator-facing evidence snippet.
+    pub evidence: String,
+    /// Risky action attempted by the agent or tool, if known.
+    pub attempted_action: Option<String>,
+    /// Affected files, credentials, hosts, tenants, or other assets.
+    pub affected_assets: Vec<String>,
+    /// Network destination involved in the alert, if known.
+    pub network_destination: Option<String>,
+    /// Response action already taken or requested.
+    pub action_taken: ResponseAction,
+    /// Recommended operator response steps.
+    pub recommended_next_steps: Vec<String>,
+    /// Delivery destinations selected for this alert.
+    pub destinations: Vec<AlertDestination>,
+    /// Approval boundary applied to the response action.
+    pub approval_boundary: ApprovalBoundary,
+    /// Redaction decisions applied before alert rendering or delivery.
+    pub redaction: RedactionMetadata,
+}
+
+/// Alert rendering error.
+#[derive(Debug)]
+pub enum AlertRenderError {
+    /// JSON serialization failed while rendering a sanitized alert.
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for AlertRenderError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json(error) => write!(formatter, "alert rendering JSON error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for AlertRenderError {}
+
+impl From<serde_json::Error> for AlertRenderError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+/// Render an alert as JSON after applying server-side redaction.
+///
+/// # Errors
+///
+/// Returns [`AlertRenderError`] if the sanitized alert cannot be serialized.
+pub fn render_alert_json(alert: &Alert) -> Result<Redacted<String>, AlertRenderError> {
+    let alert = sanitize_alert_for_rendering(alert);
+    let metadata = alert.redaction.clone();
+    let value = serde_json::to_string(&alert)?;
+    Ok(Redacted { value, metadata })
+}
+
+fn sanitize_alert_for_rendering(alert: &Alert) -> Alert {
+    let mut sanitized = alert.clone();
+    let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
+
+    sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
+    sanitized.origin = redact_text_field(&sanitized.origin, "origin", &mut fields);
+    sanitized.evidence = redact_text_field(&sanitized.evidence, "evidence", &mut fields);
+    sanitized.attempted_action = sanitized
+        .attempted_action
+        .as_deref()
+        .map(|action| redact_text_field(action, "attempted_action", &mut fields));
+    sanitized.affected_assets = sanitized
+        .affected_assets
+        .iter()
+        .enumerate()
+        .map(|(index, asset)| {
+            redact_text_field(asset, &format!("affected_assets[{index}]"), &mut fields)
+        })
+        .collect();
+    sanitized.network_destination = sanitized
+        .network_destination
+        .as_deref()
+        .map(|destination| redact_text_field(destination, "network_destination", &mut fields));
+    sanitized.recommended_next_steps = sanitized
+        .recommended_next_steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            redact_text_field(
+                step,
+                &format!("recommended_next_steps[{index}]"),
+                &mut fields,
+            )
+        })
+        .collect();
+    sanitized.destinations = sanitized
+        .destinations
+        .iter()
+        .enumerate()
+        .map(|(index, destination)| sanitize_alert_destination(destination, index, &mut fields))
+        .collect();
+    sanitized.redaction = metadata_from_fields(fields);
+    sanitized
+}
+
+fn sanitize_alert_destination(
+    destination: &AlertDestination,
+    index: usize,
+    fields: &mut Vec<RedactedField>,
+) -> AlertDestination {
+    match destination {
+        AlertDestination::Stdout => AlertDestination::Stdout,
+        AlertDestination::JsonlFile { path } => AlertDestination::JsonlFile {
+            path: redact_text_field(path, &format!("destinations[{index}].path"), fields),
+        },
+        AlertDestination::Webhook { name, url } => AlertDestination::Webhook {
+            name: redact_text_field(name, &format!("destinations[{index}].name"), fields),
+            url: redact_text_field(url, &format!("destinations[{index}].url"), fields),
+        },
+        AlertDestination::Email { to } => AlertDestination::Email {
+            to: redact_text_field(to, &format!("destinations[{index}].to"), fields),
+        },
     }
 }
 

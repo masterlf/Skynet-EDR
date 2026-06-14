@@ -111,3 +111,13 @@ Each alert should include:
 - network destination if any
 - action taken
 - recommended containment
+
+The platform-independent core alert model tracks the initial response surface:
+
+- destinations: `stdout`, `jsonl_file`, `webhook`, and `email`
+- response actions: `emit_alert`, `require_approval`, `pause_automation`, and `block_network_egress`
+- approval boundaries: `passive_only`, `operator_required`, and `pre_approved_containment`
+
+Approval boundaries are deliberately conservative. `passive_only` may only alert or require approval; it cannot pause automation or block egress. `operator_required` may pause automation but still cannot block network egress without an explicit containment boundary. `pre_approved_containment` is the only boundary that allows automatic network blocking.
+
+Rendered alerts must be server-side redacted before any destination delivery. Evidence, source metadata, affected assets, recommended steps, and destination configuration are all treated as hostile/sensitive render inputs; webhook URLs with embedded tokens and local filesystem paths must not leak into rendered JSON.
