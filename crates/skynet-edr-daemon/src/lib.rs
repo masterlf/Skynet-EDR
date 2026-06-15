@@ -26,7 +26,7 @@ const MAX_FILE_BYTES: u64 = 256 * 1024;
 pub struct HttpApiConfig {
     /// Address the local API should bind to. Must be loopback.
     pub bind_addr: SocketAddr,
-    /// Optional path to the local SQLite store.
+    /// Optional path to the local `SQLite` store.
     pub store_path: Option<PathBuf>,
     /// Reserved future flag. Must remain false for the read-only API.
     pub allow_mutations: bool,
