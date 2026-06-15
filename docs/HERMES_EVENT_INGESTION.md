@@ -2,6 +2,8 @@
 
 Phase 12 adds an ingestion and MVP detection boundary for already-recorded Hermes agent traces. It converts session/tool-call records into normalized Skynet-EDR events, redacts them before persistence, and runs the built-in `EDR-EXFIL-001` correlation rule to open an incident when fake secret access is followed by network egress.
 
+For new Hermes/OpenClaw adapters, prefer the canonical event envelope documented in [Canonical Event Schema](EVENT_SCHEMA.md). The legacy Hermes trace shape below remains supported as an MVP compatibility input, but live v0.2 integrations should emit `skynet.event.v0` events directly where possible.
+
 ## Security boundary
 
 - Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.
