@@ -3,7 +3,7 @@ set -eu
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--prefix /usr|/usr/local] [--source target/release] [--no-systemd]
+Usage: install.sh [--prefix /usr|/usr/local] [--source <bin-dir>] [--no-systemd]
 
 Installs Skynet-EDR binaries and Linux service templates from a source checkout
 or release tarball. Run as root. Existing /etc/skynet-edr/config.toml is
@@ -12,7 +12,7 @@ USAGE
 }
 
 PREFIX=/usr/local
-SOURCE=target/release
+SOURCE=
 INSTALL_SYSTEMD=1
 
 while [ "$#" -gt 0 ]; do
@@ -62,6 +62,17 @@ if [ -f "$SCRIPT_DIR/SHA256SUMS" ] && command -v sha256sum >/dev/null 2>&1; then
   (cd "$SCRIPT_DIR" && sha256sum -c SHA256SUMS)
 fi
 
+if [ -z "$SOURCE" ]; then
+  if [ -x "$SCRIPT_DIR/bin/skynet-edr" ] && [ -x "$SCRIPT_DIR/bin/skynet-edr-daemon" ]; then
+    SOURCE="$SCRIPT_DIR/bin"
+  elif [ -x "target/release/skynet-edr" ] && [ -x "target/release/skynet-edr-daemon" ]; then
+    SOURCE=target/release
+  else
+    echo "could not auto-detect built binaries; pass --source <bin-dir>" >&2
+    exit 1
+  fi
+fi
+
 if ! getent group skynet-edr >/dev/null 2>&1; then
   groupadd --system skynet-edr
 fi
@@ -94,4 +105,4 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
 fi
 
 echo "Skynet-EDR installed. Review /etc/skynet-edr/config.toml before enabling the service."
-echo "Current daemon service is forward-looking until persistent run mode is implemented."
+echo "The packaged service starts the passive daemon path; privileged sensors remain disabled."
