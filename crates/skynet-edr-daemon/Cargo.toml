@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 skynet-edr-core = { version = "0.1.0", path = "../skynet-edr-core" }
+skynet-edr-mcp = { version = "0.1.0", path = "../skynet-edr-mcp" }
 serde_json = "1.0"
 
 [lints]
