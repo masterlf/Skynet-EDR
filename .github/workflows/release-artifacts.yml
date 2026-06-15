@@ -1,0 +1,68 @@
+name: Release artifacts
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  linux-packages:
+    name: Build Linux package artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install package inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm zstd
+      - name: Install nfpm
+        env:
+          NFPM_VERSION: 2.46.3
+        run: |
+          curl -L --fail --proto '=https' --tlsv1.2 \
+            -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -C /tmp -xzf /tmp/nfpm.tar.gz nfpm
+          sudo install -m 0755 /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+      - name: Validate packaging baseline
+        run: packaging/scripts/validate-packaging.sh
+      - name: Build package artifacts
+        run: |
+          rm -rf dist
+          packaging/scripts/build-tarball.sh
+          packaging/scripts/build-packages.sh
+      - name: Inspect package contents
+        run: |
+          set -eu
+          VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "skynet-edr-cli"))')
+          TARGET=$(rustc -vV | awk '/host:/ {print $2}')
+          test -s "dist/skynet-edr-${VERSION}-${TARGET}.tar.gz"
+          test -s "dist/skynet-edr_${VERSION}_amd64.deb"
+          test -s "dist/skynet-edr-${VERSION}-1.amd64.rpm"
+          test -s "dist/skynet-edr-${VERSION}-1-amd64.pkg.tar.zst"
+          tar -tf "dist/skynet-edr-${VERSION}-${TARGET}.tar.gz" | grep -q 'bin/skynet-edr$'
+          tar -tf "dist/skynet-edr-${VERSION}-${TARGET}.tar.gz" | grep -q 'SHA256SUMS$'
+          dpkg-deb --contents "dist/skynet-edr_${VERSION}_amd64.deb" | grep -q './usr/bin/skynet-edr$'
+          dpkg-deb --contents "dist/skynet-edr_${VERSION}_amd64.deb" | grep -q './usr/lib/systemd/system/skynet-edr.service$'
+          rpm -qpl "dist/skynet-edr-${VERSION}-1.amd64.rpm" | grep -q '^/usr/bin/skynet-edr$'
+          tar -tf "dist/skynet-edr-${VERSION}-1-amd64.pkg.tar.zst" | grep -q '^usr/bin/skynet-edr$'
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skynet-edr-linux-packages
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+          if-no-files-found: error

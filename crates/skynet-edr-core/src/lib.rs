@@ -1051,6 +1051,15 @@ impl From<StorageError> for HermesIngestError {
     }
 }
 
+/// Summary returned by the Hermes MVP detection pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HermesDetectionSummary {
+    /// Number of normalized Hermes events persisted.
+    pub event_count: usize,
+    /// Number of correlated incidents opened by built-in MVP rules.
+    pub incident_count: usize,
+}
+
 /// Ingest Hermes JSONL records into the local store after normalization and redaction.
 ///
 /// Empty lines are ignored. All JSON lines are parsed before anything is
@@ -1095,6 +1104,23 @@ pub fn ingest_hermes_events_json(
     store: &LocalStore,
     input: &str,
 ) -> Result<usize, HermesIngestError> {
+    ingest_hermes_events_json_with_detection(store, input).map(|summary| summary.event_count)
+}
+
+/// Ingest a Hermes trace and run the MVP built-in detection/correlation rules.
+///
+/// This is the minimal end-to-end pipeline: hostile trace JSON is normalized into
+/// redacted events, then high-signal event chains are correlated into redacted
+/// local incidents before persistence.
+///
+/// # Errors
+///
+/// Returns [`HermesIngestError::Parse`] for malformed JSON, or
+/// [`HermesIngestError::Storage`] if local persistence fails.
+pub fn ingest_hermes_events_json_with_detection(
+    store: &LocalStore,
+    input: &str,
+) -> Result<HermesDetectionSummary, HermesIngestError> {
     let value = serde_json::from_str::<serde_json::Value>(input).map_err(|error| {
         HermesIngestError::Parse {
             line: 1,
@@ -1102,8 +1128,24 @@ pub fn ingest_hermes_events_json(
         }
     })?;
     let records = hermes_records_from_trace_value(&value);
-    let events = persist_hermes_records(store, &records)?;
-    Ok(events.len())
+    let events = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| normalize_hermes_record(record, index))
+        .collect::<Vec<_>>();
+    let incidents = correlate_hermes_incidents(&events);
+
+    for event in &events {
+        store.insert_event(event)?;
+    }
+    for incident in &incidents {
+        store.insert_incident(incident)?;
+    }
+
+    Ok(HermesDetectionSummary {
+        event_count: events.len(),
+        incident_count: incidents.len(),
+    })
 }
 
 fn persist_hermes_records(
@@ -1245,8 +1287,13 @@ fn normalize_hermes_record(record: &HermesIngestRecord, index: usize) -> Event {
         network_indicator,
         delivery_indicator,
     );
-    let attributes =
-        hermes_event_attributes(record, &tool_lower, network_indicator, delivery_indicator);
+    let attributes = hermes_event_attributes(
+        record,
+        &tool_lower,
+        network_indicator,
+        delivery_indicator,
+        sensitive_access,
+    );
     let title = hermes_event_title(record, &tool_lower, delivery_indicator);
     let details = Some(hermes_event_details(record.kind));
 
@@ -1291,8 +1338,14 @@ fn hermes_event_attributes(
     tool_lower: &str,
     network_indicator: bool,
     delivery_indicator: bool,
+    sensitive_access: bool,
 ) -> BTreeMap<String, serde_json::Value> {
-    let mut attributes = hermes_base_attributes(record, network_indicator, delivery_indicator);
+    let mut attributes = hermes_base_attributes(
+        record,
+        network_indicator,
+        delivery_indicator,
+        sensitive_access,
+    );
     insert_optional_hermes_arguments(&mut attributes, record);
     if is_process_tool(tool_lower) {
         attributes.insert(
@@ -1317,6 +1370,7 @@ fn hermes_base_attributes(
     record: &HermesIngestRecord,
     network_indicator: bool,
     delivery_indicator: bool,
+    sensitive_access: bool,
 ) -> BTreeMap<String, serde_json::Value> {
     BTreeMap::from([
         (
@@ -1347,6 +1401,10 @@ fn hermes_base_attributes(
         (
             "delivery_indicator".to_owned(),
             serde_json::json!(delivery_indicator),
+        ),
+        (
+            "sensitive_access".to_owned(),
+            serde_json::json!(sensitive_access),
         ),
     ])
 }
@@ -1533,6 +1591,93 @@ fn contains_sensitive_path(text: &str) -> bool {
         || text.contains(".env")
         || text.contains("oauth")
         || text.contains("credentials")
+}
+
+const SECRET_EGRESS_RULE_ID: &str = "EDR-EXFIL-001";
+const SECRET_EGRESS_WINDOW_MS: u64 = 60_000;
+
+fn correlate_hermes_incidents(events: &[Event]) -> Vec<Incident> {
+    let mut incidents = Vec::new();
+    for secret_event in events
+        .iter()
+        .filter(|event| is_sensitive_secret_access_event(event))
+    {
+        let Some(egress_event) = events.iter().find(|candidate| {
+            is_network_egress_event(candidate)
+                && candidate.attributes.get("session_id")
+                    == secret_event.attributes.get("session_id")
+                && candidate.observed_at_unix_ms >= secret_event.observed_at_unix_ms
+                && candidate.observed_at_unix_ms - secret_event.observed_at_unix_ms
+                    <= SECRET_EGRESS_WINDOW_MS
+        }) else {
+            continue;
+        };
+        incidents.push(secret_egress_incident(secret_event, egress_event));
+    }
+    incidents
+}
+
+fn is_sensitive_secret_access_event(event: &Event) -> bool {
+    event.source.kind == SourceKind::File
+        && event.attributes.get("sensitive_access") == Some(&serde_json::json!(true))
+        && event
+            .attributes
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .map_or(true, |operation| matches!(operation, "read" | "access"))
+}
+
+fn is_network_egress_event(event: &Event) -> bool {
+    event.attributes.get("command_class") == Some(&serde_json::json!("network_egress"))
+        || event.attributes.get("network_indicator") == Some(&serde_json::json!(true))
+}
+
+fn secret_egress_incident(secret_event: &Event, egress_event: &Event) -> Incident {
+    let session = secret_event
+        .attributes
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown_session");
+    let events = vec![secret_event.clone(), egress_event.clone()];
+    Incident {
+        id: IncidentId::new(format!(
+            "inc:{SECRET_EGRESS_RULE_ID}:{}:{}",
+            safe_id_fragment(session),
+            secret_event.observed_at_unix_ms
+        )),
+        created_at_unix_ms: secret_event.observed_at_unix_ms,
+        updated_at_unix_ms: egress_event.observed_at_unix_ms,
+        status: IncidentStatus::Open,
+        severity: Severity::Critical,
+        title: "Secret access followed by network egress".to_owned(),
+        summary: format!(
+            "{SECRET_EGRESS_RULE_ID}: sensitive Hermes file access was followed by network egress within {} seconds.",
+            SECRET_EGRESS_WINDOW_MS / 1_000
+        ),
+        source: egress_event.source.clone(),
+        redaction: incident_redaction_from_events(&events),
+        events,
+    }
+}
+
+fn incident_redaction_from_events(events: &[Event]) -> RedactionMetadata {
+    let mut fields = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        fields.extend(
+            event
+                .redaction
+                .redacted_fields
+                .iter()
+                .map(|field| RedactedField {
+                    path: format!("events[{index}].{}", field.path),
+                    reason: field.reason,
+                    replacement: field.replacement.clone(),
+                }),
+        );
+    }
+    fields.sort_by(|left, right| left.path.cmp(&right.path));
+    fields.dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
+    metadata_from_fields(fields)
 }
 
 /// Static product metadata shared by the CLI, daemon, and future API surfaces.

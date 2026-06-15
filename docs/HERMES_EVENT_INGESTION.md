@@ -1,6 +1,6 @@
 # Hermes Event Ingestion
 
-Phase 12 adds a read-only ingestion boundary for already-recorded Hermes agent traces. It converts session/tool-call records into normalized Skynet-EDR events and persists them through the existing redaction-before-storage path.
+Phase 12 adds an ingestion and MVP detection boundary for already-recorded Hermes agent traces. It converts session/tool-call records into normalized Skynet-EDR events, redacts them before persistence, and runs the built-in `EDR-EXFIL-001` correlation rule to open an incident when fake secret access is followed by network egress.
 
 ## Security boundary
 
@@ -9,6 +9,7 @@ Phase 12 adds a read-only ingestion boundary for already-recorded Hermes agent t
 - MCP/tool output is treated as hostile untrusted content.
 - Raw tool output is not stored as event details.
 - Event fields are redacted before persistence through `LocalStore`.
+- Correlated incidents are persisted through `LocalStore::insert_incident`, which re-applies server-side redaction to incident and embedded event JSON.
 - Malformed JSON fails closed before persistence.
 
 ## Supported trace shapes
@@ -47,8 +48,16 @@ skynet-edr events ingest-hermes --db /path/to/skynet.sqlite --trace-json /path/t
 Output:
 
 ```text
-ingested N Hermes event(s)
+ingested N Hermes event(s), opened M incident(s)
 ```
+
+## MVP correlation
+
+The current end-to-end MVP has one built-in correlation rule:
+
+- `EDR-EXFIL-001`: a sensitive Hermes file read/access followed by network egress in the same session within 60 seconds opens a critical incident.
+
+The fixture `crates/skynet-edr-core/tests/fixtures/hermes_secret_egress_trace.json` proves the path with fake secret access plus egress. It is deliberately synthetic and contains no real credentials.
 
 ## Normalization model
 
