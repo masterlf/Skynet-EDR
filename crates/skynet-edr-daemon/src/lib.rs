@@ -5,6 +5,7 @@
 
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap},
+    fmt::Write as _,
     fs,
     hash::{Hash, Hasher},
     io,
@@ -345,7 +346,8 @@ fn render_incident_timeline(incidents: &Value) -> String {
             .get("updated_at_unix_ms")
             .and_then(Value::as_i64)
             .unwrap_or_default();
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             "<li><a href=\"/console/incidents/{}\">{}</a> \
              <span class=\"badge\">{}</span> \
              <span class=\"muted\">updated {}</span></li>",
@@ -353,7 +355,7 @@ fn render_incident_timeline(incidents: &Value) -> String {
             escape_html(title),
             escape_html(severity),
             updated
-        ));
+        );
     }
     html.push_str("</ol>");
     html
