@@ -1011,6 +1011,8 @@ pub enum StorageError {
     Json(serde_json::Error),
     /// Filesystem I/O failed for a database or JSONL export path.
     Io(std::io::Error),
+    /// A timestamp does not fit SQLite's signed integer representation.
+    IntegerOutOfRange { field: &'static str, value: u64 },
 }
 
 impl std::fmt::Display for StorageError {
@@ -1019,6 +1021,12 @@ impl std::fmt::Display for StorageError {
             Self::Sqlite(error) => write!(formatter, "sqlite storage error: {error}"),
             Self::Json(error) => write!(formatter, "json storage error: {error}"),
             Self::Io(error) => write!(formatter, "local storage I/O error: {error}"),
+            Self::IntegerOutOfRange { field, value } => {
+                write!(
+                    formatter,
+                    "local storage integer out of range: {field}={value}"
+                )
+            }
         }
     }
 }
@@ -1188,6 +1196,8 @@ fn insert_event_on_connection(connection: &Connection, event: &Event) -> Storage
     let payload = serde_json::to_string(event)?;
     let severity = serde_json::to_value(event.severity)?;
     let source_kind = serde_json::to_value(event.source.kind)?;
+    let observed_at_unix_ms =
+        sqlite_unix_ms("event.observed_at_unix_ms", event.observed_at_unix_ms)?;
     connection.execute(
         "INSERT INTO events (
             id, observed_at_unix_ms, severity, source_kind, title, payload_json
@@ -1200,7 +1210,7 @@ fn insert_event_on_connection(connection: &Connection, event: &Event) -> Storage
             payload_json = excluded.payload_json",
         params![
             event.id.as_str(),
-            event.observed_at_unix_ms as i64,
+            observed_at_unix_ms,
             json_string_value(&severity),
             json_string_value(&source_kind),
             event.title,
@@ -1217,6 +1227,10 @@ fn insert_incident_on_connection(
     let payload = serde_json::to_string(incident)?;
     let severity = serde_json::to_value(incident.severity)?;
     let status = serde_json::to_value(incident.status)?;
+    let created_at_unix_ms =
+        sqlite_unix_ms("incident.created_at_unix_ms", incident.created_at_unix_ms)?;
+    let updated_at_unix_ms =
+        sqlite_unix_ms("incident.updated_at_unix_ms", incident.updated_at_unix_ms)?;
     connection.execute(
         "INSERT INTO incidents (
             id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
@@ -1230,8 +1244,8 @@ fn insert_incident_on_connection(
             payload_json = excluded.payload_json",
         params![
             incident.id.as_str(),
-            incident.created_at_unix_ms as i64,
-            incident.updated_at_unix_ms as i64,
+            created_at_unix_ms,
+            updated_at_unix_ms,
             json_string_value(&status),
             json_string_value(&severity),
             incident.title,
@@ -1239,6 +1253,10 @@ fn insert_incident_on_connection(
         ],
     )?;
     Ok(())
+}
+
+fn sqlite_unix_ms(field: &'static str, value: u64) -> StorageResult<i64> {
+    i64::try_from(value).map_err(|_| StorageError::IntegerOutOfRange { field, value })
 }
 
 fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
