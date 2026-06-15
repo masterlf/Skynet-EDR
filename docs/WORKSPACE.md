@@ -28,6 +28,7 @@ cargo test --workspace --all-features
 - No privileged sensor startup in skeleton binaries.
 - Linux privileged sensor validation uses the manual-only disposable VM workflow in [Linux lab and privileged sensor manual test plan](LINUX_LAB_TESTING.md).
 - Local HTTP visibility remains loopback-only and read-only; see [Local read-only HTTP API](LOCAL_HTTP_API.md).
+- Linux package/install assets must remain passive-by-default, least-privileged, and aligned with [Linux installation guide](INSTALL.md) and [Packaging and release plan](PACKAGING.md).
 - Hermes trace ingestion is offline/read-only and treats MCP/tool output as hostile; see [Hermes event ingestion](HERMES_EVENT_INGESTION.md).
 - MCP starts read-only; response actions are future opt-in work.
 - Platform-specific code must not enter `skynet-edr-core` directly.
