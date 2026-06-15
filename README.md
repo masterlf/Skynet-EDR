@@ -90,18 +90,17 @@ cargo test --workspace --all-features
 
 ## Documentation
 
-- [Project goals](docs/GOALS.md)
-- [Threat model](docs/THREAT_MODEL.md)
-- [Concept architecture](docs/ARCHITECTURE.md)
-- [Initial detection ideas](docs/DETECTION_RULES.md)
-- [Canonical event schema](docs/EVENT_SCHEMA.md)
-- [Read-only MCP integration](docs/MCP_READ_ONLY.md)
-- [Hermes event ingestion](docs/HERMES_EVENT_INGESTION.md)
-- [OpenClaw integration](docs/OPENCLAW_INTEGRATION.md)
-- [Local read-only HTTP API](docs/LOCAL_HTTP_API.md)
-- [Linux lab and privileged sensor manual test plan](docs/LINUX_LAB_TESTING.md)
-- [Linux installation guide](docs/INSTALL.md)
-- [Packaging and release plan](docs/PACKAGING.md)
+Start with the [documentation hub](docs/README.md). The v0.2 documentation structure is organized by operator journey:
+
+- [Install](docs/INSTALL.md) — release packages, checksums, install, upgrade, rollback, uninstall.
+- [Quickstart](docs/QUICKSTART.md) — shortest local path to a verified MVP baseline.
+- [Concepts](docs/CONCEPTS.md) — product model, vocabulary, MVP scope, and non-goals.
+- [Architecture](docs/ARCHITECTURE.md) — components, deployment modes, and MVP recommendation.
+- [Canonical event schema](docs/EVENT_SCHEMA.md) — `skynet.event.v0` envelope and validation requirements.
+- [Integrations](docs/INTEGRATIONS.md) — Hermes, OpenClaw, MCP, API, and CLI integration map.
+- [Detections](docs/DETECTIONS.md) — detection philosophy, rule families, severity, and alert evidence.
+- [Operations](docs/OPERATIONS.md) — local store, API/MCP posture, evidence handling, and troubleshooting.
+- [Release process](docs/RELEASE_PROCESS.md) and [packaging plan](docs/PACKAGING.md) — release gates, artifacts, publishing, and rollback.
 
 ## Naming
 
