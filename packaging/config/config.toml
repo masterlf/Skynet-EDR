@@ -1,0 +1,43 @@
+# Skynet-EDR local configuration baseline.
+# Default posture: passive, local-only, read-only, redaction before persistence.
+
+mode = "passive"
+data_dir = "/var/lib/skynet-edr"
+log_dir = "/var/log/skynet-edr"
+
+[http_api]
+enabled = true
+bind = "127.0.0.1:8787"
+read_only = true
+
+[agent_scope]
+# Product scope for local AI-agent protection. Operators should grant concrete
+# read-only access per agent after reviewing privacy and credential exposure.
+runtimes = [
+  "hermes-agent",
+  "openclaw",
+  "codex-cli",
+  "claude-code",
+  "generic-ai-agent",
+]
+
+# Examples only; do not enable blindly on shared hosts.
+# read_only_roots = [
+#   "/home/alice/.hermes",
+#   "/home/alice/.config/claude",
+#   "/home/alice/.codex",
+# ]
+
+[redaction]
+redact_before_storage = true
+redact_before_logs = true
+redact_before_api = true
+hash_sensitive_values = true
+
+[sensors]
+# No privileged sensors are enabled by default.
+linux_privileged = false
+
+[network]
+# The daemon should not egress by default. Alert forwarding must be explicit.
+outbound_alerting_enabled = false

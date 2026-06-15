@@ -1,0 +1,44 @@
+[Unit]
+Description=Skynet-EDR passive AI-agent runtime monitor
+Documentation=https://github.com/masterlf/Skynet-EDR
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/skynet-edr/config.toml
+
+[Service]
+Type=simple
+User=skynet-edr
+Group=skynet-edr
+ExecStart=/usr/bin/skynet-edr-daemon run --config /etc/skynet-edr/config.toml
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=skynet-edr
+StateDirectory=skynet-edr
+CacheDirectory=skynet-edr
+LogsDirectory=skynet-edr
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/skynet-edr /var/log/skynet-edr /run/skynet-edr /var/cache/skynet-edr
+ReadOnlyPaths=/etc/skynet-edr
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

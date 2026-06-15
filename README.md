@@ -89,6 +89,8 @@ cargo test --workspace --all-features
 - [Read-only MCP integration](docs/MCP_READ_ONLY.md)
 - [Local read-only HTTP API](docs/LOCAL_HTTP_API.md)
 - [Linux lab and privileged sensor manual test plan](docs/LINUX_LAB_TESTING.md)
+- [Linux installation guide](docs/INSTALL.md)
+- [Packaging and release plan](docs/PACKAGING.md)
 
 ## Naming
 
