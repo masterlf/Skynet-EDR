@@ -76,6 +76,7 @@ pub enum SourceKind {
 
 /// Platform-independent source metadata for an event or incident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventSource {
     /// Coarse source category that avoids OS-specific type coupling.
     pub kind: SourceKind,
@@ -101,6 +102,7 @@ pub enum RedactionReason {
 
 /// One JSON field redacted from an event or incident payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedactedField {
     /// Dotted JSON path to the redacted value.
     pub path: String,
@@ -112,11 +114,234 @@ pub struct RedactedField {
 
 /// Redaction metadata carried with stored events and incidents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedactionMetadata {
     /// Whether sensitive data was found before redaction.
     pub contains_sensitive_data: bool,
     /// Fields removed or replaced before persistence or alerting.
     pub redacted_fields: Vec<RedactedField>,
+}
+
+/// Canonical Skynet event schema version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventSchemaVersion {
+    /// Initial canonical event envelope used by the v0.x integration contract.
+    #[serde(rename = "skynet.event.v0")]
+    V0,
+}
+
+/// Trust/provenance class assigned by an agent runtime or collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevel {
+    /// Authenticated user instruction or explicit operator approval.
+    AuthenticatedUser,
+    /// System/developer/runtime policy rather than user-supplied content.
+    RuntimePolicy,
+    /// Retrieved, read, scraped, or received content that must never become instruction authority.
+    UntrustedContent,
+    /// Tool/MCP/terminal/browser output; always data, never authority.
+    ToolOutput,
+    /// Action emitted by the agent runtime after model/tool orchestration.
+    AgentAction,
+    /// Host, network, filesystem, or daemon sensor observation.
+    SensorObservation,
+}
+
+/// Stable provenance metadata carried by canonical events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventProvenance {
+    /// Runtime or sensor that originally produced the event.
+    pub producer: String,
+    /// Skynet collector or adapter that normalized the event.
+    pub collector: String,
+    /// Optional tenant/workspace namespace.
+    pub tenant: Option<String>,
+    /// Runtime-native source event identifier if available.
+    pub source_event_id: Option<String>,
+    /// Cross-event trace identifier used for sequence correlation.
+    pub trace_id: Option<String>,
+    /// Optional span identifier for tool/task nesting.
+    pub span_id: Option<String>,
+    /// Optional parent span identifier for causal nesting.
+    pub parent_span_id: Option<String>,
+}
+
+/// Canonical event envelope exchanged between agent adapters and Skynet-EDR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalEventEnvelope {
+    /// Canonical schema version.
+    pub schema_version: EventSchemaVersion,
+    /// Stable event identifier.
+    #[serde(rename = "event_id")]
+    pub event_id: EventId,
+    /// Canonical event type such as `agent.tool.requested`.
+    pub event_type: String,
+    /// Observation timestamp in Unix epoch milliseconds.
+    pub observed_at_unix_ms: u64,
+    /// Optional collector receive timestamp in Unix epoch milliseconds.
+    pub received_at_unix_ms: Option<u64>,
+    /// Event severity.
+    pub severity: Severity,
+    /// Platform-independent source metadata.
+    pub source: EventSource,
+    /// Provenance and correlation identity.
+    pub provenance: EventProvenance,
+    /// Trust class assigned to the event source/content.
+    pub trust_level: TrustLevel,
+    /// Short operator-facing event title.
+    pub title: String,
+    /// Optional longer event details.
+    pub details: Option<String>,
+    /// Structured, already-redacted attributes.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, serde_json::Value>,
+    /// Redaction decisions applied before storage or alerting.
+    pub redaction: RedactionMetadata,
+}
+
+/// Error returned when parsing or validating a canonical event fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalEventError {
+    /// JSON could not be parsed into the canonical schema.
+    Parse(String),
+    /// Parsed JSON violates security or identity invariants.
+    Validation(String),
+    /// JSON serialization failed.
+    Serialize(String),
+}
+
+impl std::fmt::Display for CanonicalEventError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(message) => write!(formatter, "canonical event parse error: {message}"),
+            Self::Validation(message) => {
+                write!(formatter, "canonical event validation error: {message}")
+            }
+            Self::Serialize(message) => {
+                write!(formatter, "canonical event serialize error: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CanonicalEventError {}
+
+impl CanonicalEventEnvelope {
+    /// Validate security-critical invariants that serde alone cannot express.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CanonicalEventError::Validation`] when identity, provenance,
+    /// or redaction metadata is missing, blank, or internally inconsistent.
+    pub fn validate(&self) -> Result<(), CanonicalEventError> {
+        if self.event_id.as_str().trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "event_id must not be empty".to_owned(),
+            ));
+        }
+        if self.event_type.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "event_type must not be empty".to_owned(),
+            ));
+        }
+        if self.source.sensor.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "source.sensor must not be empty".to_owned(),
+            ));
+        }
+        if self.provenance.producer.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "provenance.producer must not be empty".to_owned(),
+            ));
+        }
+        if self.provenance.collector.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "provenance.collector must not be empty".to_owned(),
+            ));
+        }
+        if self.title.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "title must not be empty".to_owned(),
+            ));
+        }
+        if self.redaction.contains_sensitive_data == self.redaction.redacted_fields.is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "redaction metadata is inconsistent with redacted_fields".to_owned(),
+            ));
+        }
+        for field in &self.redaction.redacted_fields {
+            self.validate_redacted_field(field)?;
+        }
+        Ok(())
+    }
+
+    fn validate_redacted_field(&self, field: &RedactedField) -> Result<(), CanonicalEventError> {
+        if field.path.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "redaction field path must not be empty".to_owned(),
+            ));
+        }
+        if field.replacement.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "redaction replacement must not be empty".to_owned(),
+            ));
+        }
+        match field.path.as_str() {
+            "details" => match &self.details {
+                Some(details) if details == &field.replacement => Ok(()),
+                Some(_) | None => Err(CanonicalEventError::Validation(format!(
+                    "redaction field {} does not match stored replacement",
+                    field.path
+                ))),
+            },
+            path if path.starts_with("attributes.") => {
+                let key = path.trim_start_matches("attributes.");
+                match self.attributes.get(key) {
+                    Some(serde_json::Value::String(value)) if value == &field.replacement => Ok(()),
+                    Some(_) | None => Err(CanonicalEventError::Validation(format!(
+                        "redaction field {} does not match stored replacement",
+                        field.path
+                    ))),
+                }
+            }
+            _ => Err(CanonicalEventError::Validation(format!(
+                "redaction field {} is outside the canonical event payload",
+                field.path
+            ))),
+        }
+    }
+}
+
+/// Parse, deny unknown top-level fields, and validate one canonical event JSON document.
+///
+/// # Errors
+///
+/// Returns [`CanonicalEventError::Parse`] for malformed JSON or schema mismatches
+/// and [`CanonicalEventError::Validation`] for security invariant failures.
+pub fn parse_canonical_event_json(
+    input: &str,
+) -> Result<CanonicalEventEnvelope, CanonicalEventError> {
+    let event: CanonicalEventEnvelope = serde_json::from_str(input)
+        .map_err(|error| CanonicalEventError::Parse(error.to_string()))?;
+    event.validate()?;
+    Ok(event)
+}
+
+/// Serialize a canonical event after validating invariants.
+///
+/// # Errors
+///
+/// Returns [`CanonicalEventError::Validation`] if the event is invalid or
+/// [`CanonicalEventError::Serialize`] if JSON encoding fails.
+pub fn serialize_canonical_event_json(
+    event: &CanonicalEventEnvelope,
+) -> Result<String, CanonicalEventError> {
+    event.validate()?;
+    serde_json::to_string_pretty(event)
+        .map_err(|error| CanonicalEventError::Serialize(error.to_string()))
 }
 
 /// Replacement marker used when a secret is removed before persistence or alerting.
