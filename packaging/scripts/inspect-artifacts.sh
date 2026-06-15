@@ -65,6 +65,14 @@ grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/bin/skynet-edr-daemon$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^etc/skynet-edr/config.toml$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/lib/systemd/system/skynet-edr.service$'
 
-sha256sum "$tarball" "$deb" "$rpm" "$arch" > "$DIST_DIR/checksums.txt"
+(
+  cd "$DIST_DIR"
+  sha256sum \
+    "$(basename "$tarball")" \
+    "$(basename "$deb")" \
+    "$(basename "$rpm")" \
+    "$(basename "$arch")" \
+    > checksums.txt
+)
 
 echo "artifact inspection passed"
