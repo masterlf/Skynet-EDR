@@ -8,8 +8,8 @@ The install goal is conservative: collect and normalize local AI-agent security 
 
 | Tier | Distributions | Install path | Support promise |
 |---|---|---|---|
-| Tier 1 | Ubuntu LTS, Debian stable, Linux Mint current | `.deb`, custom tarball | Primary target once packages are published. |
-| Tier 2 | RHEL-compatible Linux, Fedora current | `.rpm`, custom tarball | Supported after package smoke tests pass on clean hosts. |
+| Tier 1 | Ubuntu LTS, Debian stable, Linux Mint current | `.deb`, custom tarball | Primary MVP target. |
+| Tier 2 | RHEL-compatible Linux, Fedora current | `.rpm`, custom tarball | MVP package available; SELinux policy remains future hardening. |
 | Tier 3 | Arch Linux | Arch package artifact / PKGBUILD style recipe, custom tarball | Best-effort rolling distribution support. |
 | Tier 4 | Other systemd Linux distributions | custom tarball | Advanced-user path, no production claim until tested. |
 
@@ -93,12 +93,37 @@ sudo skynet-edr store init --db /var/lib/skynet-edr/skynet-edr.sqlite
 
 For development-only tests, running from `target/release` without installing is also acceptable.
 
-## Install from `.deb` on Ubuntu, Debian, or Mint
+## Download release packages
 
-Once release packages are published:
+Download packages from the GitHub Releases page:
+
+```text
+https://github.com/masterlf/Skynet-EDR/releases
+```
+
+For `v0.1.0`, the expected Linux `amd64` artifacts are:
+
+```text
+skynet-edr_0.1.0_amd64.deb
+skynet-edr-0.1.0-1.amd64.rpm
+skynet-edr-0.1.0-1-amd64.pkg.tar.zst
+skynet-edr-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+checksums.txt
+```
+
+Verify downloaded files before installation:
 
 ```bash
-sudo apt install ./skynet-edr_VERSION_linux_amd64.deb
+sha256sum -c checksums.txt --ignore-missing
+```
+
+## Install from `.deb` on Ubuntu, Debian, or Mint
+
+After downloading the `.deb` and `checksums.txt` from the release:
+
+```bash
+sha256sum -c checksums.txt --ignore-missing
+sudo apt install ./skynet-edr_0.1.0_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
@@ -117,10 +142,11 @@ Current caveat: the service starts the conservative passive daemon path. Review 
 
 ## Install from `.rpm` on RHEL-compatible Linux or Fedora
 
-Once release packages are published:
+After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
-sudo dnf install ./skynet-edr_VERSION_linux_x86_64.rpm
+sha256sum -c checksums.txt --ignore-missing
+sudo dnf install ./skynet-edr-0.1.0-1.amd64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
@@ -138,10 +164,11 @@ SELinux note: Skynet-EDR should not require disabling SELinux. If future sensors
 
 ## Install on Arch Linux
 
-Once an Arch artifact or PKGBUILD-style recipe is published:
+After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
-sudo pacman -U ./skynet-edr-VERSION-1-x86_64.pkg.tar.zst
+sha256sum -c checksums.txt --ignore-missing
+sudo pacman -U ./skynet-edr-0.1.0-1-amd64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```

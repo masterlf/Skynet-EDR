@@ -57,18 +57,26 @@ The first research/MVP scope is detection and alerting for:
 
 ## Status
 
-This repository now has an initial Rust workspace skeleton for the platform-independent core, CLI, daemon placeholder, and read-only MCP integration primitives.
+Skynet-EDR is at a passive Linux-first MVP baseline. It is installable from GitHub Releases and currently focuses on redacted local evidence, Hermes/AI-agent trace ingestion, read-only visibility, and high-signal correlation for secret access followed by network egress.
 
 Current crates:
 
-- `skynet-edr-core`: shared product metadata and core runtime primitives.
-- `skynet-edr-cli`: `skynet-edr` command-line entry point with an initial `status` command.
-- `skynet-edr-daemon`: daemon/runtime monitor primitives, including the passive Linux fixture scanner and localhost-only read-only HTTP API router.
+- `skynet-edr-core`: shared product metadata, schema, redaction, local storage, Hermes ingestion, and MVP correlation rules.
+- `skynet-edr-cli`: `skynet-edr` command-line entry point for status, store initialization, event ingestion/listing/export, and incident listing/export.
+- `skynet-edr-daemon`: passive daemon/runtime monitor primitives, including the Linux fixture scanner, localhost-only read-only HTTP API router, and conservative `run --config` service path.
 - `skynet-edr-mcp`: read-only MCP integration surface for Hermes visibility: status, incidents, rules, sensors, and config-drift findings.
 
 See [Rust workspace](docs/WORKSPACE.md) for layout and commands.
 
-The next implementation steps are to expand the core event schema, redaction engine, detection rules, and storage model.
+## Install
+
+Download the current MVP release packages from:
+
+```text
+https://github.com/masterlf/Skynet-EDR/releases
+```
+
+Linux `amd64` release assets include `.deb`, `.rpm`, Arch `.pkg.tar.zst`, a custom `.tar.gz`, and `checksums.txt`. See [Linux installation guide](docs/INSTALL.md) for checksum verification and install commands.
 
 ## Development
 
