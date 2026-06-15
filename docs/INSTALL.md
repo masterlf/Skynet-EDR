@@ -26,13 +26,13 @@ Packaged installs should create this layout:
 ```text
 /usr/bin/skynet-edr
 /usr/bin/skynet-edr-daemon
-/etc/skynet-edr/skynet-edr.toml
+/etc/skynet-edr/config.toml
 /etc/skynet-edr/rules.d/
 /etc/skynet-edr/agents.d/
 /var/lib/skynet-edr/skynet-edr.sqlite
 /var/log/skynet-edr/
 /run/skynet-edr/
-/usr/lib/systemd/system/skynet-edr-daemon.service
+/usr/lib/systemd/system/skynet-edr.service
 /usr/lib/sysusers.d/skynet-edr.conf
 /usr/lib/tmpfiles.d/skynet-edr.conf
 ```
@@ -50,7 +50,7 @@ Default permissions:
 
 ```text
 /etc/skynet-edr/                  root:skynet-edr 0750
-/etc/skynet-edr/skynet-edr.toml   root:skynet-edr 0640
+/etc/skynet-edr/config.toml   root:skynet-edr 0640
 /etc/skynet-edr/rules.d/          root:skynet-edr 0750
 /etc/skynet-edr/agents.d/         root:skynet-edr 0750
 /var/lib/skynet-edr/              skynet-edr:skynet-edr 0750
@@ -58,6 +58,24 @@ Default permissions:
 /run/skynet-edr/                  skynet-edr:skynet-edr 0750
 /usr/bin/skynet-edr*              root:root 0755
 ```
+
+
+## Versioning and artifact paths
+
+Current workspace version: `0.1.0`. All crates in the 0.1.x line should move together because the CLI, daemon skeleton, MCP surface, docs, and packaging scripts describe one MVP product baseline.
+
+0.1.x is pre-production. Patch releases may update documentation, package metadata, passive/read-only APIs, fixture-driven detections, and compatibility fixes. They must not quietly introduce privileged sensor auto-start, broad agent secret access, non-loopback listeners, or default network egress. Those changes need explicit documentation and review.
+
+Build outputs use the scripts' actual paths and names:
+
+```text
+dist/skynet-edr_${VERSION}_${ARCH}.deb
+dist/skynet-edr-${VERSION}-1.${ARCH}.rpm
+dist/skynet-edr-${VERSION}-1-${ARCH}.pkg.tar.zst
+dist/skynet-edr-${VERSION}-${TARGET}.tar.gz
+```
+
+Defaults today are `VERSION=0.1.0`, `ARCH=amd64` for nFPM package builds, and `TARGET=$(rustc -vV | awk '/host:/ {print $2}')` for the tarball unless overridden with `SKYNET_EDR_VERSION`, `NFPM_ARCH`, or `SKYNET_EDR_TARGET`.
 
 ## Install from source for development
 
@@ -98,19 +116,19 @@ For development-only tests, running from `target/release` without installing is 
 Once release packages are published:
 
 ```bash
-sudo apt install ./skynet-edr_VERSION_linux_amd64.deb
+sudo apt install ./skynet-edr_${VERSION}_${ARCH}.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
 ```
 
-Packages should not auto-enable privileged sensors. Enable the daemon only after reviewing `/etc/skynet-edr/skynet-edr.toml`:
+Packages should not auto-enable privileged sensors. Enable the daemon only after reviewing `/etc/skynet-edr/config.toml`:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now skynet-edr-daemon.service
-sudo systemctl status skynet-edr-daemon.service
-journalctl -u skynet-edr-daemon.service -n 100 --no-pager
+sudo systemctl enable --now skynet-edr.service
+sudo systemctl status skynet-edr.service
+journalctl -u skynet-edr.service -n 100 --no-pager
 ```
 
 Current caveat: until `skynet-edr-daemon run` exists, the packaged service is a forward-looking template and should not be treated as a production long-running service.
@@ -120,7 +138,7 @@ Current caveat: until `skynet-edr-daemon run` exists, the packaged service is a 
 Once release packages are published:
 
 ```bash
-sudo dnf install ./skynet-edr_VERSION_linux_x86_64.rpm
+sudo dnf install ./skynet-edr-${VERSION}-1.${ARCH}.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
@@ -130,8 +148,8 @@ Then review config and enable manually:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now skynet-edr-daemon.service
-sudo systemctl status skynet-edr-daemon.service
+sudo systemctl enable --now skynet-edr.service
+sudo systemctl status skynet-edr.service
 ```
 
 SELinux note: Skynet-EDR should not require disabling SELinux. If future sensors need access to home directories, audit logs, eBPF, or agent runtime sockets, ship a narrow SELinux policy module instead of telling users to set permissive mode. No circus with SELinux, merci.
@@ -141,7 +159,7 @@ SELinux note: Skynet-EDR should not require disabling SELinux. If future sensors
 Once an Arch artifact or PKGBUILD-style recipe is published:
 
 ```bash
-sudo pacman -U ./skynet-edr-VERSION-1-x86_64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-${VERSION}-1-${ARCH}.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```
@@ -155,13 +173,13 @@ The custom tarball is for labs, air-gapped hosts, or unsupported distributions.
 Expected tarball layout:
 
 ```text
-skynet-edr-VERSION-TARGET/
+skynet-edr-${VERSION}-${TARGET}/
   bin/skynet-edr
   bin/skynet-edr-daemon
-  etc/skynet-edr.toml.example
-  systemd/skynet-edr-daemon.service
-  sysusers.d/skynet-edr.conf
-  tmpfiles.d/skynet-edr.conf
+  packaging/config/config.toml
+  packaging/systemd/skynet-edr.service
+  packaging/sysusers/skynet-edr.conf
+  packaging/tmpfiles/skynet-edr.conf
   install.sh
   uninstall.sh
   SHA256SUMS
@@ -171,8 +189,8 @@ skynet-edr-VERSION-TARGET/
 Install:
 
 ```bash
-tar -xzf skynet-edr-VERSION-TARGET.tar.gz
-cd skynet-edr-VERSION-TARGET
+tar -xzf dist/skynet-edr-${VERSION}-${TARGET}.tar.gz
+cd skynet-edr-${VERSION}-${TARGET}
 sha256sum -c SHA256SUMS
 sudo ./install.sh
 ```
@@ -229,10 +247,10 @@ sudo -u skynet-edr skynet-edr events list --db /var/lib/skynet-edr/skynet-edr.sq
 Service checks:
 
 ```bash
-systemctl status skynet-edr-daemon.service
-journalctl -u skynet-edr-daemon.service --since today --no-pager
-systemd-analyze verify /usr/lib/systemd/system/skynet-edr-daemon.service
-systemd-analyze security skynet-edr-daemon.service
+systemctl status skynet-edr.service
+journalctl -u skynet-edr.service --since today --no-pager
+systemd-analyze verify /usr/lib/systemd/system/skynet-edr.service
+systemd-analyze security skynet-edr.service
 ```
 
 ## Upgrade and rollback
@@ -252,11 +270,11 @@ Before storage migrations become real, package scripts should back up state to:
 Rollback should be documented per release:
 
 ```bash
-sudo systemctl stop skynet-edr-daemon.service
+sudo systemctl stop skynet-edr.service
 sudo apt install ./previous.deb       # Debian/Ubuntu/Mint
 sudo dnf downgrade ./previous.rpm     # RHEL/Fedora
 sudo pacman -U ./previous.pkg.tar.zst # Arch
-sudo systemctl start skynet-edr-daemon.service
+sudo systemctl start skynet-edr.service
 ```
 
 ## Uninstall
@@ -264,21 +282,21 @@ sudo systemctl start skynet-edr-daemon.service
 Debian/Ubuntu/Mint:
 
 ```bash
-sudo systemctl disable --now skynet-edr-daemon.service || true
+sudo systemctl disable --now skynet-edr.service || true
 sudo apt remove skynet-edr
 ```
 
 RHEL/Fedora:
 
 ```bash
-sudo systemctl disable --now skynet-edr-daemon.service || true
+sudo systemctl disable --now skynet-edr.service || true
 sudo dnf remove skynet-edr
 ```
 
 Arch:
 
 ```bash
-sudo systemctl disable --now skynet-edr-daemon.service || true
+sudo systemctl disable --now skynet-edr.service || true
 sudo pacman -R skynet-edr
 ```
 
@@ -288,13 +306,36 @@ Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default
 
 | Symptom | Check |
 |---|---|
-| Service will not start | `journalctl -u skynet-edr-daemon.service -n 100 --no-pager` |
+| Service will not start | `journalctl -u skynet-edr.service -n 100 --no-pager` |
 | Permission denied on DB | ownership/mode of `/var/lib/skynet-edr` and service user |
 | Config unreadable | `/etc/skynet-edr` group and mode |
 | RHEL/Fedora denial | `ausearch -m avc -ts recent` and SELinux policy status |
 | API unreachable | verify bind is loopback-only and service is active |
 | Agent evidence missing | verify the agent adapter/export path and ingestion logs |
 
+## MVP acceptance test commands
+
+Run these from the repository root before treating an MVP docs/package alignment change as ready:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+packaging/scripts/validate-packaging.sh
+git diff --check
+```
+
+Optional release-artifact checks, when the required host tools are installed:
+
+```bash
+packaging/scripts/build-tarball.sh
+packaging/scripts/build-packages.sh
+tar -tf dist/skynet-edr-${VERSION}-${TARGET}.tar.gz
+dpkg-deb --contents dist/skynet-edr_${VERSION}_${ARCH}.deb
+rpm -qpl dist/skynet-edr-${VERSION}-1.${ARCH}.rpm
+tar -tf dist/skynet-edr-${VERSION}-1-${ARCH}.pkg.tar.zst
+```
+
 ## Current limitation
 
-The repository has a daemon skeleton but not a production long-running service loop yet. Packaging assets are intentionally conservative and should remain passive/read-only until the daemon runtime and sensor privilege model are implemented and tested.
+The repository has a daemon skeleton but not a production long-running service loop yet. The packaged systemd unit is `skynet-edr.service` and currently calls the future `skynet-edr-daemon run --config /etc/skynet-edr/config.toml` entry point, so it is a template to validate and review, not a production service to enable blindly. Packaging assets are intentionally conservative and should remain passive/read-only until the daemon runtime and sensor privilege model are implemented and tested.

@@ -30,10 +30,10 @@ Required files:
 ```text
 /usr/bin/skynet-edr
 /usr/bin/skynet-edr-daemon
-/usr/lib/systemd/system/skynet-edr-daemon.service
+/usr/lib/systemd/system/skynet-edr.service
 /usr/lib/sysusers.d/skynet-edr.conf
 /usr/lib/tmpfiles.d/skynet-edr.conf
-/etc/skynet-edr/skynet-edr.toml
+/etc/skynet-edr/config.toml
 /usr/share/doc/skynet-edr/
 /usr/share/licenses/skynet-edr/LICENSE
 ```
@@ -94,15 +94,21 @@ skynet-edr-sensor-linux
 
 Do not grant broad read access to AI-agent secrets as a packaging shortcut. Use explicit integration paths, agent-owned audit exports, local read-only APIs, or narrow privileged helper sensors.
 
+## Versioning policy
+
+Current workspace version: `0.1.0`. The 0.1.x line is the pre-production MVP release train and all workspace crates should retain the same version because the CLI, daemon skeleton, MCP surface, docs, and package metadata ship as one baseline.
+
+Allowed 0.1.x patch changes include documentation corrections, package metadata fixes, passive/read-only API refinements, fixture updates, and non-breaking CLI/status output improvements. Changes that enable privileged sensors, broaden filesystem access to agent secrets, expose non-loopback services, or allow default network egress are security-significant and should not hide inside a patch release without explicit docs and review.
+
 ## Release artifact set
 
 For each release tag:
 
 ```text
-skynet-edr_VERSION_linux_amd64.deb
-skynet-edr_VERSION_linux_x86_64.rpm
-skynet-edr_VERSION_linux_x86_64.pkg.tar.zst
-skynet-edr_VERSION_linux_x86_64.tar.gz
+skynet-edr_${VERSION}_${ARCH}.deb
+skynet-edr-${VERSION}-1.${ARCH}.rpm
+skynet-edr-${VERSION}-1-${ARCH}.pkg.tar.zst
+skynet-edr-${VERSION}-${TARGET}.tar.gz
 checksums.txt
 checksums.txt.sig
 SBOM.spdx.json
@@ -125,22 +131,28 @@ Later production releases should add:
 Local package baseline:
 
 ```bash
-cargo build --release --workspace --bins
 packaging/scripts/validate-packaging.sh
+packaging/scripts/build-packages.sh
+```
 
-SKYNET_EDR_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="skynet-edr-cli") | .version') \
-NFPM_ARCH=amd64 \
-nfpm package --config packaging/nfpm.yaml --packager deb --target dist/skynet-edr.deb
+`build-packages.sh` compiles release binaries and writes:
 
-SKYNET_EDR_VERSION=$SKYNET_EDR_VERSION \
-NFPM_ARCH=amd64 \
-nfpm package --config packaging/nfpm.yaml --packager rpm --target dist/skynet-edr.rpm
+```text
+dist/skynet-edr_${VERSION}_${ARCH}.deb
+dist/skynet-edr-${VERSION}-1.${ARCH}.rpm
+dist/skynet-edr-${VERSION}-1-${ARCH}.pkg.tar.zst
 ```
 
 Custom tarball:
 
 ```bash
 packaging/scripts/build-tarball.sh
+```
+
+The tarball script writes:
+
+```text
+dist/skynet-edr-${VERSION}-${TARGET}.tar.gz
 ```
 
 ## Validation gates
@@ -162,12 +174,10 @@ cargo build --release --workspace --bins
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
-nfpm package --config packaging/nfpm.yaml --packager deb --target dist/skynet-edr.deb
-nfpm package --config packaging/nfpm.yaml --packager rpm --target dist/skynet-edr.rpm
-nfpm package --config packaging/nfpm.yaml --packager archlinux --target dist/skynet-edr.pkg.tar.zst
-dpkg-deb --contents dist/skynet-edr.deb
-rpm -qpl dist/skynet-edr.rpm
-tar -tf dist/skynet-edr.pkg.tar.zst
+packaging/scripts/build-packages.sh
+dpkg-deb --contents dist/skynet-edr_${VERSION}_${ARCH}.deb
+rpm -qpl dist/skynet-edr-${VERSION}-1.${ARCH}.rpm
+tar -tf dist/skynet-edr-${VERSION}-1-${ARCH}.pkg.tar.zst
 ```
 
 Smoke tests should eventually run in clean Ubuntu/Debian/Fedora/Arch containers or VMs. Do not call a package production-ready without install/upgrade/remove tests.
@@ -219,6 +229,14 @@ Database migrations must be versioned, idempotent, and backed up before mutation
 
 Rollback notes must accompany every release once packages are published.
 
-## Current limitation
+## Current MVP limitations
 
 This repository currently contains a daemon skeleton. The package/service baseline is useful now, but production service enablement must wait for a persistent daemon command and tested runtime behavior.
+
+Known limits for 0.1.x:
+
+- The installed systemd unit is `skynet-edr.service`; `skynet-edr-daemon.service` is not an emitted artifact.
+- The service `ExecStart` references the future `skynet-edr-daemon run --config /etc/skynet-edr/config.toml` command and must not be treated as production-ready until that runtime exists.
+- The packaged config path is `/etc/skynet-edr/config.toml`.
+- `nfpm`, `dpkg-deb`, `rpm`, and Arch package inspection tools are optional host tools; absence of those tools blocks artifact verification, not source tests.
+- Clean-host install/upgrade/remove smoke tests are still manual/future work.

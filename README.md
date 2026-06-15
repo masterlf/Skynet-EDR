@@ -57,7 +57,7 @@ The first research/MVP scope is detection and alerting for:
 
 ## Status
 
-This repository now has an initial Rust workspace skeleton for the platform-independent core, CLI, daemon placeholder, and read-only MCP integration primitives.
+This repository is currently at the 0.1.x MVP baseline for the platform-independent core, CLI, daemon skeleton, read-only MCP integration primitives, localhost read-only HTTP API, local visibility console, and Linux packaging assets.
 
 Current crates:
 
@@ -68,7 +68,32 @@ Current crates:
 
 See [Rust workspace](docs/WORKSPACE.md) for layout and commands.
 
-The next implementation steps are to expand the core event schema, redaction engine, detection rules, and storage model.
+## MVP release baseline
+
+Current source version: `0.1.0` across all workspace crates. The 0.1.x line is an MVP/pre-production series: patch releases may refine CLI output, documentation, packaging metadata, fixture coverage, and passive/read-only surfaces, but must not silently enable privileged sensors, non-loopback listeners, or network egress.
+
+Release artifact names are produced under `dist/` by the packaging scripts:
+
+```text
+dist/skynet-edr_${VERSION}_${ARCH}.deb
+dist/skynet-edr-${VERSION}-1.${ARCH}.rpm
+dist/skynet-edr-${VERSION}-1-${ARCH}.pkg.tar.zst
+dist/skynet-edr-${VERSION}-${TARGET}.tar.gz
+```
+
+Use `packaging/scripts/build-packages.sh` for `.deb`, `.rpm`, and Arch artifacts when `nfpm` is installed. Use `packaging/scripts/build-tarball.sh` for the custom tarball.
+
+MVP known limits: the daemon still has no production long-running `run` implementation, the packaged service is named `skynet-edr.service` but remains a forward-looking template, privileged Linux sensor validation is manual-only in a disposable lab, and package install/upgrade/remove smoke tests are not yet continuous.
+
+MVP acceptance gate:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+packaging/scripts/validate-packaging.sh
+git diff --check
+```
 
 ## Development
 
