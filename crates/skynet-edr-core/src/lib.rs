@@ -1011,8 +1011,13 @@ pub enum StorageError {
     Json(serde_json::Error),
     /// Filesystem I/O failed for a database or JSONL export path.
     Io(std::io::Error),
-    /// A timestamp does not fit SQLite's signed integer representation.
-    IntegerOutOfRange { field: &'static str, value: u64 },
+    /// A timestamp does not fit `SQLite`'s signed integer representation.
+    IntegerOutOfRange {
+        /// Name of the timestamp field being persisted.
+        field: &'static str,
+        /// Original unsigned timestamp value.
+        value: u64,
+    },
 }
 
 impl std::fmt::Display for StorageError {
