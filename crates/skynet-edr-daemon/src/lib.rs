@@ -136,6 +136,17 @@ pub struct HttpApiResponse {
     pub body: Value,
 }
 
+/// Structured response returned by the local read-only HTML console router.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleResponse {
+    /// HTTP status.
+    pub status: HttpStatus,
+    /// Response content type.
+    pub content_type: &'static str,
+    /// HTML response body.
+    pub body: String,
+}
+
 /// Read-only HTTP API handler error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpApiError {
@@ -183,6 +194,207 @@ pub fn handle_http_request(
     };
 
     Ok(response)
+}
+
+/// Route one local read-only HTML console request without opening a socket.
+///
+/// The console is intentionally a thin localhost UI projection over the Phase 10
+/// HTTP API router. It performs no sensor starts, response actions, config
+/// writes, or direct raw-evidence reads; it renders only API output.
+///
+/// # Errors
+///
+/// Returns [`HttpApiError`] only when the underlying API router or JSON renderer
+/// reports an unexpected serialization failure.
+pub fn handle_console_request(
+    store: &LocalStore,
+    method: HttpMethod,
+    path: &str,
+) -> Result<ConsoleResponse, HttpApiError> {
+    let response = match path {
+        "/" | "/console" | "/console/" => console_get(method, || render_console_index(store)),
+        "/console/rules" => console_api_page(store, method, "/api/rules", "Rules"),
+        "/console/sensors" => console_api_page(store, method, "/api/sensors", "Sensors"),
+        "/console/config-drift" => {
+            console_api_page(store, method, "/api/config-drift", "Config drift")
+        }
+        _ => match path.strip_prefix("/console/incidents/") {
+            Some(incident_id) if !incident_id.is_empty() => console_api_page(
+                store,
+                method,
+                &format!("/api/incidents/{incident_id}"),
+                "Redacted evidence",
+            ),
+            _ => console_response(
+                HttpStatus::NotFound,
+                "Not found",
+                "not_found: this local console exposes read-only visibility pages only",
+            ),
+        },
+    };
+
+    Ok(response)
+}
+
+fn console_get(
+    method: HttpMethod,
+    render: impl FnOnce() -> Result<String, HttpApiError>,
+) -> ConsoleResponse {
+    if method == HttpMethod::Get {
+        match render() {
+            Ok(body) => ConsoleResponse {
+                status: HttpStatus::Ok,
+                content_type: "text/html; charset=utf-8",
+                body,
+            },
+            Err(error) => console_response(
+                HttpStatus::InternalServerError,
+                "Console error",
+                &format!("storage_read_failed: {error}"),
+            ),
+        }
+    } else {
+        console_response(
+            HttpStatus::MethodNotAllowed,
+            "Method not allowed",
+            "method_not_allowed: the local console is read-only",
+        )
+    }
+}
+
+fn console_api_page(
+    store: &LocalStore,
+    method: HttpMethod,
+    api_path: &str,
+    title: &str,
+) -> ConsoleResponse {
+    console_get(method, || {
+        let api_response = handle_http_request(store, HttpMethod::Get, api_path)?;
+        if api_response.status == HttpStatus::Ok {
+            let pretty =
+                serde_json::to_string_pretty(&api_response.body).map_err(|error| HttpApiError {
+                    message: format!("failed to render console JSON: {error}"),
+                })?;
+            Ok(html_page(
+                title,
+                &format!(
+                    "<p class=\"badge\">Read-only API projection: {}</p><pre>{}</pre>",
+                    escape_html(api_path),
+                    escape_html(&pretty)
+                ),
+            ))
+        } else {
+            let body = api_response.body.to_string();
+            Ok(html_page(
+                title,
+                &format!(
+                    "<p class=\"badge\">Read-only API projection: {}</p><pre>{}</pre>",
+                    escape_html(api_path),
+                    escape_html(&body)
+                ),
+            ))
+        }
+    })
+}
+
+fn render_console_index(store: &LocalStore) -> Result<String, HttpApiError> {
+    let status = handle_http_request(store, HttpMethod::Get, "/api/status")?;
+    let incidents = handle_http_request(store, HttpMethod::Get, "/api/incidents")?;
+    let timeline = render_incident_timeline(&incidents.body);
+    let status_text = serde_json::to_string_pretty(&status.body).map_err(|error| HttpApiError {
+        message: format!("failed to render console status: {error}"),
+    })?;
+
+    Ok(html_page(
+        "Skynet-EDR Local Console",
+        &format!(
+            "<p class=\"badge\">Read-only localhost visibility</p>\
+             <nav><a href=\"/console/rules\">Rules</a> · \
+             <a href=\"/console/sensors\">Sensors</a> · \
+             <a href=\"/console/config-drift\">Config drift</a></nav>\
+             <section><h2>Status</h2><pre>{}</pre></section>\
+             <section><h2>Incident timeline</h2>{timeline}</section>",
+            escape_html(&status_text)
+        ),
+    ))
+}
+
+fn render_incident_timeline(incidents: &Value) -> String {
+    let Some(items) = incidents.as_array() else {
+        return "<p>No incident timeline available.</p>".to_owned();
+    };
+    if items.is_empty() {
+        return "<p>No incidents recorded.</p>".to_owned();
+    }
+
+    let mut html = String::from("<ol>");
+    for incident in items {
+        let id = incident
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let title = incident
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("untitled incident");
+        let severity = incident
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let updated = incident
+            .get("updated_at_unix_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        html.push_str(&format!(
+            "<li><a href=\"/console/incidents/{}\">{}</a> \
+             <span class=\"badge\">{}</span> \
+             <span class=\"muted\">updated {}</span></li>",
+            escape_html(id),
+            escape_html(title),
+            escape_html(severity),
+            updated
+        ));
+    }
+    html.push_str("</ol>");
+    html
+}
+
+fn console_response(status: HttpStatus, title: &str, message: &str) -> ConsoleResponse {
+    ConsoleResponse {
+        status,
+        content_type: "text/html; charset=utf-8",
+        body: html_page(title, &format!("<pre>{}</pre>", escape_html(message))),
+    }
+}
+
+fn html_page(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <title>{}</title><style>body{{font-family:system-ui,sans-serif;max-width:960px;\
+         margin:2rem auto;padding:0 1rem;background:#0b1020;color:#edf2f7}}\
+         a{{color:#90cdf4}}pre{{white-space:pre-wrap;background:#111827;padding:1rem;\
+         border:1px solid #2d3748;border-radius:0.5rem;overflow:auto}}\
+         .badge{{color:#9ae6b4}}.muted{{color:#a0aec0}}</style></head>\
+         <body><main><h1>{}</h1>{}</main></body></html>",
+        escape_html(title),
+        escape_html(title),
+        body
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn route_get(

@@ -1,6 +1,8 @@
-# Local Read-Only HTTP API
+# Local Read-Only HTTP API and Console
 
 Skynet-EDR exposes a minimal local HTTP API surface for operator visibility. The API is designed as a localhost-only projection over already-redacted local state.
+
+Phase 11 adds a tiny HTML console router on top of the same Phase 10 API projection. It is a read-only visibility surface, not a response console.
 
 ## Security boundary
 
@@ -25,11 +27,25 @@ This API is an operator visibility interface, not a control plane.
 | `/api/sensors` | `GET` | Available sensor metadata. |
 | `/api/config-drift` | `GET` | Redacted config drift findings. |
 
+## Console routes
+
+The console routes return `text/html; charset=utf-8` and are rendered from the API router output, with JSON evidence HTML-escaped before display.
+
+| Route | Method | Purpose |
+|---|---:|---|
+| `/console` | `GET` | Local console home with status and incident timeline. |
+| `/console/incidents/<id>` | `GET` | Redacted evidence view for one incident. |
+| `/console/rules` | `GET` | Rules status page. |
+| `/console/sensors` | `GET` | Sensors status page. |
+| `/console/config-drift` | `GET` | Config-drift status page. |
+
+The console has no JavaScript dependency, no response-action routes, and no direct raw evidence reads.
+
 Unknown routes return `404 not_found`.
 
 ## Current implementation note
 
-Phase 10 implements the validated configuration and side-effect-free request router. The next console/server phase can attach this router to a tiny localhost listener without changing route semantics.
+Phase 10 implements the validated configuration and side-effect-free request router. Phase 11 adds the side-effect-free HTML console router; a future listener can attach both routers to the same validated localhost-only bind without changing route semantics.
 
 ## Verification
 

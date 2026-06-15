@@ -9,7 +9,9 @@ use skynet_edr_core::{
     Event, EventId, EventSource, Incident, IncidentId, IncidentStatus, LocalStore,
     RedactionMetadata, Severity, SourceKind,
 };
-use skynet_edr_daemon::{handle_http_request, HttpApiConfig, HttpMethod, HttpStatus};
+use skynet_edr_daemon::{
+    handle_console_request, handle_http_request, HttpApiConfig, HttpMethod, HttpStatus,
+};
 
 fn temp_store() -> LocalStore {
     let db_path = std::env::temp_dir().join(format!(
@@ -63,7 +65,7 @@ fn stored_incident_with_sensitive_event() -> Incident {
         updated_at_unix_ms: 43,
         status: IncidentStatus::Open,
         severity: Severity::High,
-        title: "Incident token=FAKE_TOKEN_NEVER_EXPOSE".to_owned(),
+        title: "Incident token=FAKE_TOKEN_NEVER_EXPOSE <script>alert(1)</script>".to_owned(),
         summary: "Observed /root/.hermes/auth.json drift".to_owned(),
         source,
         events: vec![event],
@@ -183,4 +185,82 @@ fn incidents_and_config_drift_endpoints_redact_before_output() {
         assert!(!body.contains("/root/.hermes/auth.json"));
         assert!(body.contains("[REDACTED:"));
     }
+}
+
+#[test]
+fn console_index_renders_local_read_only_visibility_pages() {
+    let store = temp_store();
+    store
+        .insert_incident(&stored_incident_with_sensitive_event())
+        .expect("incident persists for console timeline");
+
+    let response = handle_console_request(&store, HttpMethod::Get, "/console")
+        .expect("console index responds");
+    let body = response.body;
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.content_type, "text/html; charset=utf-8");
+    assert!(body.contains("Skynet-EDR Local Console"));
+    assert!(body.contains("Read-only localhost visibility"));
+    assert!(body.contains("Incident timeline"));
+    assert!(body.contains("inc_http_api_redaction"));
+    assert!(body.contains("/console/incidents/inc_http_api_redaction"));
+    assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(body.contains("Rules"));
+    assert!(body.contains("Sensors"));
+    assert!(body.contains("Config drift"));
+    assert!(!body.contains("<script"));
+}
+
+#[test]
+fn console_incident_evidence_uses_redacted_api_output_and_escapes_html() {
+    let store = temp_store();
+    store
+        .insert_incident(&stored_incident_with_sensitive_event())
+        .expect("incident persists for console evidence");
+
+    let response = handle_console_request(
+        &store,
+        HttpMethod::Get,
+        "/console/incidents/inc_http_api_redaction",
+    )
+    .expect("console evidence view responds");
+    let body = response.body;
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert!(body.contains("Redacted evidence"));
+    assert!(body.contains("[REDACTED:"));
+    assert!(!body.contains("FAKE_TOKEN_NEVER_EXPOSE"));
+    assert!(!body.contains("/root/.hermes/auth.json"));
+    assert!(!body.contains("token=FAKE_TOKEN_NEVER_EXPOSE"));
+}
+
+#[test]
+fn console_status_pages_are_read_only_get_only_and_do_not_add_response_actions() {
+    let store = temp_store();
+
+    for path in [
+        "/console/rules",
+        "/console/sensors",
+        "/console/config-drift",
+    ] {
+        let response = handle_console_request(&store, HttpMethod::Get, path)
+            .unwrap_or_else(|error| panic!("{path} should respond: {error}"));
+        assert_eq!(response.status, HttpStatus::Ok);
+        assert_eq!(response.content_type, "text/html; charset=utf-8");
+        assert!(response.body.contains("Read-only"));
+        assert!(!response.body.contains("Pause agent"));
+        assert!(!response.body.contains("Quarantine"));
+        assert!(!response.body.contains("POST"));
+    }
+
+    let mutation = handle_console_request(&store, HttpMethod::Post, "/console")
+        .expect("mutating method returns structured console response");
+    let unknown = handle_console_request(&store, HttpMethod::Get, "/console/response/pause-agent")
+        .expect("unknown response action route returns structured console response");
+
+    assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
+    assert!(mutation.body.contains("method_not_allowed"));
+    assert_eq!(unknown.status, HttpStatus::NotFound);
+    assert!(unknown.body.contains("not_found"));
 }
