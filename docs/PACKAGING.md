@@ -30,7 +30,7 @@ Required files:
 ```text
 /usr/bin/skynet-edr
 /usr/bin/skynet-edr-daemon
-/usr/lib/systemd/system/skynet-edr-daemon.service
+/usr/lib/systemd/system/skynet-edr.service
 /usr/lib/sysusers.d/skynet-edr.conf
 /usr/lib/tmpfiles.d/skynet-edr.conf
 /etc/skynet-edr/skynet-edr.toml
@@ -62,12 +62,12 @@ Default package posture:
 - Main daemon stores and correlates redacted events.
 - Future privileged sensors should be separate helper processes with narrow capabilities.
 
-The current daemon does not yet expose a long-running `run` command. Therefore:
+The daemon exposes a conservative long-running `run --config <path>` path. Therefore:
 
-- package assets may include the future service template,
+- package assets include the service unit wired to the daemon,
 - package post-install must not auto-enable/start the service,
-- CI may validate static assets and binaries,
-- production service start tests wait until daemon runtime exists.
+- CI validates static assets, binaries, and the passive daemon startup path,
+- production service checks should still verify passive config and systemd hardening before enablement.
 
 ## AI-agent adapter packaging
 

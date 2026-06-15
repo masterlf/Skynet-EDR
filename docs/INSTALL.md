@@ -32,7 +32,7 @@ Packaged installs should create this layout:
 /var/lib/skynet-edr/skynet-edr.sqlite
 /var/log/skynet-edr/
 /run/skynet-edr/
-/usr/lib/systemd/system/skynet-edr-daemon.service
+/usr/lib/systemd/system/skynet-edr.service
 /usr/lib/sysusers.d/skynet-edr.conf
 /usr/lib/tmpfiles.d/skynet-edr.conf
 ```
@@ -108,12 +108,12 @@ Packages should not auto-enable privileged sensors. Enable the daemon only after
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now skynet-edr-daemon.service
-sudo systemctl status skynet-edr-daemon.service
-journalctl -u skynet-edr-daemon.service -n 100 --no-pager
+sudo systemctl enable --now skynet-edr.service
+sudo systemctl status skynet-edr.service
+journalctl -u skynet-edr.service -n 100 --no-pager
 ```
 
-Current caveat: until `skynet-edr-daemon run` exists, the packaged service is a forward-looking template and should not be treated as a production long-running service.
+Current caveat: the service starts the conservative passive daemon path. Review `/etc/skynet-edr/config.toml` before enablement; privileged sensors remain disabled and unsupported by the MVP service.
 
 ## Install from `.rpm` on RHEL-compatible Linux or Fedora
 
@@ -130,8 +130,8 @@ Then review config and enable manually:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now skynet-edr-daemon.service
-sudo systemctl status skynet-edr-daemon.service
+sudo systemctl enable --now skynet-edr.service
+sudo systemctl status skynet-edr.service
 ```
 
 SELinux note: Skynet-EDR should not require disabling SELinux. If future sensors need access to home directories, audit logs, eBPF, or agent runtime sockets, ship a narrow SELinux policy module instead of telling users to set permissive mode. No circus with SELinux, merci.
@@ -159,7 +159,7 @@ skynet-edr-VERSION-TARGET/
   bin/skynet-edr
   bin/skynet-edr-daemon
   etc/skynet-edr.toml.example
-  systemd/skynet-edr-daemon.service
+  systemd/skynet-edr.service
   sysusers.d/skynet-edr.conf
   tmpfiles.d/skynet-edr.conf
   install.sh
@@ -229,10 +229,10 @@ sudo -u skynet-edr skynet-edr events list --db /var/lib/skynet-edr/skynet-edr.sq
 Service checks:
 
 ```bash
-systemctl status skynet-edr-daemon.service
-journalctl -u skynet-edr-daemon.service --since today --no-pager
-systemd-analyze verify /usr/lib/systemd/system/skynet-edr-daemon.service
-systemd-analyze security skynet-edr-daemon.service
+systemctl status skynet-edr.service
+journalctl -u skynet-edr.service --since today --no-pager
+systemd-analyze verify /usr/lib/systemd/system/skynet-edr.service
+systemd-analyze security skynet-edr.service
 ```
 
 ## Upgrade and rollback
@@ -252,11 +252,11 @@ Before storage migrations become real, package scripts should back up state to:
 Rollback should be documented per release:
 
 ```bash
-sudo systemctl stop skynet-edr-daemon.service
+sudo systemctl stop skynet-edr.service
 sudo apt install ./previous.deb       # Debian/Ubuntu/Mint
 sudo dnf downgrade ./previous.rpm     # RHEL/Fedora
 sudo pacman -U ./previous.pkg.tar.zst # Arch
-sudo systemctl start skynet-edr-daemon.service
+sudo systemctl start skynet-edr.service
 ```
 
 ## Uninstall
@@ -264,21 +264,21 @@ sudo systemctl start skynet-edr-daemon.service
 Debian/Ubuntu/Mint:
 
 ```bash
-sudo systemctl disable --now skynet-edr-daemon.service || true
+sudo systemctl disable --now skynet-edr.service || true
 sudo apt remove skynet-edr
 ```
 
 RHEL/Fedora:
 
 ```bash
-sudo systemctl disable --now skynet-edr-daemon.service || true
+sudo systemctl disable --now skynet-edr.service || true
 sudo dnf remove skynet-edr
 ```
 
 Arch:
 
 ```bash
-sudo systemctl disable --now skynet-edr-daemon.service || true
+sudo systemctl disable --now skynet-edr.service || true
 sudo pacman -R skynet-edr
 ```
 
@@ -288,7 +288,7 @@ Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default
 
 | Symptom | Check |
 |---|---|
-| Service will not start | `journalctl -u skynet-edr-daemon.service -n 100 --no-pager` |
+| Service will not start | `journalctl -u skynet-edr.service -n 100 --no-pager` |
 | Permission denied on DB | ownership/mode of `/var/lib/skynet-edr` and service user |
 | Config unreadable | `/etc/skynet-edr` group and mode |
 | RHEL/Fedora denial | `ausearch -m avc -ts recent` and SELinux policy status |
