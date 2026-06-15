@@ -165,22 +165,15 @@ pub fn handle_http_request(
     method: HttpMethod,
     path: &str,
 ) -> Result<HttpApiResponse, HttpApiError> {
-    if method != HttpMethod::Get {
-        return Ok(json_response(
-            HttpStatus::MethodNotAllowed,
-            json!({"error": "method_not_allowed", "read_only": true}),
-        ));
-    }
-
     let response = match path {
-        "/api/status" => read_response(skynet_edr_mcp::status(store)),
-        "/api/incidents" => read_response(skynet_edr_mcp::list_incidents(store)),
-        "/api/rules" => json_response(HttpStatus::Ok, skynet_edr_mcp::list_rules()),
-        "/api/sensors" => json_response(HttpStatus::Ok, skynet_edr_mcp::list_sensors()),
-        "/api/config-drift" => read_response(skynet_edr_mcp::get_config_drift(store)),
+        "/api/status" => route_get(method, || skynet_edr_mcp::status(store)),
+        "/api/incidents" => route_get(method, || skynet_edr_mcp::list_incidents(store)),
+        "/api/rules" => route_static_get(method, skynet_edr_mcp::list_rules()),
+        "/api/sensors" => route_static_get(method, skynet_edr_mcp::list_sensors()),
+        "/api/config-drift" => route_get(method, || skynet_edr_mcp::get_config_drift(store)),
         _ => match path.strip_prefix("/api/incidents/") {
             Some(incident_id) if !incident_id.is_empty() => {
-                read_response(skynet_edr_mcp::get_incident(store, incident_id))
+                route_get(method, || skynet_edr_mcp::get_incident(store, incident_id))
             }
             _ => json_response(
                 HttpStatus::NotFound,
@@ -190,6 +183,32 @@ pub fn handle_http_request(
     };
 
     Ok(response)
+}
+
+fn route_get(
+    method: HttpMethod,
+    read: impl FnOnce() -> Result<Value, skynet_edr_mcp::McpReadError>,
+) -> HttpApiResponse {
+    if method == HttpMethod::Get {
+        read_response(read())
+    } else {
+        method_not_allowed_response()
+    }
+}
+
+fn route_static_get(method: HttpMethod, value: Value) -> HttpApiResponse {
+    if method == HttpMethod::Get {
+        json_response(HttpStatus::Ok, value)
+    } else {
+        method_not_allowed_response()
+    }
+}
+
+fn method_not_allowed_response() -> HttpApiResponse {
+    json_response(
+        HttpStatus::MethodNotAllowed,
+        json!({"error": "method_not_allowed", "read_only": true}),
+    )
 }
 
 fn read_response(result: Result<Value, skynet_edr_mcp::McpReadError>) -> HttpApiResponse {

@@ -128,14 +128,19 @@ fn http_api_rejects_mutating_methods_and_unknown_routes() {
     let store = temp_store();
 
     let mutation = handle_http_request(&store, HttpMethod::Post, "/api/incidents")
-        .expect("mutating method returns a structured response");
+        .expect("mutating method on known route returns a structured response");
     let missing = handle_http_request(&store, HttpMethod::Get, "/api/response/pause-agent")
         .expect("unknown route returns a structured response");
+    let unknown_mutation =
+        handle_http_request(&store, HttpMethod::Post, "/api/response/pause-agent")
+            .expect("unknown mutating route returns a structured response");
 
     assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
     assert_eq!(mutation.body["error"], "method_not_allowed");
     assert_eq!(missing.status, HttpStatus::NotFound);
     assert_eq!(missing.body["error"], "not_found");
+    assert_eq!(unknown_mutation.status, HttpStatus::NotFound);
+    assert_eq!(unknown_mutation.body["error"], "not_found");
 }
 
 #[test]
