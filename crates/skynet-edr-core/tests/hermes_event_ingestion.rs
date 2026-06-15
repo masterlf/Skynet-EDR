@@ -2,7 +2,7 @@
 
 use std::{fs, path::PathBuf};
 
-use skynet_edr_core::{ingest_hermes_events_json, LocalStore, SourceKind};
+use skynet_edr_core::{ingest_hermes_events_json, LocalStore, Severity, SourceKind};
 
 fn temp_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -132,6 +132,55 @@ fn ingests_messaging_and_email_delivery_actions_as_delivery_events() {
     assert!(!serialized.contains("fake-delivery-token"));
     assert!(!serialized.contains("mail-secret"));
     assert!(serialized.contains("delivery_action"));
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
+fn correlates_sensitive_file_access_plus_egress_into_redacted_incident() {
+    let db_path = temp_path("secret-egress.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+
+    let ingested = ingest_hermes_events_json(
+        &store,
+        include_str!("fixtures/hermes_secret_egress_trace.json"),
+    )
+    .expect("trace ingests");
+    assert_eq!(ingested, 2);
+
+    let events = store.list_events().expect("events list");
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .any(|event| event.source.kind == SourceKind::File));
+    assert!(events.iter().any(|event| {
+        event.attributes.get("command_class") == Some(&serde_json::json!("network_egress"))
+    }));
+
+    let incidents = store.list_incidents().expect("incidents list");
+    assert_eq!(incidents.len(), 1);
+    let incident = &incidents[0];
+    assert_eq!(
+        incident.id.as_str(),
+        "inc:EDR-EXFIL-001:sess_secret_egress:1781519100000"
+    );
+    assert_eq!(incident.severity, Severity::Critical);
+    assert_eq!(incident.status, skynet_edr_core::IncidentStatus::Open);
+    assert_eq!(incident.source.kind, SourceKind::Process);
+    assert_eq!(incident.events.len(), 2);
+    assert!(incident
+        .title
+        .contains("Secret access followed by network egress"));
+    assert!(incident.summary.contains("EDR-EXFIL-001"));
+    assert!(incident.summary.contains("60 seconds"));
+
+    let serialized = serde_json::to_string(incident).expect("incident serializes");
+    assert!(!serialized.contains("/root/.hermes/auth.json"));
+    assert!(!serialized.contains("fake-output-secret"));
+    assert!(!serialized.contains("fake-token-value"));
+    assert!(serialized.contains("[REDACTED:local_context]"));
+    assert!(serialized.contains("[REDACTED:secret]"));
+    assert!(incident.redaction.contains_sensitive_data);
 
     fs::remove_file(db_path).expect("temporary db is removed");
 }

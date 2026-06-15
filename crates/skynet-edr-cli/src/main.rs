@@ -2,7 +2,9 @@
 
 use std::{env, fs, process::ExitCode};
 
-use skynet_edr_core::{ingest_hermes_events_json, Event, Incident, LocalStore, ProductInfo};
+use skynet_edr_core::{
+    ingest_hermes_events_json_with_detection, Event, Incident, LocalStore, ProductInfo,
+};
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec<_>>();
@@ -87,8 +89,11 @@ fn handle_events(args: &[String]) -> Result<(), CliError> {
             let trace_json = required_option(&options, "--trace-json")?;
             let trace_json = fs::read_to_string(trace_json)?;
             let store = LocalStore::open(db_path)?;
-            let count = ingest_hermes_events_json(&store, &trace_json)?;
-            println!("ingested {count} Hermes event(s)");
+            let summary = ingest_hermes_events_json_with_detection(&store, &trace_json)?;
+            println!(
+                "ingested {} Hermes event(s), opened {} incident(s)",
+                summary.event_count, summary.incident_count
+            );
             Ok(())
         }
         Some("list") => {
