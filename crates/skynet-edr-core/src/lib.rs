@@ -76,6 +76,7 @@ pub enum SourceKind {
 
 /// Platform-independent source metadata for an event or incident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventSource {
     /// Coarse source category that avoids OS-specific type coupling.
     pub kind: SourceKind,
@@ -101,6 +102,7 @@ pub enum RedactionReason {
 
 /// One JSON field redacted from an event or incident payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedactedField {
     /// Dotted JSON path to the redacted value.
     pub path: String,
@@ -112,6 +114,7 @@ pub struct RedactedField {
 
 /// Redaction metadata carried with stored events and incidents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedactionMetadata {
     /// Whether sensitive data was found before redaction.
     pub contains_sensitive_data: bool,
@@ -269,7 +272,46 @@ impl CanonicalEventEnvelope {
                 "redaction metadata is inconsistent with redacted_fields".to_owned(),
             ));
         }
+        for field in &self.redaction.redacted_fields {
+            self.validate_redacted_field(field)?;
+        }
         Ok(())
+    }
+
+    fn validate_redacted_field(&self, field: &RedactedField) -> Result<(), CanonicalEventError> {
+        if field.path.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "redaction field path must not be empty".to_owned(),
+            ));
+        }
+        if field.replacement.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "redaction replacement must not be empty".to_owned(),
+            ));
+        }
+        match field.path.as_str() {
+            "details" => match &self.details {
+                Some(details) if details == &field.replacement => Ok(()),
+                Some(_) | None => Err(CanonicalEventError::Validation(format!(
+                    "redaction field {} does not match stored replacement",
+                    field.path
+                ))),
+            },
+            path if path.starts_with("attributes.") => {
+                let key = path.trim_start_matches("attributes.");
+                match self.attributes.get(key) {
+                    Some(serde_json::Value::String(value)) if value == &field.replacement => Ok(()),
+                    Some(_) | None => Err(CanonicalEventError::Validation(format!(
+                        "redaction field {} does not match stored replacement",
+                        field.path
+                    ))),
+                }
+            }
+            _ => Err(CanonicalEventError::Validation(format!(
+                "redaction field {} is outside the canonical event payload",
+                field.path
+            ))),
+        }
     }
 }
 
