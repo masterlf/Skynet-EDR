@@ -9,6 +9,9 @@ on:
         type: string
   release:
     types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -17,6 +20,8 @@ jobs:
   package:
     name: Build and inspect Linux packages
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       NFPM_VERSION: v2.46.3
       NFPM_ARCH: amd64
@@ -86,6 +91,74 @@ jobs:
             dist/inspection/*.txt
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish GitHub release for version tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > dist/release-notes.md <<'NOTES'
+          # Skynet-EDR passive Linux-first MVP
+
+          This is the first installable MVP release of Skynet-EDR.
+
+          ## What works
+          - Installable Linux `amd64` packages: Debian/Ubuntu `.deb`, RPM, Arch `.pkg.tar.zst`, and custom tarball.
+          - Passive daemon service path: `skynet-edr-daemon run --config /etc/skynet-edr/config.toml`.
+          - Local CLI storage: initialize SQLite store, ingest events, list/show/export events and incidents.
+          - Hermes/AI-agent trace ingestion with redaction.
+          - MVP correlation rule `EDR-EXFIL-001`: secret/sensitive file access followed by network egress opens a critical incident.
+          - Read-only local API/MCP visibility surfaces.
+
+          ## Install quickly
+          Download the package for your distribution and `checksums.txt`, then verify:
+
+          ```bash
+          sha256sum -c checksums.txt --ignore-missing
+          ```
+
+          Debian/Ubuntu/Mint:
+
+          ```bash
+          sudo apt install ./skynet-edr_0.1.0_amd64.deb
+          skynet-edr --version
+          skynet-edr-daemon status
+          ```
+
+          RHEL/Fedora-compatible:
+
+          ```bash
+          sudo dnf install ./skynet-edr-0.1.0-1.amd64.rpm
+          ```
+
+          Arch:
+
+          ```bash
+          sudo pacman -U ./skynet-edr-0.1.0-1-amd64.pkg.tar.zst
+          ```
+
+          Tarball:
+
+          ```bash
+          tar -xzf skynet-edr-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+          cd skynet-edr-0.1.0-x86_64-unknown-linux-gnu
+          sha256sum -c SHA256SUMS
+          sudo ./install.sh
+          ```
+
+          ## Important maturity note
+          This is an MVP/pre-production security tool. It is passive-first and does not yet claim full production EDR coverage, privileged kernel/eBPF sensors, signed packages, SBOMs, or distro repositories. The packages are usable for evaluation/lab deployment and initial passive testing.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz \
+            dist/*.deb \
+            dist/*.rpm \
+            dist/*.pkg.tar.zst \
+            dist/checksums.txt \
+            --title "Skynet-EDR ${GITHUB_REF_NAME} — passive Linux-first MVP" \
+            --notes-file dist/release-notes.md \
+            --prerelease \
+            --verify-tag
 
   attach-release-assets:
     name: Attach packages to GitHub release
