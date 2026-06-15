@@ -2,7 +2,7 @@
 
 use std::{env, fs, process::ExitCode};
 
-use skynet_edr_core::{Event, Incident, LocalStore, ProductInfo};
+use skynet_edr_core::{ingest_hermes_events_json, Event, Incident, LocalStore, ProductInfo};
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec<_>>();
@@ -79,6 +79,16 @@ fn handle_events(args: &[String]) -> Result<(), CliError> {
                 incident.id.as_str(),
                 incident.events.len()
             );
+            Ok(())
+        }
+        Some("ingest-hermes") => {
+            let options = parse_options(&args[3..])?;
+            let db_path = required_option(&options, "--db")?;
+            let trace_json = required_option(&options, "--trace-json")?;
+            let trace_json = fs::read_to_string(trace_json)?;
+            let store = LocalStore::open(db_path)?;
+            let count = ingest_hermes_events_json(&store, &trace_json)?;
+            println!("ingested {count} Hermes event(s)");
             Ok(())
         }
         Some("list") => {
@@ -236,6 +246,8 @@ fn print_help(binary: &str) {
     println!("  store init --db <path>              Initialize local SQLite storage");
     println!("  events ingest --db <path> --incident-json <file>");
     println!("                                      Ingest one incident JSON document and embedded events");
+    println!("  events ingest-hermes --db <path> --trace-json <file>");
+    println!("                                      Ingest read-only Hermes tool-call trace JSON");
     println!("  events list --db <path>            List stored events");
     println!("  events show <id> --db <path>       Print one event as JSON");
     println!("  events export --db <path> --format jsonl");
@@ -256,6 +268,7 @@ fn string_value(value: &serde_json::Value) -> String {
 enum CliError {
     Usage(String),
     Storage(skynet_edr_core::StorageError),
+    HermesIngest(skynet_edr_core::HermesIngestError),
     Json(serde_json::Error),
     Io(std::io::Error),
 }
@@ -265,6 +278,7 @@ impl std::fmt::Display for CliError {
         match self {
             Self::Usage(message) => write!(formatter, "{message}"),
             Self::Storage(error) => write!(formatter, "{error}"),
+            Self::HermesIngest(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "{error}"),
         }
@@ -276,6 +290,12 @@ impl std::error::Error for CliError {}
 impl From<skynet_edr_core::StorageError> for CliError {
     fn from(error: skynet_edr_core::StorageError) -> Self {
         Self::Storage(error)
+    }
+}
+
+impl From<skynet_edr_core::HermesIngestError> for CliError {
+    fn from(error: skynet_edr_core::HermesIngestError) -> Self {
+        Self::HermesIngest(error)
     }
 }
 
