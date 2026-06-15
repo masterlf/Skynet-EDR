@@ -1,0 +1,102 @@
+name: skynet-edr
+arch: ${NFPM_ARCH:-amd64}
+platform: linux
+version: ${SKYNET_EDR_VERSION:-0.1.0}
+section: security
+priority: optional
+maintainer: Skynet-EDR Maintainers <maintainers@example.invalid>
+description: |
+  Skynet-EDR passive AI-agent detection and response baseline for Linux.
+  Protects Hermes Agent, OpenClaw, Codex, Claude Code, and similar local agents
+  by monitoring agent-aware runtime signals, configuration drift, sensitive file
+  access, automation, and egress metadata.
+vendor: Skynet-EDR
+homepage: https://github.com/masterlf/Skynet-EDR
+license: Apache-2.0
+contents:
+  - src: ./target/release/skynet-edr
+    dst: /usr/bin/skynet-edr
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+  - src: ./target/release/skynet-edr-daemon
+    dst: /usr/bin/skynet-edr-daemon
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+  - src: ./packaging/config/config.toml
+    dst: /etc/skynet-edr/config.toml
+    type: config|noreplace
+    file_info:
+      mode: 0640
+      owner: root
+      group: skynet-edr
+  - dst: /etc/skynet-edr/rules.d
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: skynet-edr
+  - dst: /etc/skynet-edr/agents.d
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: skynet-edr
+  - src: ./packaging/systemd/skynet-edr.service
+    dst: /usr/lib/systemd/system/skynet-edr.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: ./packaging/sysusers/skynet-edr.conf
+    dst: /usr/lib/sysusers.d/skynet-edr.conf
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: ./packaging/tmpfiles/skynet-edr.conf
+    dst: /usr/lib/tmpfiles.d/skynet-edr.conf
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: ./README.md
+    dst: /usr/share/doc/skynet-edr/README.md
+  - src: ./docs/INSTALL.md
+    dst: /usr/share/doc/skynet-edr/INSTALL.md
+  - src: ./docs/PACKAGING.md
+    dst: /usr/share/doc/skynet-edr/PACKAGING.md
+  - src: ./LICENSE
+    dst: /usr/share/licenses/skynet-edr/LICENSE
+  - dst: /var/lib/skynet-edr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: skynet-edr
+      group: skynet-edr
+  - dst: /var/log/skynet-edr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: skynet-edr
+      group: skynet-edr
+  - dst: /var/cache/skynet-edr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: skynet-edr
+      group: skynet-edr
+
+depends:
+  - systemd
+
+deb:
+  fields:
+    Bugs: https://github.com/masterlf/Skynet-EDR/issues
+rpm:
+  group: Applications/System
+archlinux:
+  packager: Skynet-EDR Maintainers <maintainers@example.invalid>
