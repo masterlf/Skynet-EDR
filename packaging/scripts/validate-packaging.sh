@@ -15,6 +15,8 @@ packaging/tarball/install.sh
 packaging/tarball/uninstall.sh
 packaging/scripts/build-tarball.sh
 packaging/scripts/build-packages.sh
+packaging/scripts/inspect-artifacts.sh
+.github/workflows/packaging-release.yml
 "
 
 for file in $required_files; do
@@ -24,7 +26,7 @@ for file in $required_files; do
   fi
 done
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/validate-packaging.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-packaging.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1
@@ -59,21 +61,27 @@ grep -qi 'custom tarball' docs/PACKAGING.md
 grep -q 'docs/INSTALL.md' README.md
 grep -q 'docs/PACKAGING.md' README.md
 
+grep -q 'workflow_dispatch:' .github/workflows/packaging-release.yml
+grep -q 'release:' .github/workflows/packaging-release.yml
+grep -q 'packaging/scripts/build-tarball.sh' .github/workflows/packaging-release.yml
+grep -q 'packaging/scripts/build-packages.sh' .github/workflows/packaging-release.yml
+grep -q 'packaging/scripts/inspect-artifacts.sh' .github/workflows/packaging-release.yml
+grep -q 'actions/upload-artifact@' .github/workflows/packaging-release.yml
+
 sh -n packaging/tarball/install.sh
 sh -n packaging/tarball/uninstall.sh
 sh -n packaging/scripts/build-tarball.sh
 sh -n packaging/scripts/build-packages.sh
+sh -n packaging/scripts/inspect-artifacts.sh
 
 python3 - <<'PY'
-import pathlib, sys, yaml
-config = yaml.safe_load(pathlib.Path('packaging/nfpm.yaml').read_text())
-required = {'name', 'arch', 'platform', 'version', 'contents'}
-missing = required - set(config)
-if missing:
-    raise SystemExit(f'nfpm config missing keys: {sorted(missing)}')
-paths = {entry.get('dst') for entry in config['contents'] if isinstance(entry, dict)}
+import pathlib
+text = pathlib.Path('packaging/nfpm.yaml').read_text()
+for key in ['name:', 'arch:', 'platform:', 'version:', 'contents:']:
+    if key not in text:
+        raise SystemExit(f'nfpm config missing key: {key}')
 for path in ['/usr/bin/skynet-edr', '/usr/bin/skynet-edr-daemon', '/etc/skynet-edr/config.toml', '/usr/lib/systemd/system/skynet-edr.service']:
-    if path not in paths:
+    if f'dst: {path}' not in text:
         raise SystemExit(f'nfpm config missing destination: {path}')
 PY
 
