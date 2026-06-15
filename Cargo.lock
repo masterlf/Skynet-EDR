@@ -247,6 +247,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "skynet-edr-core",
+ "skynet-edr-mcp",
 ]
 
 [[package]]

@@ -8,15 +8,215 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     io,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
 };
 
+use serde_json::{json, Value};
 use skynet_edr_core::{
-    redact_attributes, Event, EventId, EventSource, RedactionMetadata, Severity, SourceKind,
+    redact_attributes, Event, EventId, EventSource, LocalStore, RedactionMetadata, Severity,
+    SourceKind,
 };
 
 const SENSOR_NAME: &str = "linux-passive-fixture";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
+
+/// Local read-only HTTP API configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpApiConfig {
+    /// Address the local API should bind to. Must be loopback.
+    pub bind_addr: SocketAddr,
+    /// Optional path to the local SQLite store.
+    pub store_path: Option<PathBuf>,
+    /// Reserved future flag. Must remain false for the read-only API.
+    pub allow_mutations: bool,
+}
+
+impl Default for HttpApiConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8787),
+            store_path: None,
+            allow_mutations: false,
+        }
+    }
+}
+
+impl HttpApiConfig {
+    /// Validate that the local API cannot be exposed remotely or mutate state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpApiConfigError`] when the bind address is not loopback or
+    /// mutations are enabled before the API has an approval-gated design.
+    pub fn validate(&self) -> Result<(), HttpApiConfigError> {
+        let mut reasons = Vec::new();
+        if !self.bind_addr.ip().is_loopback() {
+            reasons.push("HTTP API bind address must be loopback");
+        }
+        if self.allow_mutations {
+            reasons.push("HTTP API mutations are not implemented");
+        }
+
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(HttpApiConfigError { reasons })
+        }
+    }
+}
+
+/// Local HTTP API configuration error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpApiConfigError {
+    reasons: Vec<&'static str>,
+}
+
+impl std::fmt::Display for HttpApiConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "invalid HTTP API config: {}",
+            self.reasons.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for HttpApiConfigError {}
+
+/// Minimal HTTP methods accepted by the read-only router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpMethod {
+    /// HTTP GET.
+    Get,
+    /// HTTP POST.
+    Post,
+    /// HTTP PUT.
+    Put,
+    /// HTTP PATCH.
+    Patch,
+    /// HTTP DELETE.
+    Delete,
+}
+
+/// HTTP status values produced by the read-only router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpStatus {
+    /// Request succeeded.
+    Ok,
+    /// Route does not exist.
+    NotFound,
+    /// Method is not allowed for this API.
+    MethodNotAllowed,
+    /// Storage or serialization failed.
+    InternalServerError,
+}
+
+impl HttpStatus {
+    /// Return the numeric HTTP status code.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        match self {
+            Self::Ok => 200,
+            Self::NotFound => 404,
+            Self::MethodNotAllowed => 405,
+            Self::InternalServerError => 500,
+        }
+    }
+}
+
+/// Structured response returned by the read-only HTTP router.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpApiResponse {
+    /// HTTP status.
+    pub status: HttpStatus,
+    /// Response content type.
+    pub content_type: &'static str,
+    /// JSON response body.
+    pub body: Value,
+}
+
+/// Read-only HTTP API handler error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpApiError {
+    message: String,
+}
+
+impl std::fmt::Display for HttpApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HttpApiError {}
+
+/// Route one read-only HTTP API request without opening a socket.
+///
+/// The function is intentionally side-effect free except for reading the
+/// already-redacted local store through the same read-only projection used by
+/// the MCP visibility surface.
+///
+/// # Errors
+///
+/// Returns [`HttpApiError`] only for unexpected serialization failures. Storage
+/// read errors are rendered as structured HTTP 500 responses.
+pub fn handle_http_request(
+    store: &LocalStore,
+    method: HttpMethod,
+    path: &str,
+) -> Result<HttpApiResponse, HttpApiError> {
+    if method != HttpMethod::Get {
+        return Ok(json_response(
+            HttpStatus::MethodNotAllowed,
+            json!({"error": "method_not_allowed", "read_only": true}),
+        ));
+    }
+
+    let response = match path {
+        "/api/status" => read_response(skynet_edr_mcp::status(store)),
+        "/api/incidents" => read_response(skynet_edr_mcp::list_incidents(store)),
+        "/api/rules" => json_response(HttpStatus::Ok, skynet_edr_mcp::list_rules()),
+        "/api/sensors" => json_response(HttpStatus::Ok, skynet_edr_mcp::list_sensors()),
+        "/api/config-drift" => read_response(skynet_edr_mcp::get_config_drift(store)),
+        _ => match path.strip_prefix("/api/incidents/") {
+            Some(incident_id) if !incident_id.is_empty() => {
+                read_response(skynet_edr_mcp::get_incident(store, incident_id))
+            }
+            _ => json_response(
+                HttpStatus::NotFound,
+                json!({"error": "not_found", "read_only": true}),
+            ),
+        },
+    };
+
+    Ok(response)
+}
+
+fn read_response(result: Result<Value, skynet_edr_mcp::McpReadError>) -> HttpApiResponse {
+    match result {
+        Ok(value) => json_response(HttpStatus::Ok, value),
+        Err(skynet_edr_mcp::McpReadError::IncidentNotFound(_)) => json_response(
+            HttpStatus::NotFound,
+            json!({"error": "not_found", "read_only": true}),
+        ),
+        Err(error) => json_response(
+            HttpStatus::InternalServerError,
+            json!({
+                "error": "storage_read_failed",
+                "message": error.to_string(),
+                "read_only": true,
+            }),
+        ),
+    }
+}
+
+fn json_response(status: HttpStatus, body: Value) -> HttpApiResponse {
+    HttpApiResponse {
+        status,
+        content_type: "application/json",
+        body,
+    }
+}
 
 /// Manual Linux lab plan for future privileged sensor validation.
 ///
