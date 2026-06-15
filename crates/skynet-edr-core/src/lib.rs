@@ -1200,7 +1200,7 @@ fn insert_event_on_connection(connection: &Connection, event: &Event) -> Storage
             payload_json = excluded.payload_json",
         params![
             event.id.as_str(),
-            event.observed_at_unix_ms,
+            event.observed_at_unix_ms as i64,
             json_string_value(&severity),
             json_string_value(&source_kind),
             event.title,
@@ -1230,8 +1230,8 @@ fn insert_incident_on_connection(
             payload_json = excluded.payload_json",
         params![
             incident.id.as_str(),
-            incident.created_at_unix_ms,
-            incident.updated_at_unix_ms,
+            incident.created_at_unix_ms as i64,
+            incident.updated_at_unix_ms as i64,
             json_string_value(&status),
             json_string_value(&severity),
             incident.title,
