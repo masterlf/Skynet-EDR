@@ -68,6 +68,8 @@ pub enum SourceKind {
     Configuration,
     /// Scheduled job, cron entry, launch agent, or background task.
     ScheduledTask,
+    /// Messaging, email, chat, or notification delivery action.
+    Messaging,
     /// Generic sensor signal when a narrower category is not yet available.
     Sensor,
 }
@@ -976,6 +978,561 @@ pub struct Incident {
     pub events: Vec<Event>,
     /// Redaction decisions applied to incident-level data.
     pub redaction: RedactionMetadata,
+}
+
+/// Raw Hermes event kind accepted by the ingestion layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HermesIngestKind {
+    /// Hermes tool invocation requested by the agent runtime.
+    ToolCall,
+    /// Hermes tool/MCP result content returned to the agent runtime.
+    ToolResult,
+}
+
+/// One normalized raw record from Hermes session/tool traces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HermesIngestRecord {
+    /// Observation timestamp in Unix epoch milliseconds.
+    pub timestamp_unix_ms: u64,
+    /// Hermes session identifier.
+    pub session_id: String,
+    /// Hermes profile name.
+    pub profile: String,
+    /// Raw event kind.
+    pub kind: HermesIngestKind,
+    /// Tool name, such as `read_file`, `terminal`, or `send_message`.
+    pub tool: String,
+    /// Optional MCP server name for MCP/tool result content.
+    #[serde(default)]
+    pub mcp_server: Option<String>,
+    /// Tool arguments captured as hostile untrusted data.
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+    /// Tool result content captured as hostile untrusted data.
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+/// Error returned by Hermes ingestion.
+#[derive(Debug)]
+pub enum HermesIngestError {
+    /// A JSONL record failed to parse. Line numbers are 1-based.
+    Parse {
+        /// JSONL line number that failed.
+        line: usize,
+        /// Parser error message.
+        error: String,
+    },
+    /// Local storage failed while persisting redacted events.
+    Storage(StorageError),
+}
+
+impl std::fmt::Display for HermesIngestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse { line, error } => {
+                write!(
+                    formatter,
+                    "Hermes ingestion parse error on line {line}: {error}"
+                )
+            }
+            Self::Storage(error) => write!(formatter, "Hermes ingestion storage error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for HermesIngestError {}
+
+impl From<StorageError> for HermesIngestError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+/// Ingest Hermes JSONL records into the local store after normalization and redaction.
+///
+/// Empty lines are ignored. All JSON lines are parsed before anything is
+/// persisted, so malformed input fails closed without partial writes.
+///
+/// # Errors
+///
+/// Returns [`HermesIngestError::Parse`] for malformed JSONL records, or
+/// [`HermesIngestError::Storage`] if local persistence fails.
+pub fn ingest_hermes_json_lines(
+    store: &LocalStore,
+    input: &str,
+) -> Result<Vec<Event>, HermesIngestError> {
+    let mut records = Vec::new();
+    for (index, line) in input.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let record = serde_json::from_str::<HermesIngestRecord>(trimmed).map_err(|error| {
+            HermesIngestError::Parse {
+                line: index + 1,
+                error: error.to_string(),
+            }
+        })?;
+        records.push(record);
+    }
+
+    persist_hermes_records(store, &records)
+}
+
+/// Ingest a Hermes trace JSON object or array into the local store.
+///
+/// This accepts the looser object shape emitted by Hermes session/tool-call traces
+/// and maps it into the strict [`HermesIngestRecord`] normalization boundary.
+///
+/// # Errors
+///
+/// Returns [`HermesIngestError::Parse`] for malformed JSON, or
+/// [`HermesIngestError::Storage`] if local persistence fails.
+pub fn ingest_hermes_events_json(
+    store: &LocalStore,
+    input: &str,
+) -> Result<usize, HermesIngestError> {
+    let value = serde_json::from_str::<serde_json::Value>(input).map_err(|error| {
+        HermesIngestError::Parse {
+            line: 1,
+            error: error.to_string(),
+        }
+    })?;
+    let records = hermes_records_from_trace_value(&value);
+    let events = persist_hermes_records(store, &records)?;
+    Ok(events.len())
+}
+
+fn persist_hermes_records(
+    store: &LocalStore,
+    records: &[HermesIngestRecord],
+) -> Result<Vec<Event>, HermesIngestError> {
+    let events = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| normalize_hermes_record(record, index))
+        .collect::<Vec<_>>();
+
+    for event in &events {
+        store.insert_event(event)?;
+    }
+
+    Ok(events)
+}
+
+fn hermes_records_from_trace_value(value: &serde_json::Value) -> Vec<HermesIngestRecord> {
+    match value {
+        serde_json::Value::Array(records) => records
+            .iter()
+            .flat_map(hermes_records_from_trace_object)
+            .collect(),
+        serde_json::Value::Object(_) => hermes_records_from_trace_object(value),
+        _ => Vec::new(),
+    }
+}
+
+fn hermes_records_from_trace_object(value: &serde_json::Value) -> Vec<HermesIngestRecord> {
+    let mut records = Vec::new();
+    if let Some(tool_call) = value.get("tool_call") {
+        records.push(HermesIngestRecord {
+            timestamp_unix_ms: trace_timestamp(value),
+            session_id: trace_string(value, "session_id", "unknown_session"),
+            profile: trace_string(value, "profile", "unknown_profile"),
+            kind: HermesIngestKind::ToolCall,
+            tool: trace_string(tool_call, "name", "unknown_tool"),
+            mcp_server: value
+                .get("mcp_server")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            arguments: tool_call
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            content: value
+                .get("tool_output")
+                .or_else(|| value.get("mcp_output"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        });
+    } else if let Some(output) = value.get("tool_output").or_else(|| value.get("mcp_output")) {
+        records.push(HermesIngestRecord {
+            timestamp_unix_ms: trace_timestamp(value),
+            session_id: trace_string(value, "session_id", "unknown_session"),
+            profile: trace_string(value, "profile", "unknown_profile"),
+            kind: HermesIngestKind::ToolResult,
+            tool: trace_string(value, "tool", "unknown_tool"),
+            mcp_server: value
+                .get("mcp_server")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            arguments: serde_json::Value::Null,
+            content: output.as_str().map(str::to_owned),
+        });
+    }
+
+    if let Some(file_accesses) = value
+        .get("file_accesses")
+        .and_then(serde_json::Value::as_array)
+    {
+        for file_access in file_accesses {
+            records.push(HermesIngestRecord {
+                timestamp_unix_ms: trace_timestamp(value),
+                session_id: trace_string(value, "session_id", "unknown_session"),
+                profile: trace_string(value, "profile", "unknown_profile"),
+                kind: HermesIngestKind::ToolCall,
+                tool: "file_access".to_owned(),
+                mcp_server: None,
+                arguments: file_access.clone(),
+                content: None,
+            });
+        }
+    }
+
+    records
+}
+
+fn trace_timestamp(value: &serde_json::Value) -> u64 {
+    value
+        .get("timestamp_unix_ms")
+        .or_else(|| value.get("observed_at_unix_ms"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn trace_string(value: &serde_json::Value, key: &str, fallback: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
+fn hermes_source_kind(
+    kind: HermesIngestKind,
+    tool: &str,
+    network_indicator: bool,
+    delivery_indicator: bool,
+) -> SourceKind {
+    match kind {
+        HermesIngestKind::ToolCall if is_process_tool(tool) => SourceKind::Process,
+        HermesIngestKind::ToolCall if delivery_indicator => SourceKind::Messaging,
+        HermesIngestKind::ToolCall if is_file_tool(tool) => SourceKind::File,
+        HermesIngestKind::ToolCall if network_indicator => SourceKind::Network,
+        HermesIngestKind::ToolCall | HermesIngestKind::ToolResult => SourceKind::McpTool,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn normalize_hermes_record(record: &HermesIngestRecord, index: usize) -> Event {
+    let tool_lower = record.tool.to_ascii_lowercase();
+    let arguments_text = record.arguments.to_string().to_ascii_lowercase();
+    let network_indicator = is_networkish_tool_call(&tool_lower, &arguments_text);
+    let delivery_indicator = is_delivery_tool_call(&tool_lower, &arguments_text);
+    let sensitive_access = contains_sensitive_path(&arguments_text);
+
+    let source_kind = hermes_source_kind(
+        record.kind,
+        &tool_lower,
+        network_indicator,
+        delivery_indicator,
+    );
+    let severity = hermes_severity(
+        record.kind,
+        sensitive_access,
+        network_indicator,
+        delivery_indicator,
+    );
+    let attributes =
+        hermes_event_attributes(record, &tool_lower, network_indicator, delivery_indicator);
+    let title = hermes_event_title(record, &tool_lower, delivery_indicator);
+    let details = Some(hermes_event_details(record.kind));
+
+    redacted_hermes_event(Event {
+        id: EventId::new(stable_hermes_event_id(record, index)),
+        observed_at_unix_ms: record.timestamp_unix_ms,
+        severity,
+        source: EventSource {
+            kind: source_kind,
+            sensor: "hermes-event-ingestion".to_owned(),
+            integration: Some("hermes".to_owned()),
+        },
+        title,
+        details,
+        attributes,
+        redaction: RedactionMetadata {
+            contains_sensitive_data: false,
+            redacted_fields: redaction_from_omitted_content(record),
+        },
+    })
+}
+
+fn hermes_severity(
+    kind: HermesIngestKind,
+    sensitive_access: bool,
+    network_indicator: bool,
+    delivery_indicator: bool,
+) -> Severity {
+    match kind {
+        HermesIngestKind::ToolResult => Severity::Medium,
+        HermesIngestKind::ToolCall
+            if sensitive_access || network_indicator || delivery_indicator =>
+        {
+            Severity::High
+        }
+        HermesIngestKind::ToolCall => Severity::Low,
+    }
+}
+
+fn hermes_event_attributes(
+    record: &HermesIngestRecord,
+    tool_lower: &str,
+    network_indicator: bool,
+    delivery_indicator: bool,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut attributes = hermes_base_attributes(record, network_indicator, delivery_indicator);
+    insert_optional_hermes_arguments(&mut attributes, record);
+    if is_process_tool(tool_lower) {
+        attributes.insert(
+            "command_class".to_owned(),
+            serde_json::json!(command_class_from_arguments(&record.arguments)),
+        );
+    }
+    if delivery_indicator {
+        attributes.insert("delivery_action".to_owned(), serde_json::json!(record.tool));
+    }
+    if let Some(content) = record.content.as_deref() {
+        attributes.insert("content_redacted".to_owned(), serde_json::json!(true));
+        attributes.insert(
+            "content_length".to_owned(),
+            serde_json::json!(content.len()),
+        );
+    }
+    attributes
+}
+
+fn hermes_base_attributes(
+    record: &HermesIngestRecord,
+    network_indicator: bool,
+    delivery_indicator: bool,
+) -> BTreeMap<String, serde_json::Value> {
+    BTreeMap::from([
+        (
+            "session_id".to_owned(),
+            serde_json::json!(record.session_id),
+        ),
+        ("profile".to_owned(), serde_json::json!(record.profile)),
+        ("kind".to_owned(), serde_json::json!(record.kind)),
+        ("tool".to_owned(), serde_json::json!(record.tool)),
+        ("tool_name".to_owned(), serde_json::json!(record.tool)),
+        (
+            "mcp_output_untrusted".to_owned(),
+            serde_json::json!(
+                record.content.is_some() || record.kind == HermesIngestKind::ToolResult
+            ),
+        ),
+        (
+            "trust_level".to_owned(),
+            serde_json::json!(match record.kind {
+                HermesIngestKind::ToolCall => "agent_action",
+                HermesIngestKind::ToolResult => "untrusted_content",
+            }),
+        ),
+        (
+            "network_indicator".to_owned(),
+            serde_json::json!(network_indicator),
+        ),
+        (
+            "delivery_indicator".to_owned(),
+            serde_json::json!(delivery_indicator),
+        ),
+    ])
+}
+
+fn insert_optional_hermes_arguments(
+    attributes: &mut BTreeMap<String, serde_json::Value>,
+    record: &HermesIngestRecord,
+) {
+    if let Some(server) = record.mcp_server.as_deref() {
+        attributes.insert("mcp_server".to_owned(), serde_json::json!(server));
+    }
+    if !record.arguments.is_null() {
+        attributes.insert("arguments".to_owned(), record.arguments.clone());
+    }
+    for (field, attribute) in [
+        ("path", "path"),
+        ("command", "command"),
+        ("target", "delivery_target"),
+    ] {
+        if let Some(value) = extract_string_argument(&record.arguments, field) {
+            attributes.insert(attribute.to_owned(), serde_json::json!(value));
+        }
+    }
+}
+
+fn hermes_event_title(
+    record: &HermesIngestRecord,
+    tool_lower: &str,
+    delivery_indicator: bool,
+) -> String {
+    match record.kind {
+        HermesIngestKind::ToolCall if is_process_tool(tool_lower) => format!(
+            "Hermes terminal command observed: {}",
+            command_class_from_arguments(&record.arguments)
+        ),
+        HermesIngestKind::ToolCall if delivery_indicator => {
+            "Hermes delivery action observed".to_owned()
+        }
+        HermesIngestKind::ToolCall if is_file_tool(tool_lower) => format!(
+            "Hermes file {} observed",
+            extract_string_argument(&record.arguments, "operation").unwrap_or("access")
+        ),
+        HermesIngestKind::ToolCall => format!("Hermes tool call: {}", record.tool),
+        HermesIngestKind::ToolResult => format!("Hermes tool result: {}", record.tool),
+    }
+}
+
+fn hermes_event_details(kind: HermesIngestKind) -> String {
+    match kind {
+        HermesIngestKind::ToolCall => "Hermes tool call normalized from agent trace.".to_owned(),
+        HermesIngestKind::ToolResult => {
+            "Hermes tool output treated as untrusted content and not stored raw.".to_owned()
+        }
+    }
+}
+
+fn redacted_hermes_event(mut event: Event) -> Event {
+    let mut fields = event.redaction.redacted_fields.clone();
+    let title = redact_text(&event.title);
+    event.title = title.value;
+    fields.extend(title.metadata.redacted_fields);
+
+    if let Some(details) = event.details.as_deref() {
+        let redacted = redact_text(details);
+        event.details = Some(redacted.value);
+        fields.extend(redacted.metadata.redacted_fields);
+    }
+
+    let attributes = redact_attributes(&event.attributes);
+    event.attributes = attributes.value;
+    fields.extend(attributes.metadata.redacted_fields);
+    fields.sort_by(|left, right| left.path.cmp(&right.path));
+    fields.dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
+    event.redaction = RedactionMetadata {
+        contains_sensitive_data: !fields.is_empty(),
+        redacted_fields: fields,
+    };
+    event
+}
+
+fn redaction_from_omitted_content(record: &HermesIngestRecord) -> Vec<RedactedField> {
+    let Some(content) = record.content.as_deref() else {
+        return Vec::new();
+    };
+    let redacted = redact_text(content);
+    redacted
+        .metadata
+        .redacted_fields
+        .into_iter()
+        .map(|mut field| {
+            field.path = format!("content.{}", field.path);
+            field
+        })
+        .collect()
+}
+
+fn stable_hermes_event_id(record: &HermesIngestRecord, index: usize) -> String {
+    format!(
+        "hermes:{}:{}:{}:{}",
+        safe_id_fragment(&record.session_id),
+        record.timestamp_unix_ms,
+        safe_id_fragment(&record.tool),
+        index
+    )
+}
+
+fn safe_id_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn extract_string_argument<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    arguments.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn is_file_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "file_access" | "read_file" | "write_file" | "search_files" | "patch"
+    )
+}
+
+fn is_process_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "terminal" | "shell" | "bash" | "sh" | "zsh" | "execute_code"
+    )
+}
+
+fn command_class_from_arguments(arguments: &serde_json::Value) -> &'static str {
+    let command = extract_string_argument(arguments, "command")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if [
+        "curl", "wget", "nc ", "ncat", "socat", "ssh ", "scp ", "sftp", "http://", "https://",
+        "/dev/tcp",
+    ]
+    .iter()
+    .any(|indicator| command.contains(indicator))
+    {
+        "network_egress"
+    } else if command.contains("cron") || command.contains("crontab") {
+        "scheduled_task"
+    } else {
+        "process_execution"
+    }
+}
+
+fn is_networkish_tool_call(tool: &str, arguments: &str) -> bool {
+    tool == "web_extract"
+        || tool == "web_search"
+        || tool == "browser"
+        || arguments.contains("curl ")
+        || arguments.contains("wget ")
+        || arguments.contains("/dev/tcp")
+        || arguments.contains("http://")
+        || arguments.contains("https://")
+}
+
+fn is_delivery_tool_call(tool: &str, arguments: &str) -> bool {
+    tool == "send_message"
+        || tool == "himalaya"
+        || tool.contains("email")
+        || tool.contains("gmail")
+        || arguments.contains("telegram")
+        || arguments.contains("discord")
+        || arguments.contains("slack")
+        || arguments.contains("sendmessage")
+}
+
+fn contains_sensitive_path(text: &str) -> bool {
+    text.contains(".hermes/auth")
+        || text.contains(".hermes/.env")
+        || text.contains(".ssh/")
+        || text.contains("id_rsa")
+        || text.contains(".env")
+        || text.contains("oauth")
+        || text.contains("credentials")
 }
 
 /// Static product metadata shared by the CLI, daemon, and future API surfaces.

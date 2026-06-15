@@ -87,6 +87,7 @@ cargo test --workspace --all-features
 - [Concept architecture](docs/ARCHITECTURE.md)
 - [Initial detection ideas](docs/DETECTION_RULES.md)
 - [Read-only MCP integration](docs/MCP_READ_ONLY.md)
+- [Hermes event ingestion](docs/HERMES_EVENT_INGESTION.md)
 - [Local read-only HTTP API](docs/LOCAL_HTTP_API.md)
 - [Linux lab and privileged sensor manual test plan](docs/LINUX_LAB_TESTING.md)
 - [Linux installation guide](docs/INSTALL.md)
