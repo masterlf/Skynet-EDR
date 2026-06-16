@@ -58,7 +58,7 @@ skynet-edr events ingest-spool \
   --checkpoint /var/lib/skynet-edr/events.offset
 ```
 
-The spool reader processes only complete newline-terminated records, advances a durable byte checkpoint after each processed line, skips duplicate event IDs, and counts malformed/schema-invalid lines as dropped events instead of aborting the whole pass.
+The spool reader streams newline-delimited records, processes only complete newline-terminated records, advances a byte checkpoint after each processed line, skips duplicate event IDs, resets stale checkpoints when a spool is truncated/replaced, and counts malformed/schema-invalid/invalid-UTF-8 complete lines as dropped events instead of aborting the whole pass. A trailing partial record, including an incomplete UTF-8 sequence, is left for the next pass.
 
 Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:
 

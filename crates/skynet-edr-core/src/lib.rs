@@ -6,7 +6,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -411,12 +411,16 @@ pub fn ingest_canonical_jsonl_spool(
     let checkpoint_path = checkpoint_path.as_ref();
     let mut spool = File::open(spool_path)?;
     let spool_len = spool.metadata()?.len();
-    let mut offset = read_spool_checkpoint(checkpoint_path)?.min(spool_len);
-    let starting_line_number = count_complete_lines_before(spool_path, offset)? + 1;
+    let checkpoint_offset = read_spool_checkpoint(checkpoint_path)?;
+    let mut offset = if checkpoint_offset > spool_len {
+        write_spool_checkpoint(checkpoint_path, 0)?;
+        0
+    } else {
+        checkpoint_offset
+    };
+    let mut line_number = count_complete_lines_before(spool_path, offset)? + 1;
     spool.seek(SeekFrom::Start(offset))?;
-
-    let mut tail = String::new();
-    spool.read_to_string(&mut tail)?;
+    let mut reader = BufReader::new(spool);
 
     let mut summary = CanonicalSpoolIngestSummary {
         ingested_events: 0,
@@ -426,19 +430,28 @@ pub fn ingest_canonical_jsonl_spool(
         last_processed_byte: offset,
     };
 
-    for (line_number, segment) in (starting_line_number..).zip(tail.split_inclusive('\n')) {
-        if !segment.ends_with('\n') {
+    let mut segment = Vec::new();
+    loop {
+        segment.clear();
+        let bytes_read = reader.read_until(b'\n', &mut segment)?;
+        if bytes_read == 0 {
             break;
         }
-        let consumed = u64::try_from(segment.len()).map_err(|error| {
+        if !segment.ends_with(b"\n") {
+            break;
+        }
+        let consumed = u64::try_from(bytes_read).map_err(|error| {
             CanonicalSpoolIngestError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("spool line length does not fit in u64: {error}"),
             ))
         })?;
-        let line = segment.trim_end_matches(['\r', '\n']);
-        if !line.trim().is_empty() {
-            if let Ok(event) = parse_canonical_event_json(line) {
+        let line = trim_line_bytes(&segment);
+        if !line.iter().all(u8::is_ascii_whitespace) {
+            if let Some(event) = std::str::from_utf8(line)
+                .ok()
+                .and_then(|line| parse_canonical_event_json(line).ok())
+            {
                 let event = canonical_event_to_storage_event(event);
                 if store.get_event(event.id.as_str())?.is_some() {
                     summary.duplicate_events += 1;
@@ -454,9 +467,18 @@ pub fn ingest_canonical_jsonl_spool(
         offset += consumed;
         write_spool_checkpoint(checkpoint_path, offset)?;
         summary.last_processed_byte = offset;
+        line_number += 1;
     }
 
     Ok(summary)
+}
+
+fn trim_line_bytes(segment: &[u8]) -> &[u8] {
+    let mut end = segment.len();
+    while end > 0 && segment[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &segment[..end]
 }
 
 fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {

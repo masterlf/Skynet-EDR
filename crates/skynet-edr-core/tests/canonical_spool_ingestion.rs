@@ -105,3 +105,65 @@ fn live_spool_ingestion_is_idempotent_and_processes_only_complete_lines() {
     let _ = fs::remove_file(spool_path);
     let _ = fs::remove_file(checkpoint_path);
 }
+
+#[test]
+fn live_spool_ingestion_ignores_partial_non_utf8_tail_without_losing_complete_events() {
+    let db_path = temp_path("partial-utf8.sqlite");
+    let spool_path = temp_path("partial-utf8.jsonl");
+    let checkpoint_path = temp_path("partial-utf8.offset");
+    let complete_event = variant_event(
+        "evt_spool_before_partial_utf8",
+        "Complete before UTF-8 tail",
+    );
+    let mut spool = format!("{complete_event}\n").into_bytes();
+    spool.push(0xC3);
+    fs::write(&spool_path, spool).expect("spool with partial UTF-8 tail is written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let summary = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("partial non-UTF-8 tail is ignored until complete");
+
+    assert_eq!(summary.ingested_events, 1);
+    assert_eq!(summary.dropped_events, 0);
+    assert!(store
+        .get_event("evt_spool_before_partial_utf8")
+        .expect("event lookup succeeds")
+        .is_some());
+    assert_eq!(
+        fs::read_to_string(&checkpoint_path).expect("checkpoint exists"),
+        format!("{}", complete_event.len() + 1)
+    );
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
+
+#[test]
+fn live_spool_ingestion_resets_stale_checkpoint_after_spool_truncation() {
+    let db_path = temp_path("truncated.sqlite");
+    let spool_path = temp_path("truncated.jsonl");
+    let checkpoint_path = temp_path("truncated.offset");
+    let replacement_event = variant_event("evt_spool_after_truncate", "Spool event after truncate");
+    fs::write(&spool_path, format!("{replacement_event}\n")).expect("replacement spool written");
+    fs::write(&checkpoint_path, "999999").expect("stale checkpoint written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let summary = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("stale checkpoint is reset after truncation");
+
+    assert_eq!(summary.ingested_events, 1);
+    assert_eq!(summary.dropped_events, 0);
+    assert!(store
+        .get_event("evt_spool_after_truncate")
+        .expect("event lookup succeeds")
+        .is_some());
+    assert_eq!(
+        fs::read_to_string(&checkpoint_path).expect("checkpoint exists"),
+        summary.last_processed_byte.to_string()
+    );
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
