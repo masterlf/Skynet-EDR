@@ -137,15 +137,34 @@ The Rust core currently enforces these v0 invariants:
 
 This is deliberately strict. If a runtime needs more fields, add them through a versioned schema change or inside `attributes` after redaction.
 
-## Fixture
+## Fixtures
 
-The canonical regression fixture lives at:
+The single-event canonical regression fixture lives at:
 
 ```text
 crates/skynet-edr-core/tests/fixtures/canonical_event_v0.json
 ```
 
-Run the schema tests with:
+The golden agent fixture suites live at:
+
+```text
+crates/skynet-edr-core/tests/fixtures/hermes_agent_golden_events_v0.jsonl
+crates/skynet-edr-core/tests/fixtures/openclaw_agent_golden_events_v0.jsonl
+```
+
+Each golden JSONL file contains seven redacted `skynet.event.v0` events covering:
+
+- prompt-injection in untrusted content;
+- MCP shell/tool exfiltration shape;
+- secret access followed by outbound egress;
+- runtime/config drift;
+- cron/background persistence;
+- benign web research;
+- benign package installation.
+
+Golden fixtures intentionally use fake values and reserved `.invalid` endpoints. They must never contain real credentials, real local paths, copied shell history, or production logs.
+
+Run the schema and golden fixture tests with:
 
 ```bash
 cargo test -p skynet-edr-core --test canonical_event_schema
