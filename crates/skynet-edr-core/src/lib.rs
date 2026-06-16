@@ -5,8 +5,8 @@
 
 use std::{
     collections::BTreeMap,
-    fs::OpenOptions,
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -229,6 +229,53 @@ impl std::fmt::Display for CanonicalEventError {
 
 impl std::error::Error for CanonicalEventError {}
 
+/// Summary returned after one pass over a live canonical JSONL spool file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalSpoolIngestSummary {
+    /// Valid non-duplicate canonical events persisted during this pass.
+    pub ingested_events: usize,
+    /// Events dropped because their JSONL line was malformed or schema-invalid.
+    pub dropped_events: usize,
+    /// 1-based spool line numbers that were malformed or schema-invalid.
+    pub malformed_lines: Vec<usize>,
+    /// Valid events skipped because their stable event id was already present.
+    pub duplicate_events: usize,
+    /// Byte offset durably checkpointed after the last complete processed line.
+    pub last_processed_byte: u64,
+}
+
+/// Error returned when canonical JSONL spool I/O or persistence fails.
+#[derive(Debug)]
+pub enum CanonicalSpoolIngestError {
+    /// Reading the spool or writing the checkpoint failed.
+    Io(std::io::Error),
+    /// Persisting a valid canonical event failed.
+    Storage(StorageError),
+}
+
+impl std::fmt::Display for CanonicalSpoolIngestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "canonical spool I/O error: {error}"),
+            Self::Storage(error) => write!(formatter, "canonical spool storage error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CanonicalSpoolIngestError {}
+
+impl From<std::io::Error> for CanonicalSpoolIngestError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<StorageError> for CanonicalSpoolIngestError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
 impl CanonicalEventEnvelope {
     /// Validate security-critical invariants that serde alone cannot express.
     ///
@@ -342,6 +389,170 @@ pub fn serialize_canonical_event_json(
     event.validate()?;
     serde_json::to_string_pretty(event)
         .map_err(|error| CanonicalEventError::Serialize(error.to_string()))
+}
+
+/// Ingest complete lines from a live canonical event JSONL spool file.
+///
+/// The checkpoint stores a byte offset and is advanced only after complete lines
+/// are processed. A trailing partial JSONL record is left unread for the next
+/// pass. Valid event identifiers are idempotent: events whose ids already exist
+/// are counted as duplicates and not reinserted.
+///
+/// # Errors
+///
+/// Returns [`CanonicalSpoolIngestError`] for spool/checkpoint I/O failures or
+/// storage failures. Malformed JSONL lines are counted and skipped instead.
+pub fn ingest_canonical_jsonl_spool(
+    store: &LocalStore,
+    spool_path: impl AsRef<Path>,
+    checkpoint_path: impl AsRef<Path>,
+) -> Result<CanonicalSpoolIngestSummary, CanonicalSpoolIngestError> {
+    let spool_path = spool_path.as_ref();
+    let checkpoint_path = checkpoint_path.as_ref();
+    let mut spool = File::open(spool_path)?;
+    let spool_len = spool.metadata()?.len();
+    let checkpoint_offset = read_spool_checkpoint(checkpoint_path)?;
+    let mut offset = if checkpoint_offset > spool_len {
+        write_spool_checkpoint(checkpoint_path, 0)?;
+        0
+    } else {
+        checkpoint_offset
+    };
+    let mut line_number = count_complete_lines_before(spool_path, offset)? + 1;
+    spool.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(spool);
+
+    let mut summary = CanonicalSpoolIngestSummary {
+        ingested_events: 0,
+        dropped_events: 0,
+        malformed_lines: Vec::new(),
+        duplicate_events: 0,
+        last_processed_byte: offset,
+    };
+
+    let mut segment = Vec::new();
+    loop {
+        segment.clear();
+        let bytes_read = reader.read_until(b'\n', &mut segment)?;
+        if bytes_read == 0 {
+            break;
+        }
+        if !segment.ends_with(b"\n") {
+            break;
+        }
+        let consumed = u64::try_from(bytes_read).map_err(|error| {
+            CanonicalSpoolIngestError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("spool line length does not fit in u64: {error}"),
+            ))
+        })?;
+        let line = trim_line_bytes(&segment);
+        if !line.iter().all(u8::is_ascii_whitespace) {
+            if let Some(event) = std::str::from_utf8(line)
+                .ok()
+                .and_then(|line| parse_canonical_event_json(line).ok())
+            {
+                let event = canonical_event_to_storage_event(event);
+                if store.get_event(event.id.as_str())?.is_some() {
+                    summary.duplicate_events += 1;
+                } else {
+                    store.insert_event(&event)?;
+                    summary.ingested_events += 1;
+                }
+            } else {
+                summary.dropped_events += 1;
+                summary.malformed_lines.push(line_number);
+            }
+        }
+        offset += consumed;
+        write_spool_checkpoint(checkpoint_path, offset)?;
+        summary.last_processed_byte = offset;
+        line_number += 1;
+    }
+
+    Ok(summary)
+}
+
+fn trim_line_bytes(segment: &[u8]) -> &[u8] {
+    let mut end = segment.len();
+    while end > 0 && segment[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &segment[..end]
+}
+
+fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {
+    let mut attributes = event.attributes;
+    attributes.insert(
+        "schema_version".to_owned(),
+        serde_json::json!("skynet.event.v0"),
+    );
+    attributes.insert("event_type".to_owned(), serde_json::json!(event.event_type));
+    attributes.insert(
+        "trust_level".to_owned(),
+        serde_json::to_value(event.trust_level).expect("trust level serializes"),
+    );
+    attributes.insert(
+        "provenance".to_owned(),
+        serde_json::to_value(event.provenance).expect("provenance serializes"),
+    );
+    if let Some(received_at_unix_ms) = event.received_at_unix_ms {
+        attributes.insert(
+            "received_at_unix_ms".to_owned(),
+            serde_json::json!(received_at_unix_ms),
+        );
+    }
+
+    Event {
+        id: event.event_id,
+        observed_at_unix_ms: event.observed_at_unix_ms,
+        severity: event.severity,
+        source: event.source,
+        title: event.title,
+        details: event.details,
+        attributes,
+        redaction: event.redaction,
+    }
+}
+
+fn read_spool_checkpoint(path: &Path) -> Result<u64, CanonicalSpoolIngestError> {
+    match fs::read_to_string(path) {
+        Ok(content) => content.trim().parse::<u64>().map_err(|error| {
+            CanonicalSpoolIngestError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid spool checkpoint {}: {error}", path.display()),
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(CanonicalSpoolIngestError::Io(error)),
+    }
+}
+
+fn write_spool_checkpoint(path: &Path, offset: u64) -> Result<(), CanonicalSpoolIngestError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, offset.to_string())?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
+#[allow(clippy::naive_bytecount)]
+fn count_complete_lines_before(
+    path: &Path,
+    offset: u64,
+) -> Result<usize, CanonicalSpoolIngestError> {
+    if offset == 0 {
+        return Ok(0);
+    }
+    let mut file = File::open(path)?;
+    let mut buffer = vec![0; usize::try_from(offset).expect("checkpoint offset fits in usize")];
+    file.read_exact(&mut buffer)?;
+    Ok(buffer.iter().filter(|byte| **byte == b'\n').count())
 }
 
 /// Replacement marker used when a secret is removed before persistence or alerting.
