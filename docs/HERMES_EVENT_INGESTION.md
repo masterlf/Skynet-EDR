@@ -86,6 +86,16 @@ The current end-to-end MVP has one built-in correlation rule:
 
 The fixture `crates/skynet-edr-core/tests/fixtures/hermes_secret_egress_trace.json` proves the path with fake secret access plus egress. It is deliberately synthetic and contains no real credentials.
 
+## Built-in attack simulation
+
+For operator smoke tests and demos, the CLI exposes a deterministic synthetic simulation:
+
+```bash
+skynet-edr attack-sim secret-egress --db /path/to/skynet.sqlite
+```
+
+The simulation does **not** read local files and does **not** perform network egress. It persists two fake Hermes-style telemetry events — a fake secret read followed by fake egress — then verifies the normal `EDR-EXFIL-001` correlation path can open a critical incident. The fake honeytoken and fake local path are redacted before storage and before CLI, HTTP, console, or MCP incident output.
+
 ## Normalization model
 
 - Terminal/shell/execute-code tools become `process` events.

@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use skynet_edr_core::{
-    Event, EventId, EventSource, Incident, IncidentId, IncidentStatus, LocalStore,
-    RedactionMetadata, Severity, SourceKind,
+    run_secret_egress_attack_simulation, Event, EventId, EventSource, Incident, IncidentId,
+    IncidentStatus, LocalStore, RedactionMetadata, Severity, SourceKind,
 };
 use skynet_edr_mcp::{
     get_config_drift, get_incident, list_incidents, list_rules, list_sensors, read_only_tool_specs,
@@ -140,6 +140,11 @@ fn rules_sensors_and_config_drift_are_operator_readable() {
         .expect("rules array")
         .iter()
         .any(|rule| rule["id"] == "EDR-CONFIG-001"));
+    assert!(rules
+        .as_array()
+        .expect("rules array")
+        .iter()
+        .any(|rule| rule["id"] == "EDR-EXFIL-001" && rule["severity"] == "critical"));
 
     let sensors = list_sensors();
     assert!(sensors
@@ -153,6 +158,27 @@ fn rules_sensors_and_config_drift_are_operator_readable() {
     assert_eq!(drift[0]["rule_id"], "EDR-CONFIG-001");
     assert_eq!(drift[0]["path"], ".hermes/config.yaml");
     assert!(drift[0].get("api_token").is_none());
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
+fn mcp_get_incident_does_not_leak_built_in_attack_sim_secret() {
+    let db_path = temp_path("mcp-attack-sim-secret-egress.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    run_secret_egress_attack_simulation(&store).expect("attack simulation persists telemetry");
+
+    let incident = get_incident(
+        &store,
+        "inc:EDR-EXFIL-001:attack_sim_secret_egress:1781519200000",
+    )
+    .expect("simulated incident is visible through MCP");
+    assert_eq!(incident["severity"], "critical");
+    let serialized = serde_json::to_string(&incident).expect("incident serializes");
+    assert!(!serialized.contains("FAKE_SKYNET_ATTACK_SIM_SECRET_DO_NOT_EXPOSE"));
+    assert!(!serialized.contains("/home/attack-sim/.skynet/fake-secret.env"));
+    assert!(serialized.contains("[REDACTED:secret]"));
+    assert!(serialized.contains("[REDACTED:local_context]"));
 
     fs::remove_file(db_path).expect("temporary db is removed");
 }

@@ -6,8 +6,8 @@ use std::{
 };
 
 use skynet_edr_core::{
-    Event, EventId, EventSource, Incident, IncidentId, IncidentStatus, LocalStore,
-    RedactionMetadata, Severity, SourceKind,
+    run_secret_egress_attack_simulation, Event, EventId, EventSource, Incident, IncidentId,
+    IncidentStatus, LocalStore, RedactionMetadata, Severity, SourceKind,
 };
 use skynet_edr_daemon::{
     handle_console_request, handle_http_request, HttpApiConfig, HttpMethod, HttpStatus,
@@ -233,6 +233,36 @@ fn console_incident_evidence_uses_redacted_api_output_and_escapes_html() {
     assert!(!body.contains("FAKE_TOKEN_NEVER_EXPOSE"));
     assert!(!body.contains("/root/.hermes/auth.json"));
     assert!(!body.contains("token=FAKE_TOKEN_NEVER_EXPOSE"));
+}
+
+#[test]
+fn http_and_console_do_not_leak_built_in_attack_sim_secret() {
+    let store = temp_store();
+    run_secret_egress_attack_simulation(&store).expect("attack simulation persists telemetry");
+    let incident_id = "inc:EDR-EXFIL-001:attack_sim_secret_egress:1781519200000";
+
+    let api = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        &format!("/api/incidents/{incident_id}"),
+    )
+    .expect("attack simulation incident API responds");
+    let console = handle_console_request(
+        &store,
+        HttpMethod::Get,
+        &format!("/console/incidents/{incident_id}"),
+    )
+    .expect("attack simulation console page responds");
+
+    assert_eq!(api.status, HttpStatus::Ok);
+    assert_eq!(console.status, HttpStatus::Ok);
+    for body in [api.body.to_string(), console.body] {
+        assert!(!body.contains("FAKE_SKYNET_ATTACK_SIM_SECRET_DO_NOT_EXPOSE"));
+        assert!(!body.contains("/home/attack-sim/.skynet/fake-secret.env"));
+        assert!(body.contains("[REDACTED:secret]"));
+        assert!(body.contains("[REDACTED:local_context]"));
+        assert!(body.contains("EDR-EXFIL-001"));
+    }
 }
 
 #[test]

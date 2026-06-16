@@ -3,8 +3,8 @@
 use std::{env, fs, process::ExitCode};
 
 use skynet_edr_core::{
-    ingest_canonical_jsonl_spool, ingest_hermes_events_json_with_detection, Event, Incident,
-    LocalStore, ProductInfo,
+    ingest_canonical_jsonl_spool, ingest_hermes_events_json_with_detection,
+    run_secret_egress_attack_simulation, Event, Incident, LocalStore, ProductInfo,
 };
 
 fn main() -> ExitCode {
@@ -48,6 +48,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
         Some("store") => handle_store(args),
         Some("events") => handle_events(args),
         Some("incidents") => handle_incidents(args),
+        Some("attack-sim") => handle_attack_sim(args),
         Some(other) => Err(CliError::Usage(format!(
             "unknown command: {other}\ntry '{binary} --help'"
         ))),
@@ -154,6 +155,26 @@ fn handle_events(args: &[String]) -> Result<(), CliError> {
             "unknown events command: {command}"
         ))),
         None => Err(CliError::Usage("missing events command".to_owned())),
+    }
+}
+
+fn handle_attack_sim(args: &[String]) -> Result<(), CliError> {
+    match args.get(2).map(String::as_str) {
+        Some("secret-egress") => {
+            let options = parse_options(&args[3..])?;
+            let db_path = required_option(&options, "--db")?;
+            let store = LocalStore::open(db_path)?;
+            let summary = run_secret_egress_attack_simulation(&store)?;
+            println!(
+                "attack simulation secret-egress completed: ingested {} event(s), opened {} critical incident(s)",
+                summary.event_count, summary.incident_count
+            );
+            Ok(())
+        }
+        Some(command) => Err(CliError::Usage(format!(
+            "unknown attack-sim command: {command}"
+        ))),
+        None => Err(CliError::Usage("missing attack-sim command".to_owned())),
     }
 }
 
@@ -282,6 +303,8 @@ fn print_help(binary: &str) {
     println!("  incidents show <id> --db <path>     Print one incident as JSON");
     println!("  incidents export --db <path> --format jsonl");
     println!("                                      Export incidents as one JSON object per line");
+    println!("  attack-sim secret-egress --db <path>");
+    println!("                                      Run deterministic fake secret-read plus egress simulation");
 }
 
 fn string_value(value: &serde_json::Value) -> String {

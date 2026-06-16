@@ -210,6 +210,14 @@ pub fn list_rules() -> Value {
             "source_kinds": ["configuration"],
             "read_only": true,
             "description": "Detects changes between current and baseline agent runtime configuration."
+        },
+        {
+            "id": "EDR-EXFIL-001",
+            "name": "Secret access followed by egress",
+            "severity": "critical",
+            "source_kinds": ["file", "process", "network", "messaging"],
+            "read_only": true,
+            "description": "Correlates a sensitive file read with outbound network or delivery telemetry in the same agent session."
         }
     ])
 }
