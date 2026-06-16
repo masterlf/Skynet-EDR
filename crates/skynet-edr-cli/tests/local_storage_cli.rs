@@ -74,6 +74,54 @@ fn cli_help_lists_local_storage_commands() {
     assert!(stdout.contains("incidents list"));
     assert!(stdout.contains("incidents show"));
     assert!(stdout.contains("incidents export"));
+    assert!(stdout.contains("attack-sim secret-egress"));
+}
+
+#[test]
+fn cli_attack_sim_secret_egress_creates_redacted_critical_incident() {
+    let db_path = temp_path("attack-sim-secret-egress.sqlite");
+    let raw_secret = "FAKE_SKYNET_ATTACK_SIM_SECRET_DO_NOT_EXPOSE";
+    let raw_secret_path = "/home/attack-sim/.skynet/fake-secret.env";
+
+    let simulation = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["attack-sim", "secret-egress", "--db"])
+        .arg(&db_path)
+        .output()
+        .expect("attack simulation runs");
+    assert!(simulation.status.success());
+    let stdout = String::from_utf8(simulation.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("attack simulation secret-egress"));
+    assert!(stdout.contains("critical incident"));
+    assert!(!stdout.contains(raw_secret));
+    assert!(!stdout.contains(raw_secret_path));
+
+    let incident_id = "inc:EDR-EXFIL-001:attack_sim_secret_egress:1781519200000";
+    let incident_show = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["incidents", "show", incident_id, "--db"])
+        .arg(&db_path)
+        .output()
+        .expect("incidents show runs");
+    assert!(incident_show.status.success());
+    let shown = String::from_utf8(incident_show.stdout).expect("stdout should be UTF-8");
+    assert!(shown.contains("\"severity\": \"critical\""));
+    assert!(shown.contains("[REDACTED:secret]"));
+    assert!(shown.contains("[REDACTED:local_context]"));
+    assert!(!shown.contains(raw_secret));
+    assert!(!shown.contains(raw_secret_path));
+
+    let export = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["incidents", "export", "--db"])
+        .arg(&db_path)
+        .args(["--format", "jsonl"])
+        .output()
+        .expect("incidents export runs");
+    assert!(export.status.success());
+    let exported = String::from_utf8(export.stdout).expect("stdout should be UTF-8");
+    assert!(!exported.contains(raw_secret));
+    assert!(!exported.contains(raw_secret_path));
+    assert!(exported.contains("EDR-EXFIL-001"));
+
+    fs::remove_file(db_path).expect("temporary db is removed");
 }
 
 #[test]
