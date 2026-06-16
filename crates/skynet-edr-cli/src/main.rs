@@ -166,7 +166,7 @@ fn handle_attack_sim(args: &[String]) -> Result<(), CliError> {
             let store = LocalStore::open(db_path)?;
             let summary = run_secret_egress_attack_simulation(&store)?;
             println!(
-                "attack simulation secret-egress completed: ingested {} event(s), opened {} critical incident(s)",
+                "attack simulation secret-egress completed: ingested {} event(s), stored {} critical incident(s)",
                 summary.event_count, summary.incident_count
             );
             Ok(())
