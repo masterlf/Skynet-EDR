@@ -47,7 +47,7 @@ Expected first-run behavior is boring: no incidents unless you ingest fixtures o
 
 ## Ingest a redacted event fixture
 
-The canonical event schema fixture is documented in [Canonical event schema](EVENT_SCHEMA.md#fixture). From a source checkout, run:
+The canonical event schema fixture is documented in [Canonical event schema](EVENT_SCHEMA.md#fixtures). From a source checkout, run:
 
 ```bash
 cargo test -p skynet-edr-core --test canonical_event_schema
