@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use skynet_edr_core::ProductInfo;
+use skynet_edr_core::{ingest_canonical_jsonl_spool, LocalStore, ProductInfo};
 
 fn main() -> ExitCode {
     let mut args = env::args();
@@ -71,6 +71,7 @@ fn print_help(binary: &str) {
     println!("Commands:");
     println!("  status               Print daemon status without starting privileged sensors");
     println!("  run --config <path>  Start the passive long-running daemon service path");
+    println!("                         Optionally polls [spool] canonical JSONL ingestion");
     println!();
     println!("Safety:");
     println!(
@@ -91,13 +92,32 @@ fn run_command(args: &[String]) -> Result<(), DaemonCliError> {
             .map_or_else(|| "disabled".to_owned(), |bind| bind.to_string())
     );
 
+    run_spool_ingestion_once(&config)?;
+
     if should_exit_after_startup_for_test() {
         return Ok(());
     }
 
     loop {
-        thread::sleep(Duration::from_secs(60));
+        thread::sleep(Duration::from_secs(5));
+        run_spool_ingestion_once(&config)?;
     }
+}
+
+fn run_spool_ingestion_once(config: &DaemonConfig) -> Result<(), DaemonCliError> {
+    let Some(spool) = &config.spool else {
+        return Ok(());
+    };
+    let store = LocalStore::open(&spool.db)?;
+    let summary = ingest_canonical_jsonl_spool(&store, &spool.path, &spool.checkpoint)?;
+    println!(
+        "spool ingestion: ingested={} dropped={} duplicates={} checkpoint={} byte(s)",
+        summary.ingested_events,
+        summary.dropped_events,
+        summary.duplicate_events,
+        summary.last_processed_byte
+    );
+    Ok(())
 }
 
 fn should_exit_after_startup_for_test() -> bool {
@@ -125,6 +145,14 @@ struct DaemonConfig {
     http_api_bind: Option<SocketAddr>,
     http_api_read_only: bool,
     linux_privileged_sensors: bool,
+    spool: Option<SpoolConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpoolConfig {
+    db: PathBuf,
+    path: PathBuf,
+    checkpoint: PathBuf,
 }
 
 impl DaemonConfig {
@@ -145,7 +173,12 @@ impl DaemonConfig {
             http_api_bind: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8787)),
             http_api_read_only: true,
             linux_privileged_sensors: false,
+            spool: None,
         };
+        let mut spool_enabled = false;
+        let mut spool_db: Option<PathBuf> = None;
+        let mut spool_path: Option<PathBuf> = None;
+        let mut spool_checkpoint: Option<PathBuf> = None;
         let mut section = String::new();
         let mut in_multiline_array = false;
 
@@ -193,8 +226,28 @@ impl DaemonConfig {
                 ("sensors", "linux_privileged") => {
                     config.linux_privileged_sensors = parse_bool(value, index)?;
                 }
+                ("spool", "enabled") => spool_enabled = parse_bool(value, index)?,
+                ("spool", "db") => spool_db = Some(PathBuf::from(parse_string(value, index)?)),
+                ("spool", "path") => spool_path = Some(PathBuf::from(parse_string(value, index)?)),
+                ("spool", "checkpoint") => {
+                    spool_checkpoint = Some(PathBuf::from(parse_string(value, index)?));
+                }
                 _ => {}
             }
+        }
+
+        if spool_enabled {
+            config.spool = Some(SpoolConfig {
+                db: spool_db.ok_or_else(|| {
+                    DaemonCliError::new("spool.db is required when spool is enabled")
+                })?,
+                path: spool_path.ok_or_else(|| {
+                    DaemonCliError::new("spool.path is required when spool is enabled")
+                })?,
+                checkpoint: spool_checkpoint.ok_or_else(|| {
+                    DaemonCliError::new("spool.checkpoint is required when spool is enabled")
+                })?,
+            });
         }
 
         Ok(config)
@@ -287,6 +340,18 @@ impl std::error::Error for DaemonCliError {}
 
 impl From<io::Error> for DaemonCliError {
     fn from(error: io::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+impl From<skynet_edr_core::StorageError> for DaemonCliError {
+    fn from(error: skynet_edr_core::StorageError) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+impl From<skynet_edr_core::CanonicalSpoolIngestError> for DaemonCliError {
+    fn from(error: skynet_edr_core::CanonicalSpoolIngestError) -> Self {
         Self::new(error.to_string())
     }
 }

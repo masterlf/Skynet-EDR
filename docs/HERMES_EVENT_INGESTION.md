@@ -43,14 +43,39 @@ Also supported:
 
 ## CLI usage
 
+Legacy Hermes trace ingestion:
+
 ```bash
 skynet-edr events ingest-hermes --db /path/to/skynet.sqlite --trace-json /path/to/hermes-trace.json
+```
+
+Canonical live JSONL spool ingestion:
+
+```bash
+skynet-edr events ingest-spool \
+  --db /path/to/skynet.sqlite \
+  --spool /var/lib/skynet-edr/events.jsonl \
+  --checkpoint /var/lib/skynet-edr/events.offset
+```
+
+The spool reader processes only complete newline-terminated records, advances a durable byte checkpoint after each processed line, skips duplicate event IDs, and counts malformed/schema-invalid lines as dropped events instead of aborting the whole pass.
+
+Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:
+
+```toml
+[spool]
+enabled = true
+db = "/var/lib/skynet-edr/skynet.sqlite"
+path = "/var/lib/skynet-edr/events.jsonl"
+checkpoint = "/var/lib/skynet-edr/events.offset"
 ```
 
 Output:
 
 ```text
 ingested N Hermes event(s), opened M incident(s)
+ingested N canonical event(s), dropped M malformed event(s), skipped D duplicate event(s), checkpoint=B byte(s)
+spool ingestion: ingested=N dropped=M duplicates=D checkpoint=B byte(s)
 ```
 
 ## MVP correlation

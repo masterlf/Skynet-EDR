@@ -3,7 +3,8 @@
 use std::{env, fs, process::ExitCode};
 
 use skynet_edr_core::{
-    ingest_hermes_events_json_with_detection, Event, Incident, LocalStore, ProductInfo,
+    ingest_canonical_jsonl_spool, ingest_hermes_events_json_with_detection, Event, Incident,
+    LocalStore, ProductInfo,
 };
 
 fn main() -> ExitCode {
@@ -93,6 +94,22 @@ fn handle_events(args: &[String]) -> Result<(), CliError> {
             println!(
                 "ingested {} Hermes event(s), opened {} incident(s)",
                 summary.event_count, summary.incident_count
+            );
+            Ok(())
+        }
+        Some("ingest-spool") => {
+            let options = parse_options(&args[3..])?;
+            let db_path = required_option(&options, "--db")?;
+            let spool_path = required_option(&options, "--spool")?;
+            let checkpoint_path = required_option(&options, "--checkpoint")?;
+            let store = LocalStore::open(db_path)?;
+            let summary = ingest_canonical_jsonl_spool(&store, spool_path, checkpoint_path)?;
+            println!(
+                "ingested {} canonical event(s), dropped {} malformed event(s), skipped {} duplicate event(s), checkpoint={} byte(s)",
+                summary.ingested_events,
+                summary.dropped_events,
+                summary.duplicate_events,
+                summary.last_processed_byte
             );
             Ok(())
         }
@@ -253,6 +270,10 @@ fn print_help(binary: &str) {
     println!("                                      Ingest one incident JSON document and embedded events");
     println!("  events ingest-hermes --db <path> --trace-json <file>");
     println!("                                      Ingest read-only Hermes tool-call trace JSON");
+    println!("  events ingest-spool --db <path> --spool <file> --checkpoint <file>");
+    println!(
+        "                                      Ingest complete canonical event JSONL spool records"
+    );
     println!("  events list --db <path>            List stored events");
     println!("  events show <id> --db <path>       Print one event as JSON");
     println!("  events export --db <path> --format jsonl");
@@ -274,6 +295,7 @@ enum CliError {
     Usage(String),
     Storage(skynet_edr_core::StorageError),
     HermesIngest(skynet_edr_core::HermesIngestError),
+    CanonicalSpoolIngest(skynet_edr_core::CanonicalSpoolIngestError),
     Json(serde_json::Error),
     Io(std::io::Error),
 }
@@ -284,6 +306,7 @@ impl std::fmt::Display for CliError {
             Self::Usage(message) => write!(formatter, "{message}"),
             Self::Storage(error) => write!(formatter, "{error}"),
             Self::HermesIngest(error) => write!(formatter, "{error}"),
+            Self::CanonicalSpoolIngest(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "{error}"),
         }
@@ -301,6 +324,12 @@ impl From<skynet_edr_core::StorageError> for CliError {
 impl From<skynet_edr_core::HermesIngestError> for CliError {
     fn from(error: skynet_edr_core::HermesIngestError) -> Self {
         Self::HermesIngest(error)
+    }
+}
+
+impl From<skynet_edr_core::CanonicalSpoolIngestError> for CliError {
+    fn from(error: skynet_edr_core::CanonicalSpoolIngestError) -> Self {
+        Self::CanonicalSpoolIngest(error)
     }
 }
 

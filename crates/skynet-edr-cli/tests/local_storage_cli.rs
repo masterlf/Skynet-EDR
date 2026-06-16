@@ -67,6 +67,7 @@ fn cli_help_lists_local_storage_commands() {
     assert!(stdout.contains("store init"));
     assert!(stdout.contains("events ingest"));
     assert!(stdout.contains("events ingest-hermes"));
+    assert!(stdout.contains("events ingest-spool"));
     assert!(stdout.contains("events list"));
     assert!(stdout.contains("events show"));
     assert!(stdout.contains("events export"));
@@ -185,6 +186,66 @@ fn cli_ingests_hermes_trace_into_redacted_events_and_correlated_incident() {
 
     fs::remove_file(db_path).expect("temporary db is removed");
     fs::remove_file(trace_path).expect("temporary trace is removed");
+}
+
+#[test]
+fn cli_ingests_canonical_jsonl_spool_with_checkpoint_accounting() {
+    let db_path = temp_path("canonical-spool.sqlite");
+    let spool_path = temp_path("canonical-spool.jsonl");
+    let checkpoint_path = temp_path("canonical-spool.offset");
+    let mut value: serde_json::Value = serde_json::from_str(include_str!(
+        "../../skynet-edr-core/tests/fixtures/canonical_event_v0.json"
+    ))
+    .expect("canonical fixture JSON");
+    value["event_id"] = serde_json::json!("evt_cli_spool_1");
+    value["title"] = serde_json::json!("CLI spool canonical event");
+    let event = serde_json::to_string(&value).expect("fixture serializes");
+    fs::write(&spool_path, format!("{event}\nnot-json\n")).expect("spool is written");
+
+    let ingest = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "ingest-spool", "--db"])
+        .arg(&db_path)
+        .arg("--spool")
+        .arg(&spool_path)
+        .arg("--checkpoint")
+        .arg(&checkpoint_path)
+        .output()
+        .expect("events ingest-spool runs");
+    assert!(ingest.status.success());
+    let stdout = String::from_utf8(ingest.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains(
+        "ingested 1 canonical event(s), dropped 1 malformed event(s), skipped 0 duplicate event(s)"
+    ));
+
+    let replay = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "ingest-spool", "--db"])
+        .arg(&db_path)
+        .arg("--spool")
+        .arg(&spool_path)
+        .arg("--checkpoint")
+        .arg(&checkpoint_path)
+        .output()
+        .expect("events ingest-spool replay runs");
+    assert!(replay.status.success());
+    let stdout = String::from_utf8(replay.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains(
+        "ingested 0 canonical event(s), dropped 0 malformed event(s), skipped 0 duplicate event(s)"
+    ));
+
+    let show = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "show", "evt_cli_spool_1", "--db"])
+        .arg(&db_path)
+        .output()
+        .expect("events show runs");
+    assert!(show.status.success());
+    let shown: serde_json::Value = serde_json::from_slice(&show.stdout).expect("show prints JSON");
+    assert_eq!(shown["id"], "evt_cli_spool_1");
+    assert_eq!(shown["attributes"]["event_type"], "agent.network.egress");
+    assert_eq!(shown["attributes"]["schema_version"], "skynet.event.v0");
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
 }
 
 #[test]

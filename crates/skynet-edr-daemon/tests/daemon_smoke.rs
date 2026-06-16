@@ -121,6 +121,65 @@ fn daemon_run_accepts_packaged_baseline_config() {
 }
 
 #[test]
+fn daemon_run_ingests_configured_canonical_spool_once_on_startup() {
+    let dir = temp_config_dir("run-ingests-spool");
+    let db_path = dir.join("events.sqlite");
+    let spool_path = dir.join("events.jsonl");
+    let checkpoint_path = dir.join("events.offset");
+    let mut value: serde_json::Value = serde_json::from_str(include_str!(
+        "../../skynet-edr-core/tests/fixtures/canonical_event_v0.json"
+    ))
+    .expect("canonical fixture JSON");
+    value["event_id"] = serde_json::json!("evt_daemon_spool_1");
+    value["title"] = serde_json::json!("Daemon spool canonical event");
+    let event = serde_json::to_string(&value).expect("fixture serializes");
+    fs::write(&spool_path, format!("{event}\nmalformed\n")).expect("spool fixture written");
+    let config = write_config(
+        &dir,
+        &format!(
+            r#"
+mode = "passive"
+
+[http_api]
+enabled = true
+bind = "127.0.0.1:8787"
+read_only = true
+
+[sensors]
+linux_privileged = false
+
+[spool]
+enabled = true
+db = "{}"
+path = "{}"
+checkpoint = "{}"
+"#,
+            db_path.display(),
+            spool_path.display(),
+            checkpoint_path.display()
+        ),
+    );
+
+    let output = daemon()
+        .arg("run")
+        .arg("--config")
+        .arg(config)
+        .env("SKYNET_EDR_DAEMON_EXIT_AFTER_STARTUP", "1")
+        .output()
+        .expect("skynet-edr-daemon binary should run");
+
+    assert!(
+        output.status.success(),
+        "run should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("spool ingestion: ingested=1 dropped=1 duplicates=0"));
+    assert!(fs::read_to_string(&checkpoint_path).is_ok());
+}
+
+#[test]
 fn daemon_run_requires_config_path() {
     let output = daemon()
         .arg("run")
