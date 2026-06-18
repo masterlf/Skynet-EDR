@@ -2,7 +2,8 @@
 
 use std::{
     env, fs, io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    io::{Read, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::ExitCode,
     thread,
@@ -10,6 +11,7 @@ use std::{
 };
 
 use skynet_edr_core::{ingest_canonical_jsonl_spool, LocalStore, ProductInfo};
+use skynet_edr_daemon::{handle_console_request, handle_http_request, HttpMethod};
 
 fn main() -> ExitCode {
     let mut args = env::args();
@@ -93,8 +95,10 @@ fn run_command(args: &[String]) -> Result<(), DaemonCliError> {
     );
 
     run_spool_ingestion_once(&config)?;
+    let http_server = start_http_api_if_enabled(&config)?;
 
     if should_exit_after_startup_for_test() {
+        drop(http_server);
         return Ok(());
     }
 
@@ -120,6 +124,121 @@ fn run_spool_ingestion_once(config: &DaemonConfig) -> Result<(), DaemonCliError>
     Ok(())
 }
 
+fn start_http_api_if_enabled(
+    config: &DaemonConfig,
+) -> Result<Option<thread::JoinHandle<()>>, DaemonCliError> {
+    if !config.http_api_enabled {
+        return Ok(None);
+    }
+
+    let bind = config.http_api_bind.ok_or_else(|| {
+        DaemonCliError::new("HTTP API is enabled but no bind address is configured")
+    })?;
+    let store_path = config.http_store_path();
+    let listener = TcpListener::bind(bind).map_err(|error| {
+        DaemonCliError::new(format!(
+            "failed to bind read-only HTTP API on {bind}: {error}"
+        ))
+    })?;
+
+    println!("http api listening: {bind}");
+    Ok(Some(thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => handle_http_connection(stream, &store_path),
+                Err(error) => eprintln!("HTTP API accept failed: {error}"),
+            }
+        }
+    })))
+}
+
+fn handle_http_connection(mut stream: TcpStream, store_path: &Path) {
+    if let Err(error) = write_http_connection_response(&mut stream, store_path) {
+        let _ = write_raw_http_response(
+            &mut stream,
+            500,
+            "application/json",
+            &format!(r#"{{"error":"internal_server_error","message":"{error}"}}"#),
+        );
+    }
+}
+
+fn write_http_connection_response(
+    stream: &mut TcpStream,
+    store_path: &Path,
+) -> Result<(), DaemonCliError> {
+    let mut buffer = [0_u8; 8192];
+    let bytes_read = stream
+        .read(&mut buffer)
+        .map_err(|error| DaemonCliError::new(format!("failed to read HTTP request: {error}")))?;
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let Some(request_line) = request.lines().next() else {
+        return write_raw_http_response(
+            stream,
+            400,
+            "application/json",
+            r#"{"error":"bad_request"}"#,
+        )
+        .map_err(|error| DaemonCliError::new(format!("failed to write HTTP response: {error}")));
+    };
+    let mut parts = request_line.split_whitespace();
+    let method = parse_http_method(parts.next().unwrap_or_default());
+    let raw_path = parts.next().unwrap_or("/");
+    let path = raw_path.split('?').next().unwrap_or(raw_path);
+
+    let store = LocalStore::open(store_path)?;
+    if path == "/" || path.starts_with("/console") {
+        let response = handle_console_request(&store, method, path)
+            .map_err(|error| DaemonCliError::new(format!("console request failed: {error}")))?;
+        write_raw_http_response(
+            stream,
+            response.status.as_u16(),
+            response.content_type,
+            &response.body,
+        )
+    } else {
+        let response = handle_http_request(&store, method, path)
+            .map_err(|error| DaemonCliError::new(format!("HTTP API request failed: {error}")))?;
+        write_raw_http_response(
+            stream,
+            response.status.as_u16(),
+            response.content_type,
+            &response.body.to_string(),
+        )
+    }
+    .map_err(|error| DaemonCliError::new(format!("failed to write HTTP response: {error}")))
+}
+
+fn parse_http_method(method: &str) -> HttpMethod {
+    match method {
+        "GET" => HttpMethod::Get,
+        "PUT" => HttpMethod::Put,
+        "PATCH" => HttpMethod::Patch,
+        "DELETE" => HttpMethod::Delete,
+        _ => HttpMethod::Post,
+    }
+}
+
+fn write_raw_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        _ => "Response",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
 fn should_exit_after_startup_for_test() -> bool {
     cfg!(debug_assertions) && env::var_os("SKYNET_EDR_DAEMON_EXIT_AFTER_STARTUP").is_some()
 }
@@ -141,6 +260,7 @@ fn parse_run_args(args: &[String]) -> Result<PathBuf, DaemonCliError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonConfig {
     mode: String,
+    data_dir: PathBuf,
     http_api_enabled: bool,
     http_api_bind: Option<SocketAddr>,
     http_api_read_only: bool,
@@ -169,6 +289,7 @@ impl DaemonConfig {
     fn parse(content: &str) -> Result<Self, DaemonCliError> {
         let mut config = Self {
             mode: "passive".to_owned(),
+            data_dir: PathBuf::from("/var/lib/skynet-edr"),
             http_api_enabled: false,
             http_api_bind: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8787)),
             http_api_read_only: true,
@@ -212,6 +333,7 @@ impl DaemonConfig {
 
             match (section.as_str(), key) {
                 ("", "mode") => config.mode = parse_string(value, index)?,
+                ("", "data_dir") => config.data_dir = PathBuf::from(parse_string(value, index)?),
                 ("http_api", "enabled") => config.http_api_enabled = parse_bool(value, index)?,
                 ("http_api", "bind") => {
                     let bind = parse_string(value, index)?;
@@ -251,6 +373,13 @@ impl DaemonConfig {
         }
 
         Ok(config)
+    }
+
+    fn http_store_path(&self) -> PathBuf {
+        self.spool.as_ref().map_or_else(
+            || self.data_dir.join("skynet.sqlite"),
+            |spool| spool.db.clone(),
+        )
     }
 
     fn validate(&self) -> Result<(), DaemonCliError> {

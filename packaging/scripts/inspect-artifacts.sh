@@ -35,6 +35,7 @@ tarball=$(require_one 'skynet-edr-*.tar.gz')
 deb=$(require_one 'skynet-edr_*.deb')
 rpm=$(require_one 'skynet-edr-*.rpm')
 arch=$(require_one 'skynet-edr-*.pkg.tar.zst')
+version=$(basename "$deb" | sed -E 's/^skynet-edr_([^_]+)_.*/\1/')
 
 mkdir -p "$DIST_DIR/inspection"
 
@@ -46,6 +47,11 @@ grep_listing "$DIST_DIR/inspection/tarball.txt" '/SHA256SUMS$'
 
 require_cmd dpkg-deb
 dpkg-deb --contents "$deb" > "$DIST_DIR/inspection/deb.txt"
+if [ "$(dpkg-deb -f "$deb" Version)" != "$version" ]; then
+  echo "deb metadata version does not match artifact version: $(dpkg-deb -f "$deb" Version) != $version" >&2
+  exit 1
+fi
+dpkg-deb --control "$deb" "$DIST_DIR/inspection/deb-control"
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/bin/skynet-edr-daemon$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './etc/skynet-edr/config.toml$'

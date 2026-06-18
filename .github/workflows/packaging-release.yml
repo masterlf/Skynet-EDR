@@ -25,6 +25,8 @@ jobs:
     env:
       NFPM_VERSION: v2.46.3
       NFPM_ARCH: amd64
+      NFPM_RPM_ARCH: x86_64
+      NFPM_ARCHLINUX_ARCH: x86_64
       NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
       SKYNET_EDR_VERSION: ${{ inputs.version }}
     steps:
@@ -128,13 +130,13 @@ jobs:
           RHEL/Fedora-compatible:
 
           ```bash
-          sudo dnf install ./skynet-edr-0.1.0-1.amd64.rpm
+          sudo dnf install ./skynet-edr-0.1.0-1.x86_64.rpm
           ```
 
           Arch:
 
           ```bash
-          sudo pacman -U ./skynet-edr-0.1.0-1-amd64.pkg.tar.zst
+          sudo pacman -U ./skynet-edr-0.1.0-1-x86_64.pkg.tar.zst
           ```
 
           Tarball:

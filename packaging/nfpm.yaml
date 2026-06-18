@@ -100,3 +100,7 @@ rpm:
   group: Applications/System
 archlinux:
   packager: Skynet-EDR Maintainers <maintainers@example.invalid>
+
+scripts:
+  postinstall: ./packaging/scripts/package-postinstall.sh
+  postremove: ./packaging/scripts/package-postremove.sh
