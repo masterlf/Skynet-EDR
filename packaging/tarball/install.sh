@@ -11,7 +11,7 @@ preserved.
 USAGE
 }
 
-PREFIX=/usr/local
+PREFIX=/usr
 SOURCE=
 INSTALL_SYSTEMD=1
 

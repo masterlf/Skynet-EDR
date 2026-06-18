@@ -16,6 +16,8 @@ packaging/tarball/uninstall.sh
 packaging/scripts/build-tarball.sh
 packaging/scripts/build-packages.sh
 packaging/scripts/inspect-artifacts.sh
+packaging/scripts/package-postinstall.sh
+packaging/scripts/package-postremove.sh
 .github/workflows/packaging-release.yml
 "
 
@@ -26,7 +28,7 @@ for file in $required_files; do
   fi
 done
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-packaging.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1
@@ -36,6 +38,10 @@ done
 grep -q 'User=skynet-edr' packaging/systemd/skynet-edr.service
 grep -q 'Group=skynet-edr' packaging/systemd/skynet-edr.service
 grep -q 'NoNewPrivileges=yes' packaging/systemd/skynet-edr.service
+grep -q 'RuntimeDirectoryMode=0750' packaging/systemd/skynet-edr.service
+grep -q 'StateDirectoryMode=0750' packaging/systemd/skynet-edr.service
+grep -q 'CacheDirectoryMode=0750' packaging/systemd/skynet-edr.service
+grep -q 'LogsDirectoryMode=0750' packaging/systemd/skynet-edr.service
 grep -q 'ProtectSystem=strict' packaging/systemd/skynet-edr.service
 grep -q 'IPAddressDeny=any' packaging/systemd/skynet-edr.service
 grep -q 'IPAddressAllow=localhost' packaging/systemd/skynet-edr.service
@@ -48,6 +54,19 @@ grep -q '^d /etc/skynet-edr 0750 root skynet-edr -' packaging/tmpfiles/skynet-ed
 grep -q 'skynet-edr-daemon' packaging/nfpm.yaml
 grep -q 'type: config|noreplace' packaging/nfpm.yaml
 grep -q '/etc/skynet-edr/agents.d' packaging/nfpm.yaml
+grep -q 'scripts:' packaging/nfpm.yaml
+grep -q 'postinstall:' packaging/nfpm.yaml
+grep -q 'postremove:' packaging/nfpm.yaml
+grep -q 'packaging/scripts/package-postinstall.sh' packaging/nfpm.yaml
+grep -q 'packaging/scripts/package-postremove.sh' packaging/nfpm.yaml
+
+grep -q 'systemd-sysusers' packaging/scripts/package-postinstall.sh
+grep -q 'systemd-tmpfiles' packaging/scripts/package-postinstall.sh
+grep -q 'chgrp skynet-edr /etc/skynet-edr/config.toml' packaging/scripts/package-postinstall.sh
+grep -q 'systemctl daemon-reload' packaging/scripts/package-postinstall.sh
+grep -q 'systemctl daemon-reload' packaging/scripts/package-postremove.sh
+
+grep -q '^PREFIX=/usr$' packaging/tarball/install.sh
 
 grep -q 'Hermes Agent' docs/INSTALL.md
 grep -q 'OpenClaw' docs/INSTALL.md
@@ -73,6 +92,8 @@ sh -n packaging/tarball/uninstall.sh
 sh -n packaging/scripts/build-tarball.sh
 sh -n packaging/scripts/build-packages.sh
 sh -n packaging/scripts/inspect-artifacts.sh
+sh -n packaging/scripts/package-postinstall.sh
+sh -n packaging/scripts/package-postremove.sh
 
 python3 - <<'PY'
 import pathlib

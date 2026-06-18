@@ -2,8 +2,12 @@
 
 use std::{
     fs,
+    io::{Read, Write},
+    net::TcpStream,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
+    thread,
+    time::{Duration, Instant},
 };
 
 fn daemon() -> Command {
@@ -24,6 +28,87 @@ fn write_config(dir: &Path, content: &str) -> PathBuf {
     let path = dir.join("config.toml");
     fs::write(&path, content).expect("config fixture should be written");
     path
+}
+
+fn wait_for_http_status(port: u16) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_error = String::new();
+
+    while Instant::now() < deadline {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(mut stream) => {
+                stream
+                    .write_all(
+                        b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
+                    .expect("status request is written");
+                let mut response = String::new();
+                stream
+                    .read_to_string(&mut response)
+                    .expect("status response is read");
+                return response;
+            }
+            Err(error) => {
+                last_error = error.to_string();
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    panic!("HTTP status endpoint did not become reachable: {last_error}");
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn daemon_run_serves_loopback_http_api_when_enabled() {
+    let dir = temp_config_dir("run-serves-http");
+    let db_path = dir.join("events.sqlite");
+    let port = 18_787 + (std::process::id() % 1_000) as u16;
+    let config = write_config(
+        &dir,
+        &format!(
+            r#"
+mode = "passive"
+
+[http_api]
+enabled = true
+bind = "127.0.0.1:{port}"
+read_only = true
+
+[sensors]
+linux_privileged = false
+
+[spool]
+enabled = true
+db = "{}"
+path = "{}"
+checkpoint = "{}"
+"#,
+            db_path.display(),
+            dir.join("empty-spool.jsonl").display(),
+            dir.join("spool.offset").display()
+        ),
+    );
+    fs::write(dir.join("empty-spool.jsonl"), "").expect("empty spool is written");
+
+    let mut child = daemon()
+        .arg("run")
+        .arg("--config")
+        .arg(config)
+        .spawn()
+        .expect("daemon should start");
+
+    let response = wait_for_http_status(port);
+    terminate_child(&mut child);
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("application/json"));
+    assert!(response.contains("\"read_only\":true"));
+    assert!(response.contains("\"product\":\"Skynet-EDR\""));
 }
 
 #[test]
