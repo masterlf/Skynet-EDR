@@ -27,12 +27,13 @@ fi
 
 rm -f "$PREFIX/bin/skynet-edr"
 rm -f "$PREFIX/bin/skynet-edr-daemon"
+rm -f "$PREFIX/bin/skynet-edr-install-hermes-plugin"
 rm -f /usr/lib/systemd/system/skynet-edr.service
 rm -f /usr/lib/sysusers.d/skynet-edr.conf
 rm -f /usr/lib/tmpfiles.d/skynet-edr.conf
 
 if [ "$PURGE" -eq 1 ]; then
-  rm -rf /etc/skynet-edr /var/lib/skynet-edr /var/log/skynet-edr /var/cache/skynet-edr /run/skynet-edr
+  rm -rf /etc/skynet-edr /var/lib/skynet-edr /var/log/skynet-edr /var/cache/skynet-edr /run/skynet-edr /usr/share/skynet-edr/hermes-plugin
   echo "Purged Skynet-EDR config, state, logs, cache, and runtime directories."
 else
   echo "Preserved /etc/skynet-edr, /var/lib/skynet-edr, /var/log/skynet-edr, and user/group."

@@ -97,6 +97,15 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
 fi
 install_file "$ROOT/docs/INSTALL.md" /usr/share/doc/skynet-edr/INSTALL.md 0644 root:root
 install_file "$ROOT/docs/PACKAGING.md" /usr/share/doc/skynet-edr/PACKAGING.md 0644 root:root
+if [ -d "$ROOT/integrations/hermes/skynet-edr" ]; then
+  install -d -m 0755 -o root -g root /usr/share/skynet-edr/hermes-plugin/skynet-edr
+  install_file "$ROOT/integrations/hermes/skynet-edr/plugin.yaml" /usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml 0644 root:root
+  install_file "$ROOT/integrations/hermes/skynet-edr/__init__.py" /usr/share/skynet-edr/hermes-plugin/skynet-edr/__init__.py 0644 root:root
+  install_file "$ROOT/integrations/hermes/skynet-edr/README.md" /usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md 0644 root:root
+fi
+if [ -f "$ROOT/skynet-edr-install-hermes-plugin.sh" ]; then
+  install_file "$ROOT/skynet-edr-install-hermes-plugin.sh" "$PREFIX/bin/skynet-edr-install-hermes-plugin" 0755 root:root
+fi
 
 install -d -m 0750 -o skynet-edr -g skynet-edr /var/lib/skynet-edr /var/log/skynet-edr /var/cache/skynet-edr /run/skynet-edr
 

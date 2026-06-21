@@ -18,7 +18,11 @@ packaging/scripts/build-packages.sh
 packaging/scripts/inspect-artifacts.sh
 packaging/scripts/package-postinstall.sh
 packaging/scripts/package-postremove.sh
+packaging/scripts/skynet-edr-install-hermes-plugin.sh
 packaging/scripts/vm-smoke.sh
+integrations/hermes/skynet-edr/plugin.yaml
+integrations/hermes/skynet-edr/__init__.py
+integrations/hermes/skynet-edr/README.md
 .github/workflows/packaging-release.yml
 "
 
@@ -29,7 +33,7 @@ for file in $required_files; do
   fi
 done
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/vm-smoke.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1
@@ -60,6 +64,12 @@ grep -q 'postinstall:' packaging/nfpm.yaml
 grep -q 'postremove:' packaging/nfpm.yaml
 grep -q 'packaging/scripts/package-postinstall.sh' packaging/nfpm.yaml
 grep -q 'packaging/scripts/package-postremove.sh' packaging/nfpm.yaml
+grep -q '/usr/share/skynet-edr/hermes-plugin/skynet-edr' packaging/nfpm.yaml
+grep -q '/usr/bin/skynet-edr-install-hermes-plugin' packaging/nfpm.yaml
+grep -q 'pre_tool_call' integrations/hermes/skynet-edr/__init__.py
+grep -q 'post_tool_call' integrations/hermes/skynet-edr/__init__.py
+grep -q 'skynet.event.v0' integrations/hermes/skynet-edr/__init__.py
+grep -q 'skynet-edr-plugin.log' integrations/hermes/skynet-edr/README.md
 
 grep -q 'systemd-sysusers' packaging/scripts/package-postinstall.sh
 grep -q 'systemd-tmpfiles' packaging/scripts/package-postinstall.sh
@@ -95,6 +105,7 @@ sh -n packaging/scripts/build-packages.sh
 sh -n packaging/scripts/inspect-artifacts.sh
 sh -n packaging/scripts/package-postinstall.sh
 sh -n packaging/scripts/package-postremove.sh
+sh -n packaging/scripts/skynet-edr-install-hermes-plugin.sh
 sh -n packaging/scripts/vm-smoke.sh
 
 python3 - <<'PY'

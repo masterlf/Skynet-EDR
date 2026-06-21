@@ -1,6 +1,6 @@
 # Integrations
 
-This page is the v0.2 integration index. It points to the runtime-specific docs and states the shared contract all integrations must respect.
+This page is the v0.3 integration index. It points to the runtime-specific docs and states the shared contract all integrations must respect.
 
 The common event contract is [Canonical event schema](EVENT_SCHEMA.md). Integration code should normalize into `skynet.event.v0` instead of making the correlation engine learn every runtime dialect. Cute architecture trick: fewer dialects, fewer gremlins.
 
@@ -17,7 +17,8 @@ The common event contract is [Canonical event schema](EVENT_SCHEMA.md). Integrat
 
 | Surface | Status | Purpose | Details |
 |---|---|---|---|
-| Hermes trace ingestion | MVP path | Normalize Hermes/AI-agent traces into canonical events | [Hermes event ingestion](HERMES_EVENT_INGESTION.md) |
+| Hermes plugin telemetry | v0.3 live passive path | Observe Hermes lifecycle hooks, emit canonical JSONL, and write sanitized plugin logs | [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) |
+| Hermes trace ingestion | MVP/import path | Normalize Hermes/AI-agent traces into canonical events | [Hermes event ingestion](HERMES_EVENT_INGESTION.md) |
 | Read-only MCP visibility | MVP path | Let Hermes inspect Skynet status, incidents, rules, sensors, and config drift | [Read-only MCP integration](MCP_READ_ONLY.md) |
 | OpenClaw adapter | Adapter contract | Map OpenClaw-style observations into canonical event properties | [OpenClaw integration](OPENCLAW_INTEGRATION.md) |
 | Local HTTP API and console | MVP visibility | Localhost-only read-only visibility for status/events/incidents | [Local read-only HTTP API and console](LOCAL_HTTP_API.md) |

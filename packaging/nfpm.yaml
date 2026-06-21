@@ -1,7 +1,7 @@
 name: skynet-edr
 arch: ${NFPM_ARCH:-amd64}
 platform: linux
-version: ${SKYNET_EDR_VERSION:-0.2.0}
+version: ${SKYNET_EDR_VERSION:-0.3.0}
 section: security
 priority: optional
 maintainer: Skynet-EDR Maintainers <maintainers@example.invalid>
@@ -65,6 +65,18 @@ contents:
       group: root
   - src: ./README.md
     dst: /usr/share/doc/skynet-edr/README.md
+  - src: ./integrations/hermes/skynet-edr
+    dst: /usr/share/skynet-edr/hermes-plugin/skynet-edr
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: ./packaging/scripts/skynet-edr-install-hermes-plugin.sh
+    dst: /usr/bin/skynet-edr-install-hermes-plugin
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
   - src: ./docs/INSTALL.md
     dst: /usr/share/doc/skynet-edr/INSTALL.md
   - src: ./docs/PACKAGING.md

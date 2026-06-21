@@ -80,6 +80,7 @@ sudo install -m 0755 target/release/skynet-edr-daemon /usr/local/bin/skynet-edr-
 
 skynet-edr --version
 skynet-edr-daemon --version
+skynet-edr-install-hermes-plugin --help
 skynet-edr-daemon status
 ```
 
@@ -101,13 +102,13 @@ Download packages from the GitHub Releases page:
 https://github.com/masterlf/Skynet-EDR/releases
 ```
 
-For `v0.2.0`, the expected Linux `amd64` artifacts are:
+For `v0.3.0`, the expected Linux `amd64` artifacts are:
 
 ```text
-skynet-edr_0.2.0_amd64.deb
-skynet-edr-0.2.0-1.amd64.rpm
-skynet-edr-0.2.0-1-amd64.pkg.tar.zst
-skynet-edr-0.2.0-x86_64-unknown-linux-gnu.tar.gz
+skynet-edr_0.3.0_amd64.deb
+skynet-edr-0.3.0-1.amd64.rpm
+skynet-edr-0.3.0-1-amd64.pkg.tar.zst
+skynet-edr-0.3.0-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
 ```
 
@@ -123,9 +124,10 @@ After downloading the `.deb` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo apt install ./skynet-edr_0.2.0_amd64.deb
+sudo apt install ./skynet-edr_0.3.0_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
+skynet-edr-install-hermes-plugin --help
 skynet-edr-daemon status
 ```
 
@@ -140,15 +142,47 @@ journalctl -u skynet-edr.service -n 100 --no-pager
 
 Current caveat: the service starts the conservative passive daemon path. Review `/etc/skynet-edr/config.toml` before enablement; privileged sensors remain disabled and unsupported by the MVP service.
 
+## Install the Hermes plugin
+
+Skynet-EDR v0.3 packages ship a passive Hermes Agent plugin template plus a
+per-user installer. Run the installer as the Hermes user, not through the
+`skynet-edr` service account:
+
+```bash
+skynet-edr-install-hermes-plugin
+hermes plugins enable skynet-edr  # if Hermes requires explicit opt-in
+```
+
+Restart Hermes sessions after installation. The plugin writes sanitized logs and
+canonical event JSONL by default under:
+
+```text
+~/.local/state/skynet-edr/hermes/skynet-edr-plugin.log
+~/.local/state/skynet-edr/hermes/events.jsonl
+```
+
+Manual ingestion example:
+
+```bash
+skynet-edr events ingest-spool \
+  --db /var/lib/skynet-edr/skynet.sqlite \
+  --spool ~/.local/state/skynet-edr/hermes/events.jsonl \
+  --checkpoint ~/.local/state/skynet-edr/hermes/events.offset
+```
+
+See [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) for the hook model,
+logging guarantees, environment variables, and daemon polling caveats.
+
 ## Install from `.rpm` on RHEL-compatible Linux or Fedora
 
 After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo dnf install ./skynet-edr-0.2.0-1.amd64.rpm
+sudo dnf install ./skynet-edr-0.3.0-1.amd64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
+skynet-edr-install-hermes-plugin --help
 skynet-edr-daemon status
 ```
 
@@ -168,7 +202,7 @@ After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo pacman -U ./skynet-edr-0.2.0-1-amd64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-0.3.0-1-amd64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```
@@ -191,6 +225,10 @@ skynet-edr-VERSION-TARGET/
   packaging/tmpfiles/skynet-edr.conf
   install.sh
   uninstall.sh
+  skynet-edr-install-hermes-plugin.sh
+  integrations/hermes/skynet-edr/plugin.yaml
+  integrations/hermes/skynet-edr/__init__.py
+  integrations/hermes/skynet-edr/README.md
   SHA256SUMS
   README.install.md
 ```
@@ -248,6 +286,7 @@ After install:
 ```bash
 skynet-edr --version
 skynet-edr-daemon --version
+skynet-edr-install-hermes-plugin --help
 skynet-edr-daemon status
 sudo -u skynet-edr skynet-edr store init --db /var/lib/skynet-edr/skynet-edr.sqlite
 sudo -u skynet-edr skynet-edr events list --db /var/lib/skynet-edr/skynet-edr.sqlite

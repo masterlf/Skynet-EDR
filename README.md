@@ -98,6 +98,7 @@ Start with the [documentation hub](docs/README.md). The v0.2 documentation struc
 - [Architecture](docs/ARCHITECTURE.md) — components, deployment modes, and MVP recommendation.
 - [Canonical event schema](docs/EVENT_SCHEMA.md) — `skynet.event.v0` envelope and validation requirements.
 - [Integrations](docs/INTEGRATIONS.md) — Hermes, OpenClaw, MCP, API, and CLI integration map.
+- [Hermes plugin telemetry](docs/HERMES_PLUGIN_TELEMETRY.md) — v0.3 passive Hermes lifecycle hook plugin and sanitized logs.
 - [Detections](docs/DETECTIONS.md) — detection philosophy, rule families, severity, and alert evidence.
 - [Operations](docs/OPERATIONS.md) — local store, API/MCP posture, evidence handling, and troubleshooting.
 - [Release process](docs/RELEASE_PROCESS.md) and [packaging plan](docs/PACKAGING.md) — release gates, artifacts, publishing, and rollback.

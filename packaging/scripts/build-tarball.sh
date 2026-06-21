@@ -10,7 +10,7 @@ NAME="skynet-edr-${VERSION}-${TARGET}"
 ROOT="dist/${NAME}"
 
 rm -rf "$ROOT"
-install -d "$ROOT/bin" "$ROOT/packaging/config" "$ROOT/packaging/systemd" "$ROOT/packaging/sysusers" "$ROOT/packaging/tmpfiles" "$ROOT/packaging/tarball" "$ROOT/docs"
+install -d "$ROOT/bin" "$ROOT/packaging/config" "$ROOT/packaging/systemd" "$ROOT/packaging/sysusers" "$ROOT/packaging/tmpfiles" "$ROOT/packaging/tarball" "$ROOT/docs" "$ROOT/integrations/hermes"
 install -m 0755 target/release/skynet-edr "$ROOT/bin/skynet-edr"
 install -m 0755 target/release/skynet-edr-daemon "$ROOT/bin/skynet-edr-daemon"
 install -m 0644 packaging/config/config.toml "$ROOT/packaging/config/config.toml"
@@ -21,6 +21,9 @@ install -m 0755 packaging/tarball/install.sh "$ROOT/install.sh"
 install -m 0755 packaging/tarball/uninstall.sh "$ROOT/uninstall.sh"
 install -m 0755 packaging/tarball/install.sh "$ROOT/packaging/tarball/install.sh"
 install -m 0755 packaging/tarball/uninstall.sh "$ROOT/packaging/tarball/uninstall.sh"
+install -m 0755 packaging/scripts/skynet-edr-install-hermes-plugin.sh "$ROOT/skynet-edr-install-hermes-plugin.sh"
+cp -R integrations/hermes/skynet-edr "$ROOT/integrations/hermes/skynet-edr"
+chmod 0644 "$ROOT/integrations/hermes/skynet-edr"/*
 install -m 0644 README.md "$ROOT/README.md"
 install -m 0644 docs/INSTALL.md "$ROOT/docs/INSTALL.md"
 install -m 0644 docs/PACKAGING.md "$ROOT/docs/PACKAGING.md"
@@ -29,7 +32,7 @@ install -m 0644 LICENSE "$ROOT/LICENSE"
 
 (
   cd "$ROOT"
-  sha256sum bin/skynet-edr bin/skynet-edr-daemon install.sh uninstall.sh > SHA256SUMS
+  sha256sum bin/skynet-edr bin/skynet-edr-daemon install.sh uninstall.sh skynet-edr-install-hermes-plugin.sh integrations/hermes/skynet-edr/plugin.yaml integrations/hermes/skynet-edr/__init__.py > SHA256SUMS
 )
 
 tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
