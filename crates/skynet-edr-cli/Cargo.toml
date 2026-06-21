@@ -12,7 +12,7 @@ name = "skynet-edr"
 path = "src/main.rs"
 
 [dependencies]
-skynet-edr-core = { version = "0.2.0", path = "../skynet-edr-core" }
+skynet-edr-core = { version = "0.3.0", path = "../skynet-edr-core" }
 serde_json = "1.0"
 
 [lints]

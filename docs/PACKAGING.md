@@ -34,6 +34,8 @@ Required files:
 /usr/lib/sysusers.d/skynet-edr.conf
 /usr/lib/tmpfiles.d/skynet-edr.conf
 /etc/skynet-edr/config.toml
+/usr/share/skynet-edr/hermes-plugin/skynet-edr/
+/usr/bin/skynet-edr-install-hermes-plugin
 /usr/share/doc/skynet-edr/
 /usr/share/licenses/skynet-edr/LICENSE
 ```
