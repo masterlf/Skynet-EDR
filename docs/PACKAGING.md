@@ -33,7 +33,7 @@ Required files:
 /usr/lib/systemd/system/skynet-edr.service
 /usr/lib/sysusers.d/skynet-edr.conf
 /usr/lib/tmpfiles.d/skynet-edr.conf
-/etc/skynet-edr/skynet-edr.toml
+/etc/skynet-edr/config.toml
 /usr/share/doc/skynet-edr/
 /usr/share/licenses/skynet-edr/LICENSE
 ```

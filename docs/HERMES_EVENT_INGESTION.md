@@ -1,6 +1,6 @@
 # Hermes Event Ingestion
 
-Phase 12 adds an ingestion and MVP detection boundary for already-recorded Hermes agent traces. It converts session/tool-call records into normalized Skynet-EDR events, redacts them before persistence, and runs the built-in `EDR-EXFIL-001` correlation rule to open an incident when fake secret access is followed by network egress.
+Phase 12 adds an ingestion and MVP detection boundary for already-recorded Hermes agent traces. It converts session/tool-call records into normalized Skynet-EDR events, redacts them before persistence, and runs built-in MVP rules to open incidents for fake secret exfiltration and safe malware-test content supplied to an AI runtime.
 
 For new Hermes/OpenClaw adapters, prefer the canonical event envelope documented in [Canonical Event Schema](EVENT_SCHEMA.md). The legacy Hermes trace shape below remains supported as an MVP compatibility input, but live v0.2 integrations should emit `skynet.event.v0` events directly where possible.
 
@@ -80,11 +80,12 @@ spool ingestion: ingested=N dropped=M duplicates=D checkpoint=B byte(s)
 
 ## MVP correlation
 
-The current end-to-end MVP has one built-in correlation rule:
+The current end-to-end MVP has two built-in correlation rules:
 
 - `EDR-EXFIL-001`: a sensitive Hermes file read/access followed by network egress in the same session within 60 seconds opens a critical incident.
+- `EDR-MALWARE-001`: known safe malware-test indicators in Hermes tool output supplied to the AI runtime open a high-severity incident. Raw tool output/payload content is omitted before persistence; only structured indicator metadata is stored.
 
-The fixture `crates/skynet-edr-core/tests/fixtures/hermes_secret_egress_trace.json` proves the path with fake secret access plus egress. It is deliberately synthetic and contains no real credentials.
+The fixture `crates/skynet-edr-core/tests/fixtures/hermes_secret_egress_trace.json` proves the path with fake secret access plus egress. `crates/skynet-edr-core/tests/fixtures/hermes_fake_malware_content_trace.json` proves the AI-runtime malware-test path using a non-executable fake marker, not real malware.
 
 ## Built-in attack simulation
 

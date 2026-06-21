@@ -45,6 +45,12 @@ Default window: 60 seconds.
 
 Severity: Critical.
 
+### EDR-MALWARE-001: Malware-like content sent to AI runtime
+
+Detect known safe malware-test indicators in untrusted Hermes tool output that is supplied back to the AI runtime for analysis. The v0.2 implementation uses deterministic test markers only, including a project-specific fake marker and defanged/EICAR-style test indicators; it does not require or ship real malware samples.
+
+Severity: High. Raw payload content must be omitted before storage; store only structured indicator metadata such as signature family.
+
 ### EDR-PI-001: Untrusted content contains instruction override
 
 Detect common prompt-injection language inside untrusted data:

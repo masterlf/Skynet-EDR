@@ -145,6 +145,11 @@ fn rules_sensors_and_config_drift_are_operator_readable() {
         .expect("rules array")
         .iter()
         .any(|rule| rule["id"] == "EDR-EXFIL-001" && rule["severity"] == "critical"));
+    assert!(rules
+        .as_array()
+        .expect("rules array")
+        .iter()
+        .any(|rule| rule["id"] == "EDR-MALWARE-001" && rule["severity"] == "high"));
 
     let sensors = list_sensors();
     assert!(sensors

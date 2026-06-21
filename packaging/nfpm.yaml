@@ -1,7 +1,7 @@
 name: skynet-edr
 arch: ${NFPM_ARCH:-amd64}
 platform: linux
-version: ${SKYNET_EDR_VERSION:-0.1.0}
+version: ${SKYNET_EDR_VERSION:-0.2.0}
 section: security
 priority: optional
 maintainer: Skynet-EDR Maintainers <maintainers@example.invalid>

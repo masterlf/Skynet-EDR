@@ -162,6 +162,49 @@ fn cli_initializes_store_and_lists_imported_incident() {
 }
 
 #[test]
+fn cli_ingests_hermes_fake_malware_trace_into_redacted_incident() {
+    let db_path = temp_path("hermes-fake-malware.sqlite");
+    let trace_path = temp_path("hermes-fake-malware.json");
+    let raw_marker = "SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE";
+    let trace_json =
+        include_str!("../../skynet-edr-core/tests/fixtures/hermes_fake_malware_content_trace.json");
+    fs::write(&trace_path, trace_json).expect("fixture trace is written");
+
+    let ingest = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["events", "ingest-hermes", "--db"])
+        .arg(&db_path)
+        .arg("--trace-json")
+        .arg(&trace_path)
+        .output()
+        .expect("events ingest-hermes runs");
+    assert!(ingest.status.success());
+    let stdout = String::from_utf8(ingest.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("ingested 1 Hermes event(s), opened 1 incident(s)"));
+
+    let incident_show = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args([
+            "incidents",
+            "show",
+            "inc:EDR-MALWARE-001:sess_fake_malware_to_ai:1781519300000",
+            "--db",
+        ])
+        .arg(&db_path)
+        .output()
+        .expect("incidents show runs");
+    assert!(incident_show.status.success());
+    let incident_json = String::from_utf8(incident_show.stdout).expect("stdout should be UTF-8");
+    assert!(incident_json.contains("EDR-MALWARE-001"));
+    assert!(incident_json.contains("malware_indicator"));
+    assert!(incident_json.contains("skynet_fake_malware_test_string"));
+    assert!(incident_json.contains("[REDACTED:policy]"));
+    assert!(!incident_json.contains(raw_marker));
+    assert!(!incident_json.contains("simulated malware sample supplied"));
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+    fs::remove_file(trace_path).expect("temporary trace is removed");
+}
+
+#[test]
 fn cli_ingests_hermes_trace_into_redacted_events_and_correlated_incident() {
     let db_path = temp_path("hermes-trace.sqlite");
     let trace_path = temp_path("hermes-trace.json");

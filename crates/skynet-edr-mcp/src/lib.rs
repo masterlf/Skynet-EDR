@@ -218,6 +218,14 @@ pub fn list_rules() -> Value {
             "source_kinds": ["file", "process", "network", "messaging"],
             "read_only": true,
             "description": "Correlates a sensitive file read with outbound network or delivery telemetry in the same agent session."
+        },
+        {
+            "id": "EDR-MALWARE-001",
+            "name": "Malware-like content sent to AI runtime",
+            "severity": "high",
+            "source_kinds": ["mcp_tool"],
+            "read_only": true,
+            "description": "Detects known-safe malware test indicators in Hermes tool output supplied to the AI runtime while omitting raw payload content from storage."
         }
     ])
 }

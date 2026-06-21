@@ -2,7 +2,10 @@
 
 use std::{fs, path::PathBuf};
 
-use skynet_edr_core::{ingest_hermes_events_json, LocalStore, Severity, SourceKind};
+use skynet_edr_core::{
+    ingest_hermes_events_json, ingest_hermes_events_json_with_detection, LocalStore, Severity,
+    SourceKind,
+};
 
 fn temp_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -181,6 +184,55 @@ fn correlates_sensitive_file_access_plus_egress_into_redacted_incident() {
     assert!(serialized.contains("[REDACTED:local_context]"));
     assert!(serialized.contains("[REDACTED:secret]"));
     assert!(incident.redaction.contains_sensitive_data);
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
+fn detects_fake_malware_content_sent_to_ai_without_storing_payload() {
+    let db_path = temp_path("fake-malware-ai.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let raw_marker = "SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE";
+
+    let summary = ingest_hermes_events_json_with_detection(
+        &store,
+        include_str!("fixtures/hermes_fake_malware_content_trace.json"),
+    )
+    .expect("trace ingests");
+    assert_eq!(summary.event_count, 1);
+    assert_eq!(summary.incident_count, 1);
+
+    let events = store.list_events().expect("events list");
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.source.kind, SourceKind::McpTool);
+    assert_eq!(event.severity, Severity::High);
+    assert_eq!(event.attributes["malware_indicator"], true);
+    assert_eq!(
+        event.attributes["malware_signature"],
+        "skynet_fake_malware_test_string"
+    );
+    assert_eq!(event.attributes["content_redacted"], true);
+
+    let incidents = store.list_incidents().expect("incidents list");
+    assert_eq!(incidents.len(), 1);
+    let incident = &incidents[0];
+    assert_eq!(
+        incident.id.as_str(),
+        "inc:EDR-MALWARE-001:sess_fake_malware_to_ai:1781519300000"
+    );
+    assert_eq!(incident.severity, Severity::High);
+    assert_eq!(incident.status, skynet_edr_core::IncidentStatus::Open);
+    assert_eq!(incident.events.len(), 1);
+    assert!(incident.title.contains("Malware-like content sent to AI"));
+    assert!(incident.summary.contains("EDR-MALWARE-001"));
+
+    assert!(incident.redaction.contains_sensitive_data);
+    let serialized = serde_json::to_string(&(&events, &incidents)).expect("stored data serializes");
+    assert!(!serialized.contains(raw_marker));
+    assert!(!serialized.contains("simulated malware sample supplied"));
+    assert!(serialized.contains("malware_indicator"));
+    assert!(serialized.contains("skynet_fake_malware_test_string"));
 
     fs::remove_file(db_path).expect("temporary db is removed");
 }

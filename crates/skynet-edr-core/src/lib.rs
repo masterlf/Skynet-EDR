@@ -1754,6 +1754,7 @@ fn normalize_hermes_record(record: &HermesIngestRecord, index: usize) -> Event {
     let network_indicator = is_networkish_tool_call(&tool_lower, &arguments_text);
     let delivery_indicator = is_delivery_tool_call(&tool_lower, &arguments_text);
     let sensitive_access = contains_sensitive_path(&arguments_text);
+    let malware_signature = record.content.as_deref().and_then(detect_malware_signature);
 
     let source_kind = hermes_source_kind(
         record.kind,
@@ -1763,9 +1764,8 @@ fn normalize_hermes_record(record: &HermesIngestRecord, index: usize) -> Event {
     );
     let severity = hermes_severity(
         record.kind,
-        sensitive_access,
-        network_indicator,
-        delivery_indicator,
+        sensitive_access || network_indicator || delivery_indicator,
+        malware_signature.is_some(),
     );
     let attributes = hermes_event_attributes(
         record,
@@ -1773,6 +1773,7 @@ fn normalize_hermes_record(record: &HermesIngestRecord, index: usize) -> Event {
         network_indicator,
         delivery_indicator,
         sensitive_access,
+        malware_signature,
     );
     let title = hermes_event_title(record, &tool_lower, delivery_indicator);
     let details = Some(hermes_event_details(record.kind));
@@ -1798,17 +1799,13 @@ fn normalize_hermes_record(record: &HermesIngestRecord, index: usize) -> Event {
 
 fn hermes_severity(
     kind: HermesIngestKind,
-    sensitive_access: bool,
-    network_indicator: bool,
-    delivery_indicator: bool,
+    suspicious_action: bool,
+    malware_indicator: bool,
 ) -> Severity {
     match kind {
+        _ if malware_indicator => Severity::High,
         HermesIngestKind::ToolResult => Severity::Medium,
-        HermesIngestKind::ToolCall
-            if sensitive_access || network_indicator || delivery_indicator =>
-        {
-            Severity::High
-        }
+        HermesIngestKind::ToolCall if suspicious_action => Severity::High,
         HermesIngestKind::ToolCall => Severity::Low,
     }
 }
@@ -1819,6 +1816,7 @@ fn hermes_event_attributes(
     network_indicator: bool,
     delivery_indicator: bool,
     sensitive_access: bool,
+    malware_signature: Option<&'static str>,
 ) -> BTreeMap<String, serde_json::Value> {
     let mut attributes = hermes_base_attributes(
         record,
@@ -1841,6 +1839,14 @@ fn hermes_event_attributes(
         attributes.insert(
             "content_length".to_owned(),
             serde_json::json!(content.len()),
+        );
+    }
+    if let Some(signature) = malware_signature {
+        attributes.insert("malware_indicator".to_owned(), serde_json::json!(true));
+        attributes.insert("malware_signature".to_owned(), serde_json::json!(signature));
+        attributes.insert(
+            "rule_id".to_owned(),
+            serde_json::json!(MALWARE_CONTENT_RULE_ID),
         );
     }
     attributes
@@ -1970,7 +1976,7 @@ fn redaction_from_omitted_content(record: &HermesIngestRecord) -> Vec<RedactedFi
         return Vec::new();
     };
     let redacted = redact_text(content);
-    redacted
+    let mut fields = redacted
         .metadata
         .redacted_fields
         .into_iter()
@@ -1978,7 +1984,15 @@ fn redaction_from_omitted_content(record: &HermesIngestRecord) -> Vec<RedactedFi
             field.path = format!("content.{}", field.path);
             field
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if detect_malware_signature(content).is_some() {
+        fields.push(RedactedField {
+            path: "content".to_owned(),
+            reason: RedactionReason::Policy,
+            replacement: "[REDACTED:malware_sample]".to_owned(),
+        });
+    }
+    fields
 }
 
 fn stable_hermes_event_id(record: &HermesIngestRecord, index: usize) -> String {
@@ -2074,10 +2088,17 @@ fn contains_sensitive_path(text: &str) -> bool {
 }
 
 const SECRET_EGRESS_RULE_ID: &str = "EDR-EXFIL-001";
+const MALWARE_CONTENT_RULE_ID: &str = "EDR-MALWARE-001";
 const SECRET_EGRESS_WINDOW_MS: u64 = 60_000;
 
 fn correlate_hermes_incidents(events: &[Event]) -> Vec<Incident> {
     let mut incidents = Vec::new();
+    incidents.extend(
+        events
+            .iter()
+            .filter(|event| is_malware_content_event(event))
+            .map(malware_content_incident),
+    );
     for secret_event in events
         .iter()
         .filter(|event| is_sensitive_secret_access_event(event))
@@ -2095,6 +2116,53 @@ fn correlate_hermes_incidents(events: &[Event]) -> Vec<Incident> {
         incidents.push(secret_egress_incident(secret_event, egress_event));
     }
     incidents
+}
+
+fn detect_malware_signature(content: &str) -> Option<&'static str> {
+    let lower = content.to_ascii_lowercase();
+    if lower.contains("skynet_fake_malware_test_string_do_not_execute") {
+        return Some("skynet_fake_malware_test_string");
+    }
+    if lower.contains("eicar-standard-antivirus-test-file") {
+        return Some("eicar_test_string");
+    }
+    None
+}
+
+fn is_malware_content_event(event: &Event) -> bool {
+    event.attributes.get("malware_indicator") == Some(&serde_json::json!(true))
+}
+
+fn malware_content_incident(event: &Event) -> Incident {
+    let session = event
+        .attributes
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown_session");
+    let signature = event
+        .attributes
+        .get("malware_signature")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown_signature");
+    let events = vec![event.clone()];
+    Incident {
+        id: IncidentId::new(format!(
+            "inc:{MALWARE_CONTENT_RULE_ID}:{}:{}",
+            safe_id_fragment(session),
+            event.observed_at_unix_ms
+        )),
+        created_at_unix_ms: event.observed_at_unix_ms,
+        updated_at_unix_ms: event.observed_at_unix_ms,
+        status: IncidentStatus::Open,
+        severity: Severity::High,
+        title: "Malware-like content sent to AI runtime".to_owned(),
+        summary: format!(
+            "{MALWARE_CONTENT_RULE_ID}: Hermes tool output supplied malware-like content to the AI runtime; signature={signature}; raw payload omitted before storage."
+        ),
+        source: event.source.clone(),
+        redaction: incident_redaction_from_events(&events),
+        events,
+    }
 }
 
 fn is_sensitive_secret_access_event(event: &Event) -> bool {
