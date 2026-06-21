@@ -18,6 +18,7 @@ packaging/scripts/build-packages.sh
 packaging/scripts/inspect-artifacts.sh
 packaging/scripts/package-postinstall.sh
 packaging/scripts/package-postremove.sh
+packaging/scripts/vm-smoke.sh
 .github/workflows/packaging-release.yml
 "
 
@@ -28,7 +29,7 @@ for file in $required_files; do
   fi
 done
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1
@@ -94,6 +95,7 @@ sh -n packaging/scripts/build-packages.sh
 sh -n packaging/scripts/inspect-artifacts.sh
 sh -n packaging/scripts/package-postinstall.sh
 sh -n packaging/scripts/package-postremove.sh
+sh -n packaging/scripts/vm-smoke.sh
 
 python3 - <<'PY'
 import pathlib

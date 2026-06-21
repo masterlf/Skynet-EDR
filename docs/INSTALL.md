@@ -26,7 +26,7 @@ Packaged installs should create this layout:
 ```text
 /usr/bin/skynet-edr
 /usr/bin/skynet-edr-daemon
-/etc/skynet-edr/skynet-edr.toml
+/etc/skynet-edr/config.toml
 /etc/skynet-edr/rules.d/
 /etc/skynet-edr/agents.d/
 /var/lib/skynet-edr/skynet-edr.sqlite
@@ -50,7 +50,7 @@ Default permissions:
 
 ```text
 /etc/skynet-edr/                  root:skynet-edr 0750
-/etc/skynet-edr/skynet-edr.toml   root:skynet-edr 0640
+/etc/skynet-edr/config.toml   root:skynet-edr 0640
 /etc/skynet-edr/rules.d/          root:skynet-edr 0750
 /etc/skynet-edr/agents.d/         root:skynet-edr 0750
 /var/lib/skynet-edr/              skynet-edr:skynet-edr 0750
@@ -101,13 +101,13 @@ Download packages from the GitHub Releases page:
 https://github.com/masterlf/Skynet-EDR/releases
 ```
 
-For `v0.1.0`, the expected Linux `amd64` artifacts are:
+For `v0.2.0`, the expected Linux `amd64` artifacts are:
 
 ```text
-skynet-edr_0.1.0_amd64.deb
-skynet-edr-0.1.0-1.amd64.rpm
-skynet-edr-0.1.0-1-amd64.pkg.tar.zst
-skynet-edr-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+skynet-edr_0.2.0_amd64.deb
+skynet-edr-0.2.0-1.amd64.rpm
+skynet-edr-0.2.0-1-amd64.pkg.tar.zst
+skynet-edr-0.2.0-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
 ```
 
@@ -123,13 +123,13 @@ After downloading the `.deb` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo apt install ./skynet-edr_0.1.0_amd64.deb
+sudo apt install ./skynet-edr_0.2.0_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
 ```
 
-Packages should not auto-enable privileged sensors. Enable the daemon only after reviewing `/etc/skynet-edr/skynet-edr.toml`:
+Packages should not auto-enable privileged sensors. Enable the daemon only after reviewing `/etc/skynet-edr/config.toml`:
 
 ```bash
 sudo systemctl daemon-reload
@@ -146,7 +146,7 @@ After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo dnf install ./skynet-edr-0.1.0-1.amd64.rpm
+sudo dnf install ./skynet-edr-0.2.0-1.amd64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
@@ -168,7 +168,7 @@ After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo pacman -U ./skynet-edr-0.1.0-1-amd64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-0.2.0-1-amd64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```
@@ -185,10 +185,10 @@ Expected tarball layout:
 skynet-edr-VERSION-TARGET/
   bin/skynet-edr
   bin/skynet-edr-daemon
-  etc/skynet-edr.toml.example
-  systemd/skynet-edr.service
-  sysusers.d/skynet-edr.conf
-  tmpfiles.d/skynet-edr.conf
+  packaging/config/config.toml
+  packaging/systemd/skynet-edr.service
+  packaging/sysusers/skynet-edr.conf
+  packaging/tmpfiles/skynet-edr.conf
   install.sh
   uninstall.sh
   SHA256SUMS
