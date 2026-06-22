@@ -17,6 +17,7 @@ on:
     types: [published]
 permissions:
   contents: write
+  packages: write
 jobs:
   linux-packages:
     name: Build Linux package artifacts
@@ -65,6 +66,17 @@ jobs:
             dist/*.pkg.tar.zst
             dist/checksums.txt
           if-no-files-found: error
+      - name: Install ORAS
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        env:
+          ORAS_VERSION: 1.2.3
+        run: |
+          curl -L --fail --proto '=https' --tlsv1.2 \
+            -o /tmp/oras.tar.gz \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          tar -C /tmp -xzf /tmp/oras.tar.gz oras
+          sudo install -m 0755 /tmp/oras /usr/local/bin/oras
+          oras version
       - name: Upload package assets to GitHub Release
         if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
@@ -78,3 +90,22 @@ jobs:
             dist/*.pkg.tar.zst \
             dist/checksums.txt \
             --clobber
+      - name: Publish package bundle to GitHub Packages
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/skynet-edr-packages
+        run: |
+          echo "$GH_TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          oras push "$IMAGE:$RELEASE_TAG" \
+            --artifact-type application/vnd.skynet-edr.linux-packages.v1 \
+            --annotation "org.opencontainers.image.title=Skynet-EDR Linux package bundle" \
+            --annotation "org.opencontainers.image.description=Skynet-EDR Linux package artifacts for $RELEASE_TAG" \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.version=$RELEASE_TAG" \
+            dist/checksums.txt \
+            dist/*.tar.gz \
+            dist/*.deb \
+            dist/*.rpm \
+            dist/*.pkg.tar.zst
