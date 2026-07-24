@@ -1,6 +1,6 @@
-# Initial Detection Rules
+# Detection Rules
 
-This document lists early candidate rules. They are intentionally simple and high-signal.
+This document distinguishes shipped deterministic rules from roadmap candidates. Implemented rules are intentionally simple, high-signal, and passive-safe: they create explainable matches from redacted canonical events but do not block, pause, or mutate runtime behavior by themselves.
 
 ## Severity model
 
@@ -9,7 +9,28 @@ This document lists early candidate rules. They are intentionally simple and hig
 - **Medium:** suspicious configuration, tool, or network behavior requiring review.
 - **Low:** weak indicator or isolated suspicious content.
 
-## Rule candidates
+## Implemented deterministic canonical sequence rules
+
+The canonical sequence engine evaluates ordered `event_type` + `trust_level` predicates, optional redacted `attributes.*` predicates, a fixed time window, and either same-session or same-trace joins. Events are sorted by `observed_at_unix_ms` then `event_id` so matching is deterministic. Rules fail closed when structurally ambiguous.
+
+The built-in AI-agent sequence pack currently ships these rules:
+
+| Rule | Implemented behavior | Severity |
+|---|---|---|
+| EDR-MCP-001 | Untrusted prompt-injection content followed by an agent MCP shell/network tool request in the same session. | Critical |
+| EDR-CONFIG-001 | Untrusted prompt-injection content followed by high-risk agent configuration drift with network indicators. | High |
+| EDR-CRON-001 | Untrusted prompt-injection content followed by unattended automation scheduling for sensitive operations. | High |
+| EDR-PI-001 | Untrusted prompt-injection content followed by a privileged tool request. Text-only prompt injection does not match and must never become Critical by itself. | High |
+| EDR-MSG-001 | Untrusted prompt-injection content followed by sensitive message delivery without explicit authenticated-user request. | Critical |
+| EDR-NET-001 | Untrusted prompt-injection content followed by direct-IP network egress. | High |
+| EDR-SCOPE-001 | Untrusted prompt-injection content followed by approval/scope expansion. | High |
+| EDR-PERSIST-001 | Untrusted prompt-injection content followed by an agent persistence configuration change. | Critical |
+
+These rules deliberately do not duplicate `EDR-EXFIL-001`; secret-read plus egress remains handled by the existing Hermes EXFIL correlator.
+
+## Rule semantics reference
+
+The following rule notes provide operator-facing semantics. The implementation status is listed above; `EDR-EXFIL-001` and `EDR-MALWARE-001` are currently implemented by the Hermes-specific correlators rather than the canonical sequence pack.
 
 ### EDR-MCP-001: MCP shell plus egress
 
@@ -50,6 +71,10 @@ Severity: Critical.
 Detect known safe malware-test indicators in untrusted Hermes tool output that is supplied back to the AI runtime for analysis. The v0.2 implementation uses deterministic test markers only, including a project-specific fake marker and defanged/EICAR-style test indicators; it does not require or ship real malware samples.
 
 Severity: High. Raw payload content must be omitted before storage; store only structured indicator metadata such as signature family.
+
+## Roadmap / candidate rule details
+
+The details below describe intended detector semantics and future adapter coverage. They are not all separate production correlators unless listed in the implemented sections above.
 
 ### EDR-PI-001: Untrusted content contains instruction override
 

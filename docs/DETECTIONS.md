@@ -1,6 +1,6 @@
 # Detections
 
-This page is the v0.2 detection and alerting index. The detailed candidate rules live in [Initial detection rules](DETECTION_RULES.md); this page explains how to read them and how they connect to the rest of the product.
+This page is the detection and alerting index. Implemented and roadmap rules live in [Detection rules](DETECTION_RULES.md); this page explains how to read them and how they connect to the rest of the product.
 
 ## Detection philosophy
 
@@ -20,7 +20,13 @@ Detection rules may use:
 - local storage timelines documented in [Local storage and CLI](LOCAL_STORAGE.md);
 - lab scenarios from [Linux lab testing](LINUX_LAB_TESTING.md).
 
-## Initial rule families
+## Implemented engines
+
+- Hermes-specific correlators currently emit `EDR-EXFIL-001` and `EDR-MALWARE-001` incidents from normalized Hermes telemetry.
+- The canonical sequence engine evaluates ordered canonical events with exact `event_type`, exact `trust_level`, optional `attributes.*` predicates, a fixed time window, deterministic timestamp/event-id ordering, and same-session or same-trace joins.
+- The built-in canonical sequence rule pack covers `EDR-MCP-001`, `EDR-CONFIG-001`, `EDR-CRON-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-SCOPE-001`, and `EDR-PERSIST-001` as passive explainable matches. It does not replace or duplicate the existing `EDR-EXFIL-001` Hermes secret-egress correlator.
+
+## Rule families
 
 | Family | Example | Detailed doc |
 |---|---|---|
