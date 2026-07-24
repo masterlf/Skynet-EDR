@@ -1,6 +1,9 @@
 //! CLI tests for redaction-safe diagnostics collection.
 
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+use std::{fmt::Write as _, fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 fn temp_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -139,12 +142,13 @@ fn diagnostics_collect_writes_private_redacted_bundle_without_raw_events_by_defa
     assert!(manifest.contains("versions.txt"));
 
     let config_summary =
-        fs::read_to_string(bundle_dir.join("config-summary.toml")).expect("config summary exists");
-    assert!(config_summary.contains("mode"));
+        fs::read_to_string(bundle_dir.join("config-summary.json")).expect("config summary exists");
+    assert!(config_summary.contains("\"mode\": \"passive\""));
+    assert!(config_summary.contains("\"http_api_enabled\": true"));
+    assert!(config_summary.contains("\"redact_before_storage\": false"));
     assert!(!config_summary.contains("config-secret-value"));
     assert!(!config_summary.contains("/home/alice"));
-    assert!(config_summary.contains("[REDACTED:secret]"));
-    assert!(config_summary.contains("[REDACTED:local_context]"));
+    assert!(!config_summary.contains("[REDACTED:"));
 
     let logs = fs::read_to_string(bundle_dir.join("recent-logs.txt")).expect("logs exist");
     assert!(!logs.contains("log-secret-value"));
@@ -162,6 +166,15 @@ fn diagnostics_collect_writes_private_redacted_bundle_without_raw_events_by_defa
     assert!(storage_status.contains("\"incident_count\": 1"));
     assert!(!storage_status.contains("evt_diag_1"));
     assert!(!bundle_dir.join("events.jsonl").exists());
+
+    let manifest_json: serde_json::Value = serde_json::from_str(&manifest).expect("manifest JSON");
+    let files = manifest_json["files"].as_array().expect("files array");
+    assert_eq!(
+        files.len(),
+        5,
+        "manifest should list only written files: {manifest}"
+    );
+    assert!(files.iter().any(|file| file == "config-summary.json"));
 
     for entry in fs::read_dir(&bundle_dir).expect("bundle entries") {
         let entry = entry.expect("bundle entry");
@@ -216,4 +229,110 @@ fn diagnostics_collect_does_not_create_missing_database() {
     assert!(storage_status.contains("\"store_present\": false"));
 
     fs::remove_dir_all(bundle_dir).expect("temporary bundle is removed");
+}
+
+#[test]
+fn diagnostics_collect_refuses_preexisting_nonempty_output_directory() {
+    let bundle_dir = temp_path("preexisting-output");
+    fs::create_dir_all(&bundle_dir).expect("bundle dir exists");
+    fs::write(bundle_dir.join("attacker-file"), "do not overwrite").expect("attacker file written");
+
+    let collect = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["diagnostics", "collect", "--output"])
+        .arg(&bundle_dir)
+        .output()
+        .expect("diagnostics collect runs");
+
+    assert!(!collect.status.success());
+    let stderr = String::from_utf8(collect.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("output directory must not already exist"));
+    assert_eq!(
+        fs::read_to_string(bundle_dir.join("attacker-file")).expect("attacker file remains"),
+        "do not overwrite"
+    );
+
+    fs::remove_dir_all(bundle_dir).expect("temporary bundle is removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn diagnostics_collect_refuses_symlink_output_target() {
+    let real_dir = temp_path("real-output-target");
+    let link_path = temp_path("symlink-output");
+    fs::create_dir_all(&real_dir).expect("real target exists");
+    symlink(&real_dir, &link_path).expect("output symlink created");
+
+    let collect = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["diagnostics", "collect", "--output"])
+        .arg(&link_path)
+        .output()
+        .expect("diagnostics collect runs");
+
+    assert!(!collect.status.success());
+    let stderr = String::from_utf8(collect.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("output directory must not already exist"));
+    assert!(fs::read_dir(&real_dir)
+        .expect("real dir readable")
+        .next()
+        .is_none());
+
+    fs::remove_file(link_path).expect("temporary symlink is removed");
+    fs::remove_dir_all(real_dir).expect("temporary real dir is removed");
+}
+
+#[test]
+fn diagnostics_collect_errors_for_explicit_missing_evidence_file() {
+    let bundle_dir = temp_path("missing-log");
+    let missing_log = temp_path("missing.log");
+
+    let collect = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["diagnostics", "collect", "--output"])
+        .arg(&bundle_dir)
+        .arg("--log-file")
+        .arg(&missing_log)
+        .output()
+        .expect("diagnostics collect runs");
+
+    assert!(!collect.status.success());
+    let stderr = String::from_utf8(collect.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("explicit evidence file is unreadable"));
+    assert!(!bundle_dir.exists());
+}
+
+#[test]
+fn diagnostics_collect_bounds_logs_to_last_200_lines_and_manifest_omits_absent_optionals() {
+    let bundle_dir = temp_path("bounded-logs");
+    let log_path = temp_path("many-lines.log");
+    let log_content = (0..250).fold(String::new(), |mut content, line| {
+        writeln!(content, "line-{line:03} token=secret-{line}").expect("write to string");
+        content
+    });
+    fs::write(&log_path, log_content).expect("log fixture written");
+
+    let collect = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
+        .args(["diagnostics", "collect", "--output"])
+        .arg(&bundle_dir)
+        .arg("--log-file")
+        .arg(&log_path)
+        .output()
+        .expect("diagnostics collect runs");
+    assert!(
+        collect.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&collect.stderr)
+    );
+
+    let logs = fs::read_to_string(bundle_dir.join("recent-logs.txt")).expect("logs exist");
+    assert!(!logs.contains("line-000"));
+    assert!(logs.contains("line-050"));
+    assert!(logs.contains("line-249"));
+    assert!(!logs.contains("secret-249"));
+    assert_eq!(logs.lines().count(), 200);
+
+    let manifest = fs::read_to_string(bundle_dir.join("manifest.json")).expect("manifest exists");
+    assert!(manifest.contains("recent-logs.txt"));
+    assert!(!manifest.contains("service-status.txt"));
+
+    fs::remove_dir_all(bundle_dir).expect("temporary bundle is removed");
+    fs::remove_file(log_path).expect("temporary log is removed");
 }
