@@ -17,14 +17,14 @@ The built-in AI-agent sequence pack currently ships these rules:
 
 | Rule | Implemented behavior | Severity |
 |---|---|---|
-| EDR-MCP-001 | Untrusted prompt-injection content followed by an agent MCP shell/network tool request in the same session. | Critical |
+| EDR-MCP-001 | Untrusted prompt-injection content followed by an agent MCP shell/network tool request in the same session. | High |
 | EDR-CONFIG-001 | Untrusted prompt-injection content followed by high-risk agent configuration drift with network indicators. | High |
 | EDR-CRON-001 | Untrusted prompt-injection content followed by unattended automation scheduling for sensitive operations. | High |
 | EDR-PI-001 | Untrusted prompt-injection content followed by a privileged tool request. Text-only prompt injection does not match and must never become Critical by itself. | High |
-| EDR-MSG-001 | Untrusted prompt-injection content followed by sensitive message delivery without explicit authenticated-user request. | Critical |
-| EDR-NET-001 | Untrusted prompt-injection content followed by direct-IP network egress. | High |
+| EDR-MSG-001 | Untrusted prompt-injection content followed by sensitive message delivery without explicit authenticated-user request. | High |
+| EDR-NET-001 | Untrusted prompt-injection content followed by network egress with explicit `attributes.direct_ip=true`. | High |
 | EDR-SCOPE-001 | Untrusted prompt-injection content followed by approval/scope expansion. | High |
-| EDR-PERSIST-001 | Untrusted prompt-injection content followed by an agent persistence configuration change. | Critical |
+| EDR-PERSIST-001 | Untrusted prompt-injection content followed by an agent persistence configuration change. | High |
 
 These rules deliberately do not duplicate `EDR-EXFIL-001`; secret-read plus egress remains handled by the existing Hermes EXFIL correlator.
 
@@ -118,7 +118,7 @@ Severity: Medium; High if network or secret indicators are present.
 
 ### EDR-NET-001: Direct-IP egress
 
-Detect HTTP(S) or unusual-port egress to a direct IP address rather than known domain.
+Detect HTTP(S) or unusual-port egress to a direct IP address rather than known domain. The canonical sequence implementation requires the egress event to carry explicit boolean `attributes.direct_ip=true`; generic `network_indicator=true` alone is not enough.
 
 Severity: Medium by itself, Critical if correlated with secret access.
 

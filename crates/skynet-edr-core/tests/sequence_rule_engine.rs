@@ -238,6 +238,7 @@ fn built_in_ai_agent_rule_pack_has_malicious_and_benign_coverage() {
         expected
     );
     assert!(rules.iter().all(|rule| rule.id != "EDR-EXFIL-001"));
+    assert!(rules.iter().all(|rule| rule.severity != Severity::Critical));
 
     for rule_id in expected {
         let malicious = malicious_rule_events(rule_id);
@@ -259,6 +260,38 @@ fn built_in_ai_agent_rule_pack_has_malicious_and_benign_coverage() {
                 .iter()
                 .all(|matched| matched.rule_id != rule_id),
             "{rule_id} should not match benign sequence"
+        );
+    }
+}
+
+#[test]
+fn direct_ip_egress_rule_requires_explicit_direct_ip_attribute() {
+    let rules = built_in_ai_agent_sequence_rules();
+    for attributes in [
+        vec![bool_attr("network_indicator", true)],
+        vec![
+            bool_attr("network_indicator", true),
+            bool_attr("direct_ip", false),
+        ],
+    ] {
+        let events = sequence(
+            "EDR-NET-001",
+            &[
+                step(
+                    "agent.content.ingested",
+                    TrustLevel::UntrustedContent,
+                    &[bool_attr("prompt_injection", true)],
+                ),
+                step("agent.network.egress", TrustLevel::AgentAction, &attributes),
+            ],
+        );
+
+        let matches = correlate_sequence_rules(&rules, &events).expect("rule pack evaluates");
+        assert!(
+            matches
+                .iter()
+                .all(|matched| matched.rule_id != "EDR-NET-001"),
+            "EDR-NET-001 must not match without attributes.direct_ip=true"
         );
     }
 }
@@ -472,7 +505,10 @@ fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
                 step(
                     "agent.network.egress",
                     TrustLevel::AgentAction,
-                    &[bool_attr("network_indicator", true)],
+                    &[
+                        bool_attr("network_indicator", true),
+                        bool_attr("direct_ip", true),
+                    ],
                 ),
             ],
         ),

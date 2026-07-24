@@ -247,6 +247,8 @@ fn live_spool_ingestion_opens_built_in_incident_for_cross_line_trace_sequence_on
     assert_eq!(incidents.len(), 1);
     assert_eq!(incidents[0].severity, Severity::High);
     assert!(incidents[0].id.as_str().starts_with("inc:EDR-PI-001:"));
+    assert!(!incidents[0].id.as_str().contains("evt_spool_pi"));
+    assert!(!incidents[0].id.as_str().contains("evt_spool_terminal"));
     assert!(!incidents[0].title.contains("trace_spool_sensitive"));
     assert!(!incidents[0].summary.contains("trace_spool_sensitive"));
     assert!(!incidents[0].summary.contains("evt_spool_pi"));
@@ -261,6 +263,88 @@ fn live_spool_ingestion_opens_built_in_incident_for_cross_line_trace_sequence_on
             .expect("incident list succeeds")
             .len(),
         1
+    );
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
+
+#[test]
+fn live_spool_ingestion_does_not_checkpoint_sequence_events_before_incidents_persist() {
+    let db_path = temp_path("incident-failure.sqlite");
+    let spool_path = temp_path("incident-failure.jsonl");
+    let checkpoint_path = temp_path("incident-failure.offset");
+    let prompt = plugin_sequence_event(
+        "evt_spool_replay_pi",
+        "agent.content.ingested",
+        1_781_560_000_000,
+        "untrusted_content",
+        "medium",
+        "trace_spool_replay",
+        &serde_json::json!({
+            "instruction_authority": false,
+            "contains_instructional_attack": true
+        }),
+    );
+    let tool = plugin_sequence_event(
+        "evt_spool_replay_terminal",
+        "agent.tool.requested",
+        1_781_560_001_000,
+        "agent_action",
+        "high",
+        "trace_spool_replay",
+        &serde_json::json!({
+            "tool_name": "terminal",
+            "network_indicator": true,
+            "delivery_indicator": false,
+            "sensitive_access": true,
+            "params_preview": "[REDACTED:secret]"
+        }),
+    );
+    fs::write(&spool_path, format!("{prompt}\n{tool}\n")).expect("spool is written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let trigger_connection =
+        rusqlite::Connection::open(&db_path).expect("trigger connection opens");
+    trigger_connection
+        .execute_batch(
+            "CREATE TRIGGER fail_incident_insert
+             BEFORE INSERT ON incidents
+             BEGIN
+                SELECT RAISE(FAIL, 'forced incident persistence failure');
+             END;",
+        )
+        .expect("failure trigger installs");
+
+    let failed = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect_err("incident persistence failure is surfaced");
+    assert!(failed
+        .to_string()
+        .contains("forced incident persistence failure"));
+    assert!(
+        fs::read_to_string(&checkpoint_path).is_err(),
+        "checkpoint must not advance before sequence incidents persist"
+    );
+    assert_eq!(store.list_events().expect("events list").len(), 2);
+    assert!(store
+        .list_incidents()
+        .expect("incident list succeeds")
+        .is_empty());
+
+    trigger_connection
+        .execute_batch("DROP TRIGGER fail_incident_insert;")
+        .expect("failure trigger drops");
+    drop(trigger_connection);
+    let replay = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("replay from unadvanced checkpoint evaluates duplicate sequence");
+
+    assert_eq!(replay.ingested_events, 0);
+    assert_eq!(replay.duplicate_events, 2);
+    assert_eq!(replay.opened_incidents, 1);
+    assert_eq!(
+        fs::read_to_string(&checkpoint_path).expect("checkpoint exists"),
+        replay.last_processed_byte.to_string()
     );
 
     let _ = fs::remove_file(db_path);

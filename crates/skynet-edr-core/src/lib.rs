@@ -405,9 +405,10 @@ pub fn serialize_canonical_event_json(
 /// Ingest complete lines from a live canonical event JSONL spool file.
 ///
 /// The checkpoint stores a byte offset and is advanced only after complete lines
-/// are processed. A trailing partial JSONL record is left unread for the next
-/// pass. Valid event identifiers are idempotent: events whose ids already exist
-/// are counted as duplicates and not reinserted.
+/// are inserted/accounted and built-in sequence incidents are durably persisted.
+/// A trailing partial JSONL record is left unread for the next pass. Valid event
+/// identifiers are idempotent: events whose ids already exist are counted as
+/// duplicates and still allow replayed sequences to be evaluated.
 ///
 /// # Errors
 ///
@@ -479,7 +480,6 @@ pub fn ingest_canonical_jsonl_spool(
             }
         }
         offset += consumed;
-        write_spool_checkpoint(checkpoint_path, offset)?;
         summary.last_processed_byte = offset;
         line_number += 1;
     }
@@ -487,6 +487,7 @@ pub fn ingest_canonical_jsonl_spool(
     if processed_valid_event {
         summary.opened_incidents = open_built_in_sequence_incidents_for_store(store)?;
     }
+    write_spool_checkpoint(checkpoint_path, summary.last_processed_byte)?;
 
     Ok(summary)
 }
@@ -640,13 +641,30 @@ fn sequence_match_incident(sequence_match: &SequenceMatch, stored_events: &[Even
 }
 
 fn sequence_incident_id(sequence_match: &SequenceMatch) -> String {
-    let event_fragments = sequence_match
-        .matched_event_ids
-        .iter()
-        .map(|event_id| safe_id_fragment(event_id.as_str()))
-        .collect::<Vec<_>>()
-        .join(":");
-    format!("inc:{}:{event_fragments}", sequence_match.rule_id)
+    let digest = sequence_incident_digest(sequence_match);
+    format!("inc:{}:{digest:016x}", sequence_match.rule_id)
+}
+
+fn sequence_incident_digest(sequence_match: &SequenceMatch) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut digest = FNV_OFFSET_BASIS;
+    for byte in sequence_match.rule_id.as_bytes() {
+        digest ^= u64::from(*byte);
+        digest = digest.wrapping_mul(FNV_PRIME);
+    }
+    digest ^= 0xff;
+    digest = digest.wrapping_mul(FNV_PRIME);
+    for event_id in &sequence_match.matched_event_ids {
+        for byte in event_id.as_str().as_bytes() {
+            digest ^= u64::from(*byte);
+            digest = digest.wrapping_mul(FNV_PRIME);
+        }
+        digest ^= 0x00;
+        digest = digest.wrapping_mul(FNV_PRIME);
+    }
+    digest
 }
 
 fn default_sequence_incident_source() -> EventSource {
@@ -1897,10 +1915,10 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
             Severity::High,
             "agent.network.egress",
             "direct IP egress",
-            vec![SequenceAttributePredicate::equals_bool(
-                "attributes.network_indicator",
-                true,
-            )],
+            vec![
+                SequenceAttributePredicate::equals_bool("attributes.network_indicator", true),
+                SequenceAttributePredicate::equals_bool("attributes.direct_ip", true),
+            ],
         ),
         sequence_rule(
             "EDR-SCOPE-001",

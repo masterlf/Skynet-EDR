@@ -96,10 +96,12 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 ## Detection limits
 
 The v0.3 plugin records indicators, not verdicts. `network_indicator` catches
-common direct egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and
-`ncat`. It does not yet fully classify indirect egress inside arbitrary Python,
-SDK, cloud-client, `scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed
-network indicators as a coverage limitation, not proof of safety.
+common egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and `ncat`.
+The canonical direct-IP sequence rule requires a separate explicit boolean
+`direct_ip=true`; generic network egress is not enough. The plugin does not yet
+fully classify indirect egress inside arbitrary Python, SDK, cloud-client,
+`scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed network indicators
+as a coverage limitation, not proof of safety.
 
 ## Manual ingestion
 
