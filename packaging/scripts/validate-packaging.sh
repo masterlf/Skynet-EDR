@@ -94,7 +94,12 @@ grep -q 'docs/INSTALL.md' README.md
 grep -q 'docs/PACKAGING.md' README.md
 
 grep -q 'workflow_dispatch:' .github/workflows/packaging-release.yml
-grep -q 'release:' .github/workflows/packaging-release.yml
+grep -q 'push:' .github/workflows/packaging-release.yml
+grep -q 'tags:' .github/workflows/packaging-release.yml
+if grep -q '^  release:' .github/workflows/packaging-release.yml; then
+  echo "packaging-release must not run on release events; tag push/manual only" >&2
+  exit 1
+fi
 grep -q 'packaging/scripts/build-tarball.sh' .github/workflows/packaging-release.yml
 grep -q 'packaging/scripts/build-packages.sh' .github/workflows/packaging-release.yml
 grep -q 'packaging/scripts/inspect-artifacts.sh' .github/workflows/packaging-release.yml
@@ -116,7 +121,7 @@ fi
 grep -qx 'c7ad23af619abd84e3c475b5503a8af8f7696b19:crates/skynet-edr-core/tests/hermes_event_ingestion.rs:curl-auth-header:32' .gitleaksignore
 
 for action in init autobuild analyze upload-sarif; do
-  grep -q "github/codeql-action/${action}@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3" .github/workflows/codeql.yml .github/workflows/security.yml
+  grep -q "github/codeql-action/${action}@04daf7543b8a940aebfeb1d2c4734d1c048e05d6 # v4.37.2" .github/workflows/codeql.yml .github/workflows/security.yml
 done
 grep -q 'trufflesecurity/trufflehog@f2cd191b97098913a07522227d2b5e40e57252f4' .github/workflows/security.yml
 grep -q 'aquasecurity/trivy-action@c07df6fec6fa692e6fd1200d50aaa1fdd66f03c8' .github/workflows/security.yml
