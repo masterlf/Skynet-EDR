@@ -137,7 +137,7 @@ checkpoint = "/var/lib/skynet-edr/hermes-plugin.offset"
 - Events are canonical `skynet.event.v0` records and are treated as hostile input
   by Skynet-EDR ingestion.
 
-## v0.4 direction
+## Future guard-mode direction
 
 A later guard-mode plugin can use `pre_tool_call` as an optional policy decision
 point:
@@ -146,4 +146,4 @@ point:
 allow / warn / require approval / deny
 ```
 
-That is intentionally out of scope for v0.3.
+That is intentionally out of scope for the passive v0.3 and v0.4 milestones.

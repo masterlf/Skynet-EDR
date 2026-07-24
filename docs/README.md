@@ -38,6 +38,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 - [Architecture](ARCHITECTURE.md) describes components, deployment modes, and the MVP recommendation.
 - [Rust workspace](WORKSPACE.md) documents crates and development commands.
+- [Current roadmap](ROADMAP.md) is the authoritative milestone and release-positioning map.
 - [Implementation plan](IMPLEMENTATION_PLAN.md) is the long-form roadmap and historical design record. Treat it as background, not the front door.
 - [Local storage and CLI](LOCAL_STORAGE.md) documents SQLite storage and event/incident commands.
 - [Local read-only HTTP API and console](LOCAL_HTTP_API.md) documents localhost visibility routes.
