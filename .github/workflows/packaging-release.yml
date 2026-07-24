@@ -100,81 +100,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          PACKAGE_VERSION=$(basename dist/skynet-edr_*.deb | sed -E 's/^skynet-edr_([^_]+)_.*/\1/')
-          TARGET=$(rustc -vV | awk '/host:/ {print $2}')
-          DEB_ASSET="skynet-edr_${PACKAGE_VERSION}_${NFPM_ARCH}.deb"
-          RPM_ASSET="skynet-edr-${PACKAGE_VERSION}-1.${NFPM_RPM_ARCH}.rpm"
-          ARCH_ASSET="skynet-edr-${PACKAGE_VERSION}-1-${NFPM_ARCHLINUX_ARCH}.pkg.tar.zst"
-          TARBALL_ASSET="skynet-edr-${PACKAGE_VERSION}-${TARGET}.tar.gz"
-          cat > dist/release-notes.md <<NOTES
-          # Skynet-EDR ${GITHUB_REF_NAME} — passive Linux-first MVP
-
-          This is an installable MVP/pre-production release of Skynet-EDR.
-
-          ## What works
-          - Installable Linux `amd64` packages: Debian/Ubuntu `.deb`, RPM, Arch `.pkg.tar.zst`, and custom tarball.
-          - Passive daemon service path: `skynet-edr-daemon run --config /etc/skynet-edr/config.toml`.
-          - Local CLI storage: initialize SQLite store, ingest events, list/show/export events and incidents.
-          - Hermes/AI-agent trace ingestion with redaction.
-          - MVP correlation rule `EDR-EXFIL-001`: secret/sensitive file access followed by network egress opens a critical incident.
-          - Read-only local API/MCP visibility surfaces.
-
-          ## Install quickly
-          Download the package for your distribution and `checksums.txt`, then verify:
-
-          ```bash
-          sha256sum -c checksums.txt --ignore-missing
-          ```
-
-          Debian/Ubuntu/Mint:
-
-          ```bash
-          sudo apt install ./${DEB_ASSET}
-          skynet-edr --version
-          skynet-edr-daemon status
-          ```
-
-          RHEL/Fedora-compatible:
-
-          ```bash
-          sudo dnf install ./${RPM_ASSET}
-          ```
-
-          Arch:
-
-          ```bash
-          sudo pacman -U ./${ARCH_ASSET}
-          ```
-
-          Tarball:
-
-          ```bash
-          tar -xzf ${TARBALL_ASSET}
-          cd skynet-edr-${PACKAGE_VERSION}-${TARGET}
-          sha256sum -c SHA256SUMS
-          sudo ./install.sh
-          ```
-
-          ## Important maturity note
-          This is an MVP/pre-production security tool. It is passive-first and does not yet claim full production EDR coverage, privileged kernel/eBPF sensors, signed packages, SBOMs, or distro repositories. The packages are usable for evaluation/lab deployment and initial passive testing.
-          NOTES
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" \
-              dist/*.tar.gz \
-              dist/*.deb \
-              dist/*.rpm \
-              dist/*.pkg.tar.zst \
-              dist/checksums.txt \
-              --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              dist/*.tar.gz \
-              dist/*.deb \
-              dist/*.rpm \
-              dist/*.pkg.tar.zst \
-              dist/checksums.txt \
-              --title "Skynet-EDR ${GITHUB_REF_NAME} — passive Linux-first MVP" \
-              --notes-file dist/release-notes.md \
-              --prerelease \
-              --verify-tag
+          NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$NOTES_FILE" ]; then
+            echo "missing reviewed release notes: $NOTES_FILE" >&2
+            exit 1
           fi
+          cp "$NOTES_FILE" dist/release-notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release already exists; refusing to replace published assets: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz \
+            dist/*.deb \
+            dist/*.rpm \
+            dist/*.pkg.tar.zst \
+            dist/checksums.txt \
+            --title "Skynet-EDR ${GITHUB_REF_NAME} — reliable passive detection" \
+            --notes-file dist/release-notes.md \
+            --prerelease \
+            --verify-tag

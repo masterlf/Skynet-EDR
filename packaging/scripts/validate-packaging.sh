@@ -132,6 +132,7 @@ grep -q 'aquasecurity/trivy-action@c07df6fec6fa692e6fd1200d50aaa1fdd66f03c8' .gi
 
 grep -q 'packaging/scripts/smoke-install-artifacts.sh' .github/workflows/packaging-release.yml
 grep -q 'packaging/scripts/verify-public-release.sh' docs/RELEASE_PROCESS.md
+grep -q 'docs/releases/${GITHUB_REF_NAME}.md' .github/workflows/packaging-release.yml
 grep -q 'CARGO_TARGET_DIR' packaging/scripts/build-tarball.sh
 grep -q 'CARGO_TARGET_DIR' packaging/scripts/build-packages.sh
 if grep -q '0\.1\.0' .github/workflows/packaging-release.yml; then

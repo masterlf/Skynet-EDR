@@ -1,6 +1,6 @@
 # Skynet-EDR documentation
 
-This is the v0.2 documentation map for Skynet-EDR: an AI-agent Detection and Response system focused on prompt-injection-aware runtime telemetry, tool/MCP abuse, secret access, automation, and egress correlation.
+This is the documentation map for Skynet-EDR: an AI-agent Detection and Response system focused on prompt-injection-aware runtime telemetry, tool/MCP abuse, secret access, automation, and egress correlation.
 
 The docs are intentionally split by operator journey. Start with the shortest path that matches what you need; the deeper design docs remain linked instead of copied around like documentation confetti. Very elegant, very un-French bureaucracy.
 
@@ -75,4 +75,4 @@ Run the local documentation gate with:
 python3 packaging/scripts/check-docs.py
 ```
 
-The check validates required v0.2 documentation entry points and local Markdown links. It intentionally does not crawl external links; release notes and security documentation should not depend on network luck. Mai pen rai, but deterministic.
+The check validates required documentation entry points and local Markdown links. It intentionally does not crawl external links; release notes and security documentation should not depend on network luck. Mai pen rai, but deterministic.

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 PLUGIN_NAME = "skynet-edr"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 SCHEMA_VERSION = "skynet.event.v0"
 DEFAULT_MAX_FIELD_CHARS = 4096
 DEFAULT_MAX_LOG_BYTES = 1_048_576

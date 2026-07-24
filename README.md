@@ -57,12 +57,12 @@ The first research/MVP scope is detection and alerting for:
 
 ## Status
 
-Skynet-EDR is at a passive Linux-first MVP baseline. It is installable from GitHub Releases and currently focuses on redacted local evidence, Hermes/AI-agent trace ingestion, read-only visibility, and high-signal correlation for secret access followed by network egress.
+Skynet-EDR v0.4 is a passive Linux-first prerelease. It is installable from GitHub Releases and focuses on redacted local evidence, Hermes/OpenClaw canonical telemetry, read-only visibility, and deterministic high-signal AI-agent sequence correlation. It detects and records; it does not yet block agent actions.
 
 Current crates:
 
-- `skynet-edr-core`: shared product metadata, schema, redaction, local storage, Hermes ingestion, and MVP correlation rules.
-- `skynet-edr-cli`: `skynet-edr` command-line entry point for status, store initialization, event ingestion/listing/export, and incident listing/export.
+- `skynet-edr-core`: shared product metadata, canonical schema, redaction, local storage, spool ingestion, and sequence-capable correlation rules.
+- `skynet-edr-cli`: `skynet-edr` command-line entry point for doctor/diagnostics, storage, event ingestion/export, and incident handling.
 - `skynet-edr-daemon`: passive daemon/runtime monitor primitives, including the Linux fixture scanner, localhost-only read-only HTTP API router, and conservative `run --config` service path.
 - `skynet-edr-mcp`: read-only MCP integration surface for Hermes visibility: status, incidents, rules, sensors, and config-drift findings.
 
@@ -90,7 +90,7 @@ cargo test --workspace --all-features
 
 ## Documentation
 
-Start with the [documentation hub](docs/README.md). The v0.2 documentation structure is organized by operator journey:
+Start with the [documentation hub](docs/README.md). The documentation is organized by operator journey:
 
 - [Install](docs/INSTALL.md) — release packages, checksums, install, upgrade, rollback, uninstall.
 - [Quickstart](docs/QUICKSTART.md) — shortest local path to a verified MVP baseline.
@@ -98,10 +98,11 @@ Start with the [documentation hub](docs/README.md). The v0.2 documentation struc
 - [Architecture](docs/ARCHITECTURE.md) — components, deployment modes, and MVP recommendation.
 - [Canonical event schema](docs/EVENT_SCHEMA.md) — `skynet.event.v0` envelope and validation requirements.
 - [Integrations](docs/INTEGRATIONS.md) — Hermes, OpenClaw, MCP, API, and CLI integration map.
-- [Hermes plugin telemetry](docs/HERMES_PLUGIN_TELEMETRY.md) — v0.3 passive Hermes lifecycle hook plugin and sanitized logs.
+- [Hermes plugin telemetry](docs/HERMES_PLUGIN_TELEMETRY.md) — passive Hermes lifecycle hook plugin and sanitized logs.
 - [Detections](docs/DETECTIONS.md) — detection philosophy, rule families, severity, and alert evidence.
 - [Operations](docs/OPERATIONS.md) — local store, API/MCP posture, evidence handling, and troubleshooting.
 - [Release process](docs/RELEASE_PROCESS.md) and [packaging plan](docs/PACKAGING.md) — release gates, artifacts, publishing, and rollback.
+- [Current roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [v0.4.0 release notes](docs/releases/v0.4.0.md) — shipped scope and remaining limitations.
 
 ## Naming
 
