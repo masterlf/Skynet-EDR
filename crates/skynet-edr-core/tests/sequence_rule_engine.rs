@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use skynet_edr_core::{
     built_in_ai_agent_sequence_rules, correlate_sequence_rule, correlate_sequence_rules,
-    CanonicalEventEnvelope, EventId, EventProvenance, EventSchemaVersion, EventSource,
-    RedactionMetadata, SequenceAttributePredicate, SequenceJoin, SequenceRule, SequenceStep,
-    Severity, SourceKind, TrustLevel,
+    parse_canonical_event_json, CanonicalEventEnvelope, EventId, EventProvenance,
+    EventSchemaVersion, EventSource, RedactionMetadata, SequenceAttributePredicate, SequenceJoin,
+    SequenceRule, SequenceStep, Severity, SourceKind, TrustLevel,
 };
 
 type TestAttributes = Vec<(&'static str, serde_json::Value)>;
@@ -284,6 +284,96 @@ fn text_only_prompt_injection_is_low_signal_and_never_critical() {
         .all(|event| event.severity != Severity::Critical));
 }
 
+fn parse_jsonl_fixture(input: &str) -> Vec<CanonicalEventEnvelope> {
+    input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| parse_canonical_event_json(line).expect("golden canonical event parses"))
+        .collect()
+}
+
+#[test]
+fn built_in_rules_match_checked_in_hermes_and_openclaw_golden_canonical_fixtures() {
+    for (fixture_name, fixture) in [
+        (
+            "hermes",
+            include_str!("fixtures/hermes_agent_golden_events_v0.jsonl"),
+        ),
+        (
+            "openclaw",
+            include_str!("fixtures/openclaw_agent_golden_events_v0.jsonl"),
+        ),
+    ] {
+        let events = parse_jsonl_fixture(fixture);
+        let matches = correlate_sequence_rules(&built_in_ai_agent_sequence_rules(), &events)
+            .expect("rule pack evaluates golden fixture");
+        let matched_rule_ids = matches
+            .iter()
+            .map(|matched| matched.rule_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            matched_rule_ids.contains(&"EDR-MCP-001"),
+            "{fixture_name} golden fixture should match MCP tool request sequence"
+        );
+        assert!(
+            matched_rule_ids.contains(&"EDR-CONFIG-001"),
+            "{fixture_name} golden fixture should match config drift sequence"
+        );
+        assert!(
+            matched_rule_ids.contains(&"EDR-CRON-001"),
+            "{fixture_name} golden fixture should match scheduled persistence sequence"
+        );
+        assert!(matches.iter().all(|matched| matched
+            .join_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("trace:"))));
+    }
+}
+
+#[test]
+fn built_in_rules_match_realistic_plugin_shaped_trace_without_session_attribute() {
+    let events = vec![
+        plugin_canonical_event(
+            "evt_plugin_pi",
+            "agent.content.ingested",
+            1_781_560_000_000,
+            TrustLevel::UntrustedContent,
+            Severity::Medium,
+            "trace_plugin_real",
+            &[
+                bool_attr("instruction_authority", false),
+                bool_attr("contains_instructional_attack", true),
+            ],
+        ),
+        plugin_canonical_event(
+            "evt_plugin_tool",
+            "agent.tool.requested",
+            1_781_560_001_000,
+            TrustLevel::AgentAction,
+            Severity::High,
+            "trace_plugin_real",
+            &[
+                str_attr("tool_name", "terminal"),
+                bool_attr("network_indicator", true),
+                bool_attr("delivery_indicator", false),
+                bool_attr("sensitive_access", true),
+            ],
+        ),
+    ];
+
+    let matches = correlate_sequence_rules(&built_in_ai_agent_sequence_rules(), &events)
+        .expect("rule pack evaluates plugin-shaped sequence");
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].rule_id, "EDR-PI-001");
+    assert_eq!(matches[0].severity, Severity::High);
+    assert_eq!(
+        matches[0].join_key.as_deref(),
+        Some("trace:trace_plugin_real")
+    );
+}
+
 #[allow(clippy::too_many_lines)]
 fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
     match rule_id {
@@ -316,10 +406,7 @@ fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
                 step(
                     "agent.config.changed",
                     TrustLevel::AgentAction,
-                    &[
-                        bool_attr("config_drift", true),
-                        bool_attr("network_indicator", true),
-                    ],
+                    &[bool_attr("approval_required", false)],
                 ),
             ],
         ),
@@ -334,10 +421,7 @@ fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
                 step(
                     "agent.automation.scheduled",
                     TrustLevel::AgentAction,
-                    &[
-                        bool_attr("unattended", true),
-                        bool_attr("sensitive_operation", true),
-                    ],
+                    &[bool_attr("persistence_indicator", true)],
                 ),
             ],
         ),
@@ -352,7 +436,10 @@ fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
                 step(
                     "agent.tool.requested",
                     TrustLevel::AgentAction,
-                    &[bool_attr("privileged_tool", true)],
+                    &[
+                        bool_attr("network_indicator", true),
+                        bool_attr("sensitive_access", true),
+                    ],
                 ),
             ],
         ),
@@ -365,11 +452,11 @@ fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
                     &[bool_attr("prompt_injection", true)],
                 ),
                 step(
-                    "agent.message.sent",
+                    "agent.tool.requested",
                     TrustLevel::AgentAction,
                     &[
-                        bool_attr("sensitive_payload", true),
-                        bool_attr("explicit_user_request", false),
+                        bool_attr("delivery_indicator", true),
+                        bool_attr("sensitive_access", true),
                     ],
                 ),
             ],
@@ -385,7 +472,7 @@ fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
                 step(
                     "agent.network.egress",
                     TrustLevel::AgentAction,
-                    &[bool_attr("direct_ip", true)],
+                    &[bool_attr("network_indicator", true)],
                 ),
             ],
         ),
@@ -415,7 +502,7 @@ fn malicious_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
                 step(
                     "agent.config.changed",
                     TrustLevel::AgentAction,
-                    &[bool_attr("persistence", true)],
+                    &[bool_attr("persistence_indicator", true)],
                 ),
             ],
         ),
@@ -429,6 +516,9 @@ fn benign_rule_events(rule_id: &str) -> Vec<CanonicalEventEnvelope> {
     events[0]
         .attributes
         .insert("prompt_injection".to_owned(), serde_json::json!(false));
+    events[0]
+        .attributes
+        .insert("instruction_authority".to_owned(), serde_json::json!(true));
     events
 }
 
@@ -437,7 +527,7 @@ fn sequence(rule_id: &str, steps: &[TestStep]) -> Vec<CanonicalEventEnvelope> {
         .iter()
         .enumerate()
         .map(|(index, (event_type, trust_level, attributes))| {
-            canonical_event(
+            let mut event = canonical_event(
                 &format!("evt_{rule_id}_{index}"),
                 event_type,
                 1_781_560_000_000 + u64::try_from(index).expect("index fits") * 1_000,
@@ -445,7 +535,13 @@ fn sequence(rule_id: &str, steps: &[TestStep]) -> Vec<CanonicalEventEnvelope> {
                 &format!("sess_{rule_id}"),
                 Some(&format!("trace_{rule_id}")),
                 attributes,
-            )
+            );
+            if *event_type == "agent.content.ingested" {
+                event
+                    .attributes
+                    .insert("instruction_authority".to_owned(), serde_json::json!(false));
+            }
+            event
         })
         .collect()
 }
@@ -514,4 +610,28 @@ fn canonical_event(
             redacted_fields: Vec::new(),
         },
     }
+}
+
+fn plugin_canonical_event(
+    id: &str,
+    event_type: &str,
+    observed_at_unix_ms: u64,
+    trust_level: TrustLevel,
+    severity: Severity,
+    trace_id: &str,
+    extra_attributes: &[(&str, serde_json::Value)],
+) -> CanonicalEventEnvelope {
+    let mut event = canonical_event(
+        id,
+        event_type,
+        observed_at_unix_ms,
+        trust_level,
+        "unused_session_removed_below",
+        Some(trace_id),
+        extra_attributes,
+    );
+    event.severity = severity;
+    event.source.integration = Some("hermes".to_owned());
+    event.attributes.remove("session_id");
+    event
 }

@@ -240,6 +240,8 @@ pub struct CanonicalSpoolIngestSummary {
     pub malformed_lines: Vec<usize>,
     /// Valid events skipped because their stable event id was already present.
     pub duplicate_events: usize,
+    /// Built-in sequence-rule incidents opened during this pass.
+    pub opened_incidents: usize,
     /// Byte offset durably checkpointed after the last complete processed line.
     pub last_processed_byte: u64,
 }
@@ -251,6 +253,8 @@ pub enum CanonicalSpoolIngestError {
     Io(std::io::Error),
     /// Persisting a valid canonical event failed.
     Storage(StorageError),
+    /// Built-in sequence rule validation failed closed.
+    SequenceRule(SequenceRuleError),
 }
 
 impl std::fmt::Display for CanonicalSpoolIngestError {
@@ -258,6 +262,7 @@ impl std::fmt::Display for CanonicalSpoolIngestError {
         match self {
             Self::Io(error) => write!(formatter, "canonical spool I/O error: {error}"),
             Self::Storage(error) => write!(formatter, "canonical spool storage error: {error}"),
+            Self::SequenceRule(error) => write!(formatter, "canonical spool rule error: {error}"),
         }
     }
 }
@@ -273,6 +278,12 @@ impl From<std::io::Error> for CanonicalSpoolIngestError {
 impl From<StorageError> for CanonicalSpoolIngestError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error)
+    }
+}
+
+impl From<SequenceRuleError> for CanonicalSpoolIngestError {
+    fn from(error: SequenceRuleError) -> Self {
+        Self::SequenceRule(error)
     }
 }
 
@@ -427,8 +438,10 @@ pub fn ingest_canonical_jsonl_spool(
         dropped_events: 0,
         malformed_lines: Vec::new(),
         duplicate_events: 0,
+        opened_incidents: 0,
         last_processed_byte: offset,
     };
+    let mut processed_valid_event = false;
 
     let mut segment = Vec::new();
     loop {
@@ -448,17 +461,18 @@ pub fn ingest_canonical_jsonl_spool(
         })?;
         let line = trim_line_bytes(&segment);
         if !line.iter().all(u8::is_ascii_whitespace) {
-            if let Some(event) = std::str::from_utf8(line)
+            if let Some(canonical_event) = std::str::from_utf8(line)
                 .ok()
                 .and_then(|line| parse_canonical_event_json(line).ok())
             {
-                let event = canonical_event_to_storage_event(event);
+                let event = canonical_event_to_storage_event(canonical_event);
                 if store.get_event(event.id.as_str())?.is_some() {
                     summary.duplicate_events += 1;
                 } else {
                     store.insert_event(&event)?;
                     summary.ingested_events += 1;
                 }
+                processed_valid_event = true;
             } else {
                 summary.dropped_events += 1;
                 summary.malformed_lines.push(line_number);
@@ -468,6 +482,10 @@ pub fn ingest_canonical_jsonl_spool(
         write_spool_checkpoint(checkpoint_path, offset)?;
         summary.last_processed_byte = offset;
         line_number += 1;
+    }
+
+    if processed_valid_event {
+        summary.opened_incidents = open_built_in_sequence_incidents_for_store(store)?;
     }
 
     Ok(summary)
@@ -512,6 +530,130 @@ fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {
         details: event.details,
         attributes,
         redaction: event.redaction,
+    }
+}
+
+fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvelope> {
+    let event_type = event
+        .attributes
+        .get("event_type")
+        .and_then(serde_json::Value::as_str)?
+        .to_owned();
+    let trust_level =
+        serde_json::from_value::<TrustLevel>(event.attributes.get("trust_level")?.clone()).ok()?;
+    let provenance =
+        serde_json::from_value::<EventProvenance>(event.attributes.get("provenance")?.clone())
+            .ok()?;
+    let received_at_unix_ms = event
+        .attributes
+        .get("received_at_unix_ms")
+        .and_then(serde_json::Value::as_u64);
+    let mut attributes = event.attributes.clone();
+    for synthetic_key in [
+        "schema_version",
+        "event_type",
+        "trust_level",
+        "provenance",
+        "received_at_unix_ms",
+    ] {
+        attributes.remove(synthetic_key);
+    }
+
+    Some(CanonicalEventEnvelope {
+        schema_version: EventSchemaVersion::V0,
+        event_id: event.id.clone(),
+        event_type,
+        observed_at_unix_ms: event.observed_at_unix_ms,
+        received_at_unix_ms,
+        severity: event.severity,
+        source: event.source.clone(),
+        provenance,
+        trust_level,
+        title: event.title.clone(),
+        details: event.details.clone(),
+        attributes,
+        redaction: event.redaction.clone(),
+    })
+}
+
+fn open_built_in_sequence_incidents_for_store(
+    store: &LocalStore,
+) -> Result<usize, CanonicalSpoolIngestError> {
+    let stored_events = store.list_events()?;
+    let canonical_events = stored_events
+        .iter()
+        .filter_map(storage_event_to_canonical_event)
+        .collect::<Vec<_>>();
+    let matches = correlate_sequence_rules(&built_in_ai_agent_sequence_rules(), &canonical_events)?;
+    let mut opened = 0;
+
+    for sequence_match in matches {
+        let incident = sequence_match_incident(&sequence_match, &stored_events);
+        if store.get_incident(incident.id.as_str())?.is_some() {
+            continue;
+        }
+        store.insert_incident(&incident)?;
+        opened += 1;
+    }
+
+    Ok(opened)
+}
+
+fn sequence_match_incident(sequence_match: &SequenceMatch, stored_events: &[Event]) -> Incident {
+    let events = sequence_match
+        .matched_event_ids
+        .iter()
+        .filter_map(|event_id| {
+            stored_events
+                .iter()
+                .find(|event| &event.id == event_id)
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    let created_at_unix_ms = events.first().map_or(0, |event| event.observed_at_unix_ms);
+    let updated_at_unix_ms = events
+        .last()
+        .map_or(created_at_unix_ms, |event| event.observed_at_unix_ms);
+    let source = events
+        .last()
+        .map_or_else(default_sequence_incident_source, |event| {
+            event.source.clone()
+        });
+    let incident_id = sequence_incident_id(sequence_match);
+
+    Incident {
+        id: IncidentId::new(incident_id),
+        created_at_unix_ms,
+        updated_at_unix_ms,
+        status: IncidentStatus::Open,
+        severity: sequence_match.severity,
+        title: format!("AI-agent sequence rule {} matched", sequence_match.rule_id),
+        summary: format!(
+            "{}: built-in AI-agent sequence matched {} redacted canonical event(s) within the configured window.",
+            sequence_match.rule_id,
+            sequence_match.matched_event_ids.len()
+        ),
+        source,
+        redaction: incident_redaction_from_events(&events),
+        events,
+    }
+}
+
+fn sequence_incident_id(sequence_match: &SequenceMatch) -> String {
+    let event_fragments = sequence_match
+        .matched_event_ids
+        .iter()
+        .map(|event_id| safe_id_fragment(event_id.as_str()))
+        .collect::<Vec<_>>()
+        .join(":");
+    format!("inc:{}:{event_fragments}", sequence_match.rule_id)
+}
+
+fn default_sequence_incident_source() -> EventSource {
+    EventSource {
+        kind: SourceKind::Sensor,
+        sensor: "built-in-sequence-rule-engine".to_owned(),
+        integration: None,
     }
 }
 
@@ -1697,13 +1839,13 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
         sequence_rule(
             "EDR-MCP-001",
             "MCP shell plus egress after untrusted content",
-            Severity::Critical,
+            Severity::High,
             "agent.mcp.tool.requested",
             "MCP shell/network tool request",
-            vec![
-                SequenceAttributePredicate::contains("attributes.tool_name", "shell"),
-                SequenceAttributePredicate::equals_bool("attributes.network_indicator", true),
-            ],
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.network_indicator",
+                true,
+            )],
         ),
         sequence_rule(
             "EDR-CONFIG-001",
@@ -1711,10 +1853,10 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
             Severity::High,
             "agent.config.changed",
             "high-risk config drift",
-            vec![
-                SequenceAttributePredicate::equals_bool("attributes.config_drift", true),
-                SequenceAttributePredicate::equals_bool("attributes.network_indicator", true),
-            ],
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.approval_required",
+                false,
+            )],
         ),
         sequence_rule(
             "EDR-CRON-001",
@@ -1722,10 +1864,10 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
             Severity::High,
             "agent.automation.scheduled",
             "risky unattended automation",
-            vec![
-                SequenceAttributePredicate::equals_bool("attributes.unattended", true),
-                SequenceAttributePredicate::equals_bool("attributes.sensitive_operation", true),
-            ],
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.persistence_indicator",
+                true,
+            )],
         ),
         sequence_rule(
             "EDR-PI-001",
@@ -1733,20 +1875,20 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
             Severity::High,
             "agent.tool.requested",
             "privileged tool request",
-            vec![SequenceAttributePredicate::equals_bool(
-                "attributes.privileged_tool",
-                true,
-            )],
+            vec![
+                SequenceAttributePredicate::equals_bool("attributes.network_indicator", true),
+                SequenceAttributePredicate::equals_bool("attributes.sensitive_access", true),
+            ],
         ),
         sequence_rule(
             "EDR-MSG-001",
             "Suspicious messaging delivery after untrusted content",
-            Severity::Critical,
-            "agent.message.sent",
+            Severity::High,
+            "agent.tool.requested",
             "sensitive message delivery",
             vec![
-                SequenceAttributePredicate::equals_bool("attributes.sensitive_payload", true),
-                SequenceAttributePredicate::equals_bool("attributes.explicit_user_request", false),
+                SequenceAttributePredicate::equals_bool("attributes.delivery_indicator", true),
+                SequenceAttributePredicate::equals_bool("attributes.sensitive_access", true),
             ],
         ),
         sequence_rule(
@@ -1756,7 +1898,7 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
             "agent.network.egress",
             "direct IP egress",
             vec![SequenceAttributePredicate::equals_bool(
-                "attributes.direct_ip",
+                "attributes.network_indicator",
                 true,
             )],
         ),
@@ -1774,11 +1916,11 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
         sequence_rule(
             "EDR-PERSIST-001",
             "Agent persistence change after untrusted content",
-            Severity::Critical,
+            Severity::High,
             "agent.config.changed",
             "persistence change",
             vec![SequenceAttributePredicate::equals_bool(
-                "attributes.persistence",
+                "attributes.persistence_indicator",
                 true,
             )],
         ),
@@ -1798,15 +1940,15 @@ fn sequence_rule(
         name: name.to_owned(),
         severity,
         window_ms: 60_000,
-        join: SequenceJoin::SameSession,
+        join: SequenceJoin::SameTrace,
         steps: vec![
             SequenceStep {
                 name: "untrusted prompt-injection content".to_owned(),
                 event_type: "agent.content.ingested".to_owned(),
                 trust_level: TrustLevel::UntrustedContent,
                 attributes: vec![SequenceAttributePredicate::equals_bool(
-                    "attributes.prompt_injection",
-                    true,
+                    "attributes.instruction_authority",
+                    false,
                 )],
             },
             SequenceStep {

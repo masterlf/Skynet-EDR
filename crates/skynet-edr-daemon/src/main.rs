@@ -115,8 +115,9 @@ fn run_spool_ingestion_once(config: &DaemonConfig) -> Result<(), DaemonCliError>
     let store = LocalStore::open(&spool.db)?;
     let summary = ingest_canonical_jsonl_spool(&store, &spool.path, &spool.checkpoint)?;
     println!(
-        "spool ingestion: ingested={} dropped={} duplicates={} checkpoint={} byte(s)",
+        "spool ingestion: ingested={} opened_incidents={} dropped={} duplicates={} checkpoint={} byte(s)",
         summary.ingested_events,
+        summary.opened_incidents,
         summary.dropped_events,
         summary.duplicate_events,
         summary.last_processed_byte

@@ -305,7 +305,7 @@ fn cli_ingests_canonical_jsonl_spool_with_checkpoint_accounting() {
     assert!(ingest.status.success());
     let stdout = String::from_utf8(ingest.stdout).expect("stdout should be UTF-8");
     assert!(stdout.contains(
-        "ingested 1 canonical event(s), dropped 1 malformed event(s), skipped 0 duplicate event(s)"
+        "ingested 1 canonical event(s), opened 0 incident(s), dropped 1 malformed event(s), skipped 0 duplicate event(s)"
     ));
 
     let replay = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))
@@ -320,7 +320,7 @@ fn cli_ingests_canonical_jsonl_spool_with_checkpoint_accounting() {
     assert!(replay.status.success());
     let stdout = String::from_utf8(replay.stdout).expect("stdout should be UTF-8");
     assert!(stdout.contains(
-        "ingested 0 canonical event(s), dropped 0 malformed event(s), skipped 0 duplicate event(s)"
+        "ingested 0 canonical event(s), opened 0 incident(s), dropped 0 malformed event(s), skipped 0 duplicate event(s)"
     ));
 
     let show = Command::new(env!("CARGO_BIN_EXE_skynet-edr"))

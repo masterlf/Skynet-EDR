@@ -260,7 +260,9 @@ checkpoint = "{}"
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
-    assert!(stdout.contains("spool ingestion: ingested=1 dropped=1 duplicates=0"));
+    assert!(
+        stdout.contains("spool ingestion: ingested=1 opened_incidents=0 dropped=1 duplicates=0")
+    );
     assert!(fs::read_to_string(&checkpoint_path).is_ok());
 }
 

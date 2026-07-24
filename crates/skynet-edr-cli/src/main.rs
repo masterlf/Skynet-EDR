@@ -228,8 +228,9 @@ fn handle_events(args: &[String]) -> Result<(), CliError> {
             let store = LocalStore::open(db_path)?;
             let summary = ingest_canonical_jsonl_spool(&store, spool_path, checkpoint_path)?;
             println!(
-                "ingested {} canonical event(s), dropped {} malformed event(s), skipped {} duplicate event(s), checkpoint={} byte(s)",
+                "ingested {} canonical event(s), opened {} incident(s), dropped {} malformed event(s), skipped {} duplicate event(s), checkpoint={} byte(s)",
                 summary.ingested_events,
+                summary.opened_incidents,
                 summary.dropped_events,
                 summary.duplicate_events,
                 summary.last_processed_byte
