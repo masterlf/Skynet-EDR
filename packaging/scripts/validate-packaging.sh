@@ -92,6 +92,10 @@ grep -qi 'custom tarball' docs/PACKAGING.md
 
 grep -q 'docs/INSTALL.md' README.md
 grep -q 'docs/PACKAGING.md' README.md
+grep -q 'skynet-edr doctor' docs/INSTALL.md
+grep -q 'diagnostics collect' docs/INSTALL.md
+grep -q 'skynet-edr doctor' docs/OPERATIONS.md
+grep -q 'diagnostics collect' docs/OPERATIONS.md
 
 grep -q 'workflow_dispatch:' .github/workflows/packaging-release.yml
 grep -q 'push:' .github/workflows/packaging-release.yml

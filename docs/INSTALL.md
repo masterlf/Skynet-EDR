@@ -289,7 +289,19 @@ skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
 skynet-edr-daemon status
 sudo -u skynet-edr skynet-edr store init --db /var/lib/skynet-edr/skynet-edr.sqlite
-sudo -u skynet-edr skynet-edr events list --db /var/lib/skynet-edr/skynet-edr.sqlite
+skynet-edr doctor
+skynet-edr diagnostics collect --output ./skynet-edr-diagnostics
+```
+
+`skynet-edr doctor` uses `/etc/skynet-edr/config.toml` and `/var/lib/skynet-edr/skynet-edr.sqlite` by default. It checks readiness through loopback-only API access or plugin-spool availability and refuses non-loopback API targets instead of probing them. It does not require `rules.d` or `agents.d` to exist.
+
+Diagnostics bundles are redaction-safe by default: no raw event export, no missing database creation, private `0700` output directory, and `0600` files. Add operator-provided evidence explicitly, for example:
+
+```bash
+journalctl -u skynet-edr.service -n 100 --no-pager > /tmp/skynet-edr-status.txt
+skynet-edr diagnostics collect \
+  --output ./skynet-edr-diagnostics \
+  --service-status-file /tmp/skynet-edr-status.txt
 ```
 
 Service checks:
@@ -360,6 +372,7 @@ Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default
 | RHEL/Fedora denial | `ausearch -m avc -ts recent` and SELinux policy status |
 | API unreachable | verify bind is loopback-only and service is active |
 | Agent evidence missing | verify the agent adapter/export path and ingestion logs |
+| Operator bundle needed | `skynet-edr diagnostics collect --output ./skynet-edr-diagnostics` |
 
 ## Current limitation
 
