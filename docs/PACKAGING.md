@@ -174,6 +174,13 @@ tar -tf dist/skynet-edr.pkg.tar.zst
 
 Smoke tests should eventually run in clean Ubuntu/Debian/Fedora/Arch containers or VMs. Do not call a package production-ready without install/upgrade/remove tests.
 
+The current release workflow runs `packaging/scripts/smoke-install-artifacts.sh`
+after artifact inspection. It executes the `.deb` and custom tarball in clean
+Ubuntu containers, including remove/purge behavior, and keeps RPM/Arch coverage
+to checksum/content validation until distro-native runtime environments are part
+of CI. This is deliberately narrower than pretending a foreign host has proven
+all package managers equally.
+
 ## Maintainer script rules
 
 Package scripts must be:

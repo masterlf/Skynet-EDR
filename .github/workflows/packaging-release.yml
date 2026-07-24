@@ -80,6 +80,9 @@ jobs:
       - name: Inspect package contents and generate checksums
         run: packaging/scripts/inspect-artifacts.sh dist
 
+      - name: Smoke DEB/tarball in clean containers and validate RPM/Arch
+        run: packaging/scripts/smoke-install-artifacts.sh dist
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -99,10 +102,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > dist/release-notes.md <<'NOTES'
-          # Skynet-EDR passive Linux-first MVP
+          PACKAGE_VERSION=$(basename dist/skynet-edr_*.deb | sed -E 's/^skynet-edr_([^_]+)_.*/\1/')
+          TARGET=$(rustc -vV | awk '/host:/ {print $2}')
+          DEB_ASSET="skynet-edr_${PACKAGE_VERSION}_${NFPM_ARCH}.deb"
+          RPM_ASSET="skynet-edr-${PACKAGE_VERSION}-1.${NFPM_RPM_ARCH}.rpm"
+          ARCH_ASSET="skynet-edr-${PACKAGE_VERSION}-1-${NFPM_ARCHLINUX_ARCH}.pkg.tar.zst"
+          TARBALL_ASSET="skynet-edr-${PACKAGE_VERSION}-${TARGET}.tar.gz"
+          cat > dist/release-notes.md <<NOTES
+          # Skynet-EDR ${GITHUB_REF_NAME} — passive Linux-first MVP
 
-          This is the first installable MVP release of Skynet-EDR.
+          This is an installable MVP/pre-production release of Skynet-EDR.
 
           ## What works
           - Installable Linux `amd64` packages: Debian/Ubuntu `.deb`, RPM, Arch `.pkg.tar.zst`, and custom tarball.
@@ -122,7 +131,7 @@ jobs:
           Debian/Ubuntu/Mint:
 
           ```bash
-          sudo apt install ./skynet-edr_0.1.0_amd64.deb
+          sudo apt install ./${DEB_ASSET}
           skynet-edr --version
           skynet-edr-daemon status
           ```
@@ -130,20 +139,20 @@ jobs:
           RHEL/Fedora-compatible:
 
           ```bash
-          sudo dnf install ./skynet-edr-0.1.0-1.x86_64.rpm
+          sudo dnf install ./${RPM_ASSET}
           ```
 
           Arch:
 
           ```bash
-          sudo pacman -U ./skynet-edr-0.1.0-1-x86_64.pkg.tar.zst
+          sudo pacman -U ./${ARCH_ASSET}
           ```
 
           Tarball:
 
           ```bash
-          tar -xzf skynet-edr-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-          cd skynet-edr-0.1.0-x86_64-unknown-linux-gnu
+          tar -xzf ${TARBALL_ASSET}
+          cd skynet-edr-${PACKAGE_VERSION}-${TARGET}
           sha256sum -c SHA256SUMS
           sudo ./install.sh
           ```

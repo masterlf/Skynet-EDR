@@ -1,0 +1,3 @@
+# Exact historical false positive from a fake curl Authorization header fixture.
+# Do not add broad rule/path suppressions here.
+c7ad23af619abd84e3c475b5503a8af8f7696b19:crates/skynet-edr-core/tests/hermes_event_ingestion.rs:curl-auth-header:32

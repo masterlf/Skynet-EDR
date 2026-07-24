@@ -55,6 +55,8 @@ jobs:
           packaging/scripts/build-packages.sh
       - name: Inspect package contents
         run: packaging/scripts/inspect-artifacts.sh dist
+      - name: Smoke DEB/tarball in clean containers and validate RPM/Arch
+        run: packaging/scripts/smoke-install-artifacts.sh dist
       - name: Upload package artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
