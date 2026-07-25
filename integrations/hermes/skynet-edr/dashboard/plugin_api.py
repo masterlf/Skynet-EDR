@@ -48,8 +48,23 @@ def _bounded_page(limit: int, offset: int) -> dict[str, int]:
     return {"limit": bounded_limit, "offset": bounded_offset}
 
 
+def _valid_upstream_path(path: str) -> bool:
+    if path in {"/api/status", "/api/v1/risks"}:
+        return True
+    prefix = "/api/v1/risks/"
+    if not path.startswith(prefix):
+        return False
+    opaque_id = path[len(prefix) :]
+    if not opaque_id or "/" in opaque_id:
+        return False
+    decoded = urllib.parse.unquote(opaque_id)
+    if any(segment in {".", ".."} for segment in decoded.split("/")):
+        return False
+    return True
+
+
 def _upstream(path: str, query: dict[str, int] | None = None) -> Any:
-    if not path.startswith("/api/") or ".." in path:
+    if not _valid_upstream_path(path):
         raise HTTPException(status_code=400, detail="bad_request")
     url = f"http://127.0.0.1:{_port()}{path}"
     if query:

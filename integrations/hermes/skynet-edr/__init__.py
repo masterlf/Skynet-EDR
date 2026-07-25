@@ -152,10 +152,8 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
     if replacement:
         attrs["params_preview"] = replacement
         redacted.append(_redacted_field("attributes.params_preview", replacement))
-    elif artifact and artifact["kind"] in {"file", "terminal", "code", "git_repository", "message"}:
-        attrs["params_preview"] = "[OMITTED:tool_params]"
     else:
-        attrs["params_preview"] = _truncate(params_text)
+        attrs["params_preview"] = "[OMITTED:tool_params]"
     if indicators["command_class"]:
         attrs["command_class"] = indicators["command_class"]
     if indicators["source_kind"] == "mcp_tool":

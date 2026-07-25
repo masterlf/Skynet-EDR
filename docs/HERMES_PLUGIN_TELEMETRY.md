@@ -72,7 +72,7 @@ The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, 
 
 The Desktop plugin is a read-only UI client for `/skynet-edr/risks`. It uses the backend `ctx.rest('/risks?...')` and `ctx.rest('/risks/<encoded-id>')`, polls no faster than every 10 seconds, renders text only, and does not auto-link URLs or render HTML.
 
-Telemetry events now include optional safe artifact metadata when derivable. Labels are fixed/coarse (`URL content`, `File content`, `Terminal output`), provider values are allowlisted, and locator hashes are computed only from isolated safe locators such as URLs without credentials/query/fragment. Invalid URL ports suppress only the locator hash; the passive telemetry event is still emitted. Command text, prompts, message bodies, full URLs, repository names, local paths, and secrets are not stored as artifact labels. During ingestion, `attributes.artifact` is a reserved synthetic key: only the validated top-level artifact may populate stored artifact metadata.
+Telemetry events now include optional safe artifact metadata when derivable. Labels are fixed/coarse (`URL content`, `File content`, `Terminal output`), provider values are allowlisted, and locator hashes are computed only from isolated safe locators such as URLs without credentials/query/fragment. Invalid URL ports suppress only the locator hash; the passive telemetry event is still emitted. Raw tool parameters are not persisted: `attributes.params_preview` is either a fixed redaction marker for known sensitive patterns or `[OMITTED:tool_params]`. Command text, prompts, message bodies, full URLs, repository names, local paths, and secrets are not stored as artifact labels. During ingestion, `attributes.artifact` is a reserved synthetic key: only the validated top-level artifact may populate stored artifact metadata.
 
 ## Default user-local outputs
 
@@ -150,8 +150,9 @@ checkpoint = "/var/lib/skynet-edr/hermes-plugin.offset"
 
 - No outbound network from the plugin.
 - No LLM calls from the plugin.
-- No raw tool output in telemetry.
-- Sensitive parameters are replaced as whole fields before writing.
+- No raw tool parameters or raw tool output in telemetry.
+- Sensitive parameter previews are replaced as whole fields before writing;
+  otherwise parameter previews are omitted with `[OMITTED:tool_params]`.
 - Hook exceptions are logged and swallowed so Hermes remains usable.
 - Events are canonical `skynet.event.v0` records and are treated as hostile input
   by Skynet-EDR ingestion.

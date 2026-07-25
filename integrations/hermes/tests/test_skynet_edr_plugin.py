@@ -165,25 +165,77 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertNotIn("/root/.hermes/auth.json", serialized)
         self.assertTrue(event["redaction"]["contains_sensitive_data"])
 
-    def test_pre_tool_call_adds_safe_url_artifact_without_query_or_secret_leakage(self):
+    def test_pre_tool_call_omits_url_query_params_without_secret_regex_match(self):
         ctx = FakeContext()
         self.plugin.register(ctx)
         ctx.hooks["pre_tool_call"](
             "web_extract",
-            {"url": "https://user:pass@example.invalid/repo?token=fake-secret#frag"},
+            {"url": "https://example.invalid/patient?condition=FAKE_CONDITION&name=FAKE_ALICE"},
         )
         event = self.read_events()[-1]
         serialized = json.dumps(event)
 
-        self.assertEqual(event["source"]["sensor"], "skynet-edr-hermes-plugin")
-        self.assertEqual(event["artifact"]["kind"], "url")
-        self.assertEqual(event["artifact"]["provider"], "browser")
-        self.assertEqual(event["artifact"]["display_label"], "URL content")
-        self.assertEqual(event["artifact"]["trust_level"], "agent_action")
-        self.assertRegex(event["artifact"]["locator_hash"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(event["attributes"]["params_preview"], "[OMITTED:tool_params]")
+        self.assertNotIn("FAKE_CONDITION", serialized)
+        self.assertNotIn("FAKE_ALICE", serialized)
+        self.assertNotIn("condition=", serialized)
+        self.assertNotIn("name=", serialized)
+
+    def test_pre_tool_call_omits_unknown_and_mcp_params_by_default(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("unknown_tool", {"note": "FAKE_UNKNOWN_VALUE"})
+        ctx.hooks["pre_tool_call"]("remote.fetch", {"note": "FAKE_MCP_VALUE"})
+        unknown_event, mcp_event = self.read_events()[-2:]
+        serialized = "\n".join(json.dumps(event) for event in (unknown_event, mcp_event))
+
+        self.assertEqual(unknown_event["attributes"]["params_preview"], "[OMITTED:tool_params]")
+        self.assertEqual(mcp_event["attributes"]["params_preview"], "[OMITTED:tool_params]")
+        self.assertNotIn("FAKE_UNKNOWN_VALUE", serialized)
+        self.assertNotIn("FAKE_MCP_VALUE", serialized)
+
+    def test_url_locator_hash_ignores_credentials_query_and_fragment(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"](
+            "web_extract",
+            {"url": "https://user:pass@example.invalid/repo?condition=FAKE_CONDITION#frag"},
+        )
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/repo?name=FAKE_ALICE#other"})
+        first, second = self.read_events()[-2:]
+        serialized = "\n".join(json.dumps(event) for event in (first, second))
+
+        self.assertRegex(first["artifact"]["locator_hash"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(first["artifact"]["locator_hash"], second["artifact"]["locator_hash"])
+        self.assertEqual(first["attributes"]["params_preview"], "[OMITTED:tool_params]")
         self.assertNotIn("user:pass", serialized)
-        self.assertNotIn("fake-secret", serialized)
+        self.assertNotIn("FAKE_CONDITION", serialized)
+        self.assertNotIn("FAKE_ALICE", serialized)
         self.assertNotIn("/repo?", serialized)
+
+    def test_url_locator_hash_keeps_distinct_safe_paths(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/alpha"})
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/beta"})
+        first, second = self.read_events()[-2:]
+
+        self.assertNotEqual(first["artifact"]["locator_hash"], second["artifact"]["locator_hash"])
+
+    def test_known_secret_redaction_metadata_still_works_without_raw_value(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/repo?token=FAKE_TOKEN_VALUE"})
+        event = self.read_events()[-1]
+        serialized = json.dumps(event)
+
+        self.assertEqual(event["attributes"]["params_preview"], "[REDACTED:secret]")
+        self.assertTrue(event["redaction"]["contains_sensitive_data"])
+        self.assertEqual(
+            event["redaction"]["redacted_fields"],
+            [{"path": "attributes.params_preview", "reason": "secret", "replacement": "[REDACTED:secret]"}],
+        )
+        self.assertNotIn("FAKE_TOKEN_VALUE", serialized)
 
     def test_terminal_and_file_artifacts_use_fixed_labels_without_paths_or_commands(self):
         ctx = FakeContext()
@@ -453,6 +505,27 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         setattr(module, "_upstream", fake_upstream)
         self.assertEqual(module.risk_detail("inc/opaque"), {"ok": True})
         self.assertEqual(captured, [("/api/v1/risks/inc%2Fopaque", None)])
+
+    def test_dashboard_upstream_accepts_listed_opaque_id_with_dotdot_literal(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        module._opener.open.return_value = FakeResponse(b'{"id": "inc..opaque"}', "application/json")
+
+        self.assertEqual(module.risk_detail("inc..opaque"), {"id": "inc..opaque"})
+        request = module._opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787/api/v1/risks/inc..opaque")
+
+    def test_dashboard_upstream_rejects_direct_unsafe_non_api_and_traversal_paths(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+
+        for path in ["/metrics", "/api/../status", "/api/v1/risks/%2e%2e/internal", "/api/v1/risks/inc%2F..%2Fsecret"]:
+            with self.subTest(path=path):
+                with self.assertRaises(FakeHTTPException) as raised:
+                    module._upstream(path)
+                self.assertEqual(raised.exception.status_code, 400)
+                self.assertEqual(raised.exception.detail, "bad_request")
+        module._opener.open.assert_not_called()
 
     def test_desktop_plugin_is_parseable_read_only_disk_plugin(self):
         text = DESKTOP_PLUGIN_PATH.read_text()

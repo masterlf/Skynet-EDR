@@ -43,9 +43,11 @@ Both the spool and log are created with user-only permissions where supported.
 - No outbound network.
 - No LLM calls from the plugin.
 - No inline blocking in v0.4.
-- Raw tool output is omitted; only lengths and indicators are stored.
+- Raw tool parameters and raw tool output are omitted; only lengths and
+  indicators are stored.
 - Sensitive parameter previews are replaced as whole fields with
-  `[REDACTED:secret]` or `[REDACTED:local_context]`.
+  `[REDACTED:secret]` or `[REDACTED:local_context]`; otherwise parameter
+  previews are `[OMITTED:tool_params]`.
 - Hook failures are logged and swallowed so Hermes remains usable.
 
 ## Risk Explorer
