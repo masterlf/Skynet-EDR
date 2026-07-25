@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use skynet_edr_core::{
-    run_secret_egress_attack_simulation, Event, EventId, EventSource, Incident, IncidentId,
-    IncidentStatus, LocalStore, RedactionMetadata, Severity, SourceKind,
+    run_secret_egress_attack_simulation, sqlite_sidecar_path, Event, EventId, EventSource,
+    Incident, IncidentId, IncidentStatus, LocalStore, RedactionMetadata, Severity, SourceKind,
 };
 use skynet_edr_mcp::{
     get_config_drift, get_incident, get_risk, list_incidents, list_risks, list_rules, list_sensors,
@@ -359,8 +359,8 @@ fn temp_path(name: &str) -> PathBuf {
 
 fn cleanup_sqlite_files(path: &PathBuf) {
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(path.with_extension("sqlite-wal"));
-    let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    let _ = fs::remove_file(sqlite_sidecar_path(path, "-wal"));
+    let _ = fs::remove_file(sqlite_sidecar_path(path, "-shm"));
 }
 
 fn no_redaction() -> RedactionMetadata {

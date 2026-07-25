@@ -249,6 +249,42 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertNotEqual(hashes[0], hashes[1])
         self.assertNotEqual(hashes[2], hashes[3])
 
+    def test_url_locator_hash_canonicalizes_ipv6_and_terminal_dot_segments(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        equivalent_groups = [
+            [
+                "https://[0:0:0:0:0:0:0:1]:443/a/b/.",
+                "https://[::1]/a/b/",
+                "https://[::1]/a/%62/",
+            ],
+            [
+                "http://example.invalid:80/a/b/..",
+                "http://EXAMPLE.INVALID/a/",
+                "http://example.invalid/a/b/%2E%2e",
+            ],
+        ]
+        for group in equivalent_groups:
+            for url in group:
+                ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+            hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-len(group):]]
+            self.assertEqual(len(set(hashes)), 1)
+
+    def test_url_locator_hash_keeps_ipv6_host_port_and_zone_semantics_distinct(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        urls = [
+            "https://[::1]:444/a",
+            "https://[::1:444]/a",
+            "https://[fe80::1%25Eth0]/a",
+            "https://[fe80::1%25eth0]/a",
+        ]
+        for url in urls:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-4:]]
+        self.assertNotEqual(hashes[0], hashes[1])
+        self.assertNotEqual(hashes[2], hashes[3])
+
     def test_known_secret_redaction_metadata_still_works_without_raw_value(self):
         ctx = FakeContext()
         self.plugin.register(ctx)
@@ -747,7 +783,7 @@ if (page !== canonicalPage) throw new Error('valid risk page should be returned 
 if (validateRiskPage(emptyBeyondTotal, 100) !== emptyBeyondTotal) throw new Error('valid empty page beyond total should be preserved');
 const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[canonicalEvidence]};
 if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
-const canonicalStatus = {product:'Skynet-EDR', binary:'skynet-edr', run_mode:'local', server:'skynet-edr-mcp', read_only:true, tool_count:6, incident_count:1, event_count:1};
+const canonicalStatus = {product:'Skynet-EDR', binary:'skynet-edr', run_mode:'passive', server:'skynet-edr-mcp', read_only:true, tool_count:6, incident_count:1, event_count:1};
 if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('valid status should be returned unchanged');
 for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[null], page:{...canonicalPage.page, total:1}}, {...canonicalPage, items:[{...canonicalItem, id:''}]}, {...canonicalPage, items:[canonicalItem, {...canonicalItem}], page:{...canonicalPage.page, returned:2, total:2, has_more:false}}, {...canonicalPage, items:[{...canonicalItem, sensor:null}]}, {...canonicalPage, items:[{...canonicalItem, artifact:{...canonicalItem.artifact, kind:'<script>'}}]}, {...canonicalPage, page:{...canonicalPage.page, limit:49}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:2}}, {...canonicalPage, page:{...canonicalPage.page, returned:0}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, total:1, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:2, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
   let failed = false;
@@ -803,6 +839,40 @@ if (JSON.stringify(requested) !== JSON.stringify(['/risks?limit=50&offset=50']))
 """, react_stub="const React = {calls: 0, useState(initial) { this.calls += 1; return [this.calls === 2 ? 50 : initial, () => {}]; }};\n")
         self.assertEqual(check.returncode, 0, check.stderr)
 
+    def test_desktop_exact_backend_contracts_and_searchfield_structure(self):
+        check = run_desktop_plugin_script("""
+const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 2 redacted evidence events.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:'sha256:' + 'a'.repeat(64), trust_level:'runtime_policy'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:2, trace_ids:['trace-1'], contains_sensitive_data:false};
+const runtimePolicyEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'high', event_type:'agent.session.started', title:'Security event evidence', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'authenticated_user'}, trust_level:'runtime_policy', rule_id:'EDR-MCP-001', redaction:{contains_sensitive_data:false, redacted_count:0}, indicators:{network_indicator:true, direct_ip:false, command_class:'network_egress'}};
+const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[runtimePolicyEvidence]};
+if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('runtime_policy/authenticated_user and safe unknown event type must be accepted');
+for (const bad of [
+  {...canonicalDetail, evidence:[{...runtimePolicyEvidence, event_type:'bad space'}]},
+  {...canonicalDetail, evidence:[{...runtimePolicyEvidence, title:'agent session started'}]},
+  {...canonicalDetail, evidence:[runtimePolicyEvidence, {...runtimePolicyEvidence, event_id:'evt-2'}], event_count:1},
+  {...canonicalDetail, artifact:{...canonicalDetail.artifact, display_label:'Spoofed URL'}},
+  {...canonicalDetail, artifact:{...canonicalDetail.artifact, locator_hash:'sha256:' + 'A'.repeat(64)}},
+  {...canonicalDetail, artifact:{...canonicalDetail.artifact, trust_level:'unknown'}},
+  {...canonicalDetail, sensor:{...canonicalDetail.sensor, sensor:'bad sensor'}},
+]) {
+  let failed = false;
+  try { validateRiskDetail(bad, 'risk-1'); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('spoofed or divergent detail contract must fail closed');
+}
+const canonicalStatus = {product:'Skynet-EDR', binary:'skynet-edr', run_mode:'passive', server:'skynet-edr-mcp', read_only:true, tool_count:6, incident_count:1, event_count:1};
+if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('canonical passive status should pass');
+for (const bad of [{...canonicalStatus, product:'Other'}, {...canonicalStatus, binary:'skynet'}, {...canonicalStatus, run_mode:'local'}, {...canonicalStatus, server:'other'}, {...canonicalStatus, tool_count:7}]) {
+  let failed = false;
+  try { validateStatus(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('wrong service identity must fail closed');
+}
+const tree = Filters({search:'', setSearch() {}, severity:'all', setSeverity() {}, status:'all', setStatus() {}, artifactKind:'all', setArtifactKind() {}});
+const searchContainer = tree.props.children[0];
+if (searchContainer.type === 'label') throw new Error('SearchField must not be nested in an outer label');
+const searchField = searchContainer.props.children.props.children[1];
+if (searchField.type !== SearchField || searchField.props['aria-label'] !== 'Search current page risks') throw new Error('SearchField aria-label must be retained');
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
     def test_desktop_ui_remediation_source_semantics_and_stale_data(self):
         text = DESKTOP_PLUGIN_PATH.read_text()
         self.assertIn("setOffset(0)", text)
@@ -820,7 +890,7 @@ if (JSON.stringify(requested) !== JSON.stringify(['/risks?limit=50&offset=50']))
         self.assertIn("Stale data", text)
         self.assertIn("This warning is generic", text)
         self.assertNotIn("Locator digest", text)
-        self.assertNotIn("locator_hash", text)
+        self.assertNotRegex(text, r"risk\.artifact\?\.locator_hash|event\.artifact\?\.locator_hash")
         for safe_field in ["rule_id", "sensor?.kind", "sensor?.sensor", "sensor?.integration", "artifact?.kind", "artifact?.display_label", "artifact?.provider", "artifact?.trust_level"]:
             self.assertIn(safe_field, text)
         for unsafe_field in ["attributes", "url", "path", "command", "raw_content"]:

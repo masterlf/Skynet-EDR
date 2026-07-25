@@ -510,8 +510,8 @@ mod tests {
     };
 
     use skynet_edr_core::{
-        Event, EventId, EventSource, Incident, IncidentId, IncidentStatus, RedactionMetadata,
-        Severity, SourceKind,
+        sqlite_sidecar_path, Event, EventId, EventSource, Incident, IncidentId, IncidentStatus,
+        RedactionMetadata, Severity, SourceKind,
     };
 
     use super::*;
@@ -544,8 +544,7 @@ mod tests {
         let _server = start_http_api_if_enabled(&config)
             .expect("HTTP API preflight succeeds after explicit init");
         assert!(db_path.exists());
-        assert!(!db_path.with_extension("sqlite-wal").exists());
-        assert!(!db_path.with_extension("sqlite-shm").exists());
+        assert_no_appended_sidecars(&db_path);
         cleanup_sqlite_files(&db_path);
     }
 
@@ -583,8 +582,7 @@ mod tests {
 
         assert!(error.to_string().contains("no such table: incidents"));
         assert!(db_path.exists(), "existing DB file remains present");
-        assert!(!db_path.with_extension("sqlite-wal").exists());
-        assert!(!db_path.with_extension("sqlite-shm").exists());
+        assert_no_appended_sidecars(&db_path);
         let read_only =
             LocalStore::open_read_only(&db_path).expect("empty DB still opens read-only");
         let schema_error = read_only
@@ -640,14 +638,25 @@ mod tests {
                 .expect("incident persists");
         }
 
+        let before = fs::read(&db_path).expect("DB bytes read before read-only requests");
+        assert_no_appended_sidecars(&db_path);
+
         let status = http_get_response(&db_path, "/api/status");
         let risks = http_get_response(&db_path, "/api/v1/risks?limit=10&offset=0");
+        let detail = http_get_response(&db_path, "/api/v1/risks/inc_http_read_only_get");
 
         assert!(status.contains("HTTP/1.1 200 OK"));
         assert!(status.contains(r#""incident_count":1"#));
         assert!(risks.contains("HTTP/1.1 200 OK"));
         assert!(risks.contains(r#""schema_version":"skynet.risk.v1""#));
         assert!(risks.contains(r#""total":1"#));
+        assert!(detail.contains("HTTP/1.1 200 OK"));
+        assert!(detail.contains(r#""id":"inc_http_read_only_get""#));
+        assert_eq!(
+            fs::read(&db_path).expect("DB bytes read after read-only requests"),
+            before
+        );
+        assert_no_appended_sidecars(&db_path);
         cleanup_sqlite_files(&db_path);
     }
 
@@ -696,12 +705,16 @@ mod tests {
 
     fn assert_no_sqlite_files(path: &Path) {
         assert!(!path.exists(), "HTTP preflight must not create DB file");
+        assert_no_appended_sidecars(path);
+    }
+
+    fn assert_no_appended_sidecars(path: &Path) {
         assert!(
-            !path.with_extension("sqlite-wal").exists(),
+            !sqlite_sidecar_path(path, "-wal").exists(),
             "HTTP preflight must not create WAL sidecar"
         );
         assert!(
-            !path.with_extension("sqlite-shm").exists(),
+            !sqlite_sidecar_path(path, "-shm").exists(),
             "HTTP preflight must not create SHM sidecar"
         );
     }
@@ -743,8 +756,8 @@ mod tests {
 
     fn cleanup_sqlite_files(path: &Path) {
         let _ = fs::remove_file(path);
-        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
-        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+        let _ = fs::remove_file(sqlite_sidecar_path(path, "-wal"));
+        let _ = fs::remove_file(sqlite_sidecar_path(path, "-shm"));
     }
 
     fn sample_incident() -> Incident {

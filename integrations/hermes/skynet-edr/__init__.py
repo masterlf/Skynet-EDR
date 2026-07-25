@@ -519,12 +519,45 @@ def _safe_url_locator(params: Any, params_text: str) -> str | None:
             parsed_port = parsed.port
         except ValueError:
             continue
-        host = parsed.hostname.lower()
-        port = _canonical_port(parsed.scheme, parsed_port)
+        host = _canonical_url_host(parsed)
+        if host is None:
+            continue
+        port = _canonical_port(parsed.scheme.lower(), parsed_port)
         path = _canonical_url_path(parsed.path)
         return f"{parsed.scheme.lower()}://{host}{port}{path}"
     return None
 
+
+
+def _canonical_url_host(parsed: Any) -> str | None:
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    if netloc.startswith("["):
+        end = netloc.find("]")
+        if end < 0:
+            return None
+        raw_address = netloc[1:end]
+        remainder = netloc[end + 1 :]
+        if remainder and not remainder.startswith(":"):
+            return None
+        zone = None
+        address = raw_address
+        if "%25" in raw_address:
+            address, zone = raw_address.split("%25", 1)
+            if not zone:
+                return None
+        elif "%" in raw_address:
+            return None
+        try:
+            canonical = ipaddress.IPv6Address(address).compressed
+        except ValueError:
+            return None
+        if zone is not None:
+            canonical = f"{canonical}%25{zone}"
+        return f"[{canonical}]"
+    host = parsed.hostname
+    if host is None or ":" in host:
+        return None
+    return host.lower()
 
 def _canonical_port(scheme: str, port: int | None) -> str:
     if port is None:
@@ -561,20 +594,22 @@ def _decode_unreserved_and_uppercase_escapes(value: str) -> str:
 
 
 def _remove_dot_segments(path: str) -> str:
-    trailing_slash = path.endswith("/")
     output: list[str] = []
+    trailing_dot = path.endswith("/.") or path.endswith("/..")
     for segment in path.split("/"):
-        if segment == ".":
+        if segment in ("", "."):
+            if segment == "" and not output:
+                output.append("")
             continue
         if segment == "..":
-            if output and output[-1] != "":
+            if len(output) > 1:
                 output.pop()
             continue
         output.append(segment)
     normalized = "/".join(output)
     if not normalized.startswith("/"):
         normalized = "/" + normalized
-    if trailing_slash and normalized != "/" and not normalized.endswith("/"):
+    if (path.endswith("/") or trailing_dot) and normalized != "/" and not normalized.endswith("/"):
         normalized += "/"
     return normalized or "/"
 

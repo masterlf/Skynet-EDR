@@ -30,8 +30,9 @@ const SEVERITIES = new Set(['critical', 'high', 'medium', 'low', 'informational'
 const STATUSES = new Set(['open', 'investigating', 'contained', 'resolved', 'dismissed']);
 const SOURCE_KINDS = new Set(['sensor', 'process', 'file', 'network', 'mcp_tool', 'configuration', 'scheduled_task', 'messaging']);
 const ARTIFACT_KINDS = new Set(['email', 'url', 'git_repository', 'code', 'file', 'message', 'mcp', 'terminal', 'unknown']);
-const TRUST_LEVELS = new Set(['sensor_observation', 'agent_action', 'tool_output', 'untrusted_content', 'unknown']);
-const EVENT_TYPES = new Set(['agent.tool.requested', 'agent.tool.completed', 'agent.content.ingested', 'agent.network.egress', 'agent.file.accessed', 'agent.mcp.tool.requested', 'agent.config.changed', 'agent.automation.scheduled', 'agent.approval.granted', 'agent.llm.call.requested', 'agent.llm.call.completed']);
+const TRUST_LEVELS = new Set(['authenticated_user', 'runtime_policy', 'untrusted_content', 'tool_output', 'agent_action', 'sensor_observation']);
+const ARTIFACT_LABELS = { email: 'Email content', url: 'URL content', git_repository: 'Git repository', code: 'Code content', file: 'File content', message: 'Message content', mcp: 'MCP content', terminal: 'Terminal output', unknown: 'Unclassified artifact' };
+const EVENT_TITLES = { 'agent.tool.requested': 'Tool request evidence', 'agent.tool.completed': 'Tool completion evidence', 'agent.content.ingested': 'Content ingestion evidence', 'agent.network.egress': 'Network egress evidence', 'agent.file.accessed': 'File access evidence', 'agent.mcp.tool.requested': 'MCP tool request evidence', 'agent.config.changed': 'Configuration change evidence', 'agent.automation.scheduled': 'Automation schedule evidence', 'agent.approval.granted': 'Approval or scope change evidence', 'agent.llm.call.requested': 'Model call request evidence', 'agent.llm.call.completed': 'Model call completion evidence' };
 const INDICATOR_BOOL_KEYS = new Set(['network_indicator', 'direct_ip', 'delivery_indicator', 'sensitive_access', 'prompt_injection_indicator', 'malware_indicator', 'content_omitted', 'result_omitted', 'instruction_authority']);
 const INDICATOR_STRING_VALUES = {
   command_class: new Set(['network_egress', 'file_read', 'code_execution', 'other']),
@@ -188,20 +189,36 @@ function enumValue(value, allowed) {
   return typeof value === 'string' && allowed.has(value);
 }
 
+function safeIdentifier(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9:._-]{1,128}$/.test(value.trim()) && value.trim() === value;
+}
+
+function nullableSafeIdentifier(value) {
+  return value === null || value === undefined || safeIdentifier(value);
+}
+
+function validLocatorHash(value) {
+  return value === null || value === undefined || /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+function evidenceTitleFor(eventType) {
+  return EVENT_TITLES[eventType] || 'Security event evidence';
+}
+
 function validateSensor(value) {
   if (!isPlainObject(value)) failContract();
   if (!enumValue(value.kind, SOURCE_KINDS)) failContract();
-  if (!boundedId(value.sensor)) failContract();
-  if (!nullableBoundedString(value.integration, MAX_ID_LENGTH)) failContract();
+  if (!safeIdentifier(value.sensor)) failContract();
+  if (!nullableSafeIdentifier(value.integration)) failContract();
 }
 
 function validateArtifact(value) {
   if (!isPlainObject(value)) failContract();
   if (!enumValue(value.kind, ARTIFACT_KINDS)) failContract();
-  if (!nullableBoundedString(value.provider, MAX_ID_LENGTH)) failContract();
-  if (!boundedString(value.display_label, MAX_TEXT_LENGTH)) failContract();
-  if (!nullableBoundedString(value.trust_level, MAX_ID_LENGTH)) failContract();
-  if (typeof value.trust_level === 'string' && !enumValue(value.trust_level, TRUST_LEVELS)) failContract();
+  if (!nullableSafeIdentifier(value.provider)) failContract();
+  if (value.display_label !== ARTIFACT_LABELS[value.kind]) failContract();
+  if (!validLocatorHash(value.locator_hash)) failContract();
+  if (!(value.trust_level === null || value.trust_level === undefined || enumValue(value.trust_level, TRUST_LEVELS))) failContract();
 }
 
 function validateTraceIds(value) {
@@ -255,14 +272,12 @@ function validateEvidence(value, seenEvents) {
   seenEvents.add(value.event_id);
   if (!boundedSafeInteger(value.timestamp_unix_ms)) failContract();
   if (!enumValue(value.severity, SEVERITIES)) failContract();
-  if (!nullableBoundedString(value.event_type, MAX_ID_LENGTH)) failContract();
-  if (typeof value.event_type === 'string' && !enumValue(value.event_type, EVENT_TYPES)) failContract();
-  if (!boundedString(value.title)) failContract();
+  if (!nullableSafeIdentifier(value.event_type)) failContract();
+  if (value.title !== evidenceTitleFor(value.event_type)) failContract();
   validateSensor(value.sensor);
   validateArtifact(value.artifact);
-  if (!nullableBoundedString(value.trust_level, MAX_ID_LENGTH)) failContract();
-  if (typeof value.trust_level === 'string' && !enumValue(value.trust_level, TRUST_LEVELS)) failContract();
-  if (!nullableBoundedString(value.rule_id, MAX_ID_LENGTH)) failContract();
+  if (!(value.trust_level === null || value.trust_level === undefined || enumValue(value.trust_level, TRUST_LEVELS))) failContract();
+  if (!nullableSafeIdentifier(value.rule_id)) failContract();
   validateRedaction(value.redaction);
   validateIndicators(value.indicators);
 }
@@ -293,7 +308,7 @@ function validateRiskDetail(data, expectedId) {
   if (!isPlainObject(data) || data.schema_version !== 'skynet.risk.v1' || data.read_only !== true) failContract();
   validateRiskBase(data);
   if (data.id !== expectedId) failContract();
-  if (!Array.isArray(data.evidence) || data.evidence.length > MAX_EVIDENCE_ITEMS) failContract();
+  if (!Array.isArray(data.evidence) || data.evidence.length > MAX_EVIDENCE_ITEMS || data.evidence.length > data.event_count) failContract();
   const seenEvents = new Set();
   data.evidence.forEach((event) => validateEvidence(event, seenEvents));
   return data;
@@ -301,10 +316,8 @@ function validateRiskDetail(data, expectedId) {
 
 function validateStatus(data) {
   if (!isPlainObject(data) || data.read_only !== true) failContract();
-  for (const key of ['product', 'binary', 'run_mode', 'server']) {
-    if (!boundedString(data[key], MAX_ID_LENGTH)) failContract();
-  }
-  for (const key of ['tool_count', 'incident_count', 'event_count']) {
+  if (data.product !== 'Skynet-EDR' || data.binary !== 'skynet-edr' || data.run_mode !== 'passive' || data.server !== 'skynet-edr-mcp' || data.tool_count !== 6) failContract();
+  for (const key of ['incident_count', 'event_count']) {
     if (!boundedSafeInteger(data[key])) failContract();
   }
   return data;
@@ -442,7 +455,7 @@ function MetaCard({ label, value, note }) {
 
 function Filters({ search, setSearch, severity, setSeverity, status, setStatus, artifactKind, setArtifactKind }) {
   return jsxs('form', { 'aria-label': 'Current page filters', style: styles.filters, onSubmit: (event) => event.preventDefault(), children: [
-    jsx('label', { style: styles.field, children: jsxs('span', { style: styles.fieldBody, children: [
+    jsx('div', { style: styles.field, children: jsxs('span', { style: styles.fieldBody, children: [
       jsx('span', { style: styles.label, children: 'Search current page' }),
       jsx(SearchField, { value: search, onChange: setSearch, placeholder: 'Search title, rule, sensor or artifact', 'aria-label': 'Search current page risks' }),
     ] }) }),

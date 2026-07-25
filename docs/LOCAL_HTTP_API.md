@@ -12,8 +12,9 @@ Phase 11 adds a tiny HTML console router on top of the same Phase 10 API project
 - `POST`, `PUT`, `PATCH`, and `DELETE` return `405 method_not_allowed`.
 - No response actions, containment actions, sensor starts, config writes, or approval mutations are exposed.
 - Local store data is read through the same read-only projection used by the MCP visibility surface.
-- Daemon startup performs one explicit writable initialization/migration phase for the configured active SQLite store before spool ingestion and before listener startup, then drops that writable handle.
-- The HTTP listener startup preflights the configured SQLite store read-only and fails closed on missing, empty, or incompatible schema without creating a DB, WAL, SHM, schema, or indexes. Active HTTP requests also open SQLite with a read-only, `query_only` connection. `/api/status`, `/api/v1/risks`, and `/api/v1/risks/<id>` are the bounded Risk Explorer paths.
+- Daemon startup performs one explicit writable initialization/migration phase for the configured active SQLite store before spool ingestion and before listener startup, then drops that writable handle. That writable phase converts the local store to rollback-journal (`DELETE`) mode and checkpoints existing WAL stores so committed rows are preserved before read-only serving begins.
+- The HTTP listener startup preflights the configured SQLite store read-only and fails closed on missing, empty, WAL-mode, or incompatible schema without creating a DB, WAL, SHM, schema, or indexes. Active HTTP requests inspect the SQLite header before opening SQLite, then use a read-only, `query_only` connection. `/api/status`, `/api/v1/risks`, and `/api/v1/risks/<id>` are the bounded Risk Explorer paths.
+- The v0.4 local operator store intentionally prefers a verifiable no-sidecar read path over WAL reader/writer concurrency. Readers produce no `-wal`/`-shm` sidecars; short writer/read contention may return a generic unavailable response rather than weakening the read-only posture.
 - Legacy investigation endpoints such as `/api/incidents`, `/api/incidents/<id>`, and `/api/config-drift` remain compatibility visibility surfaces and may materialize stored collections or full stored incidents; they should not be treated as fully bounded Risk Explorer APIs.
 - Missing incidents return `404 not_found`, not a storage error.
 

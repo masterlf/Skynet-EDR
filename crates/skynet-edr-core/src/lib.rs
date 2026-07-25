@@ -5,6 +5,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -3042,6 +3043,8 @@ pub enum StorageError {
     Json(serde_json::Error),
     /// Filesystem I/O failed for a database or JSONL export path.
     Io(std::io::Error),
+    /// Existing database header indicates WAL mode, which read-only visibility paths reject.
+    UnsupportedWalJournalMode,
     /// A timestamp does not fit `SQLite`'s signed integer representation.
     IntegerOutOfRange {
         /// Name of the timestamp field being persisted.
@@ -3057,6 +3060,10 @@ impl std::fmt::Display for StorageError {
             Self::Sqlite(error) => write!(formatter, "sqlite storage error: {error}"),
             Self::Json(error) => write!(formatter, "json storage error: {error}"),
             Self::Io(error) => write!(formatter, "local storage I/O error: {error}"),
+            Self::UnsupportedWalJournalMode => write!(
+                formatter,
+                "unsupported WAL journal mode for read-only local store"
+            ),
             Self::IntegerOutOfRange { field, value } => {
                 write!(
                     formatter,
@@ -3084,6 +3091,36 @@ impl From<serde_json::Error> for StorageError {
 impl From<std::io::Error> for StorageError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+/// Return the actual `SQLite` sidecar path by appending a suffix to the full DB path.
+#[must_use]
+pub fn sqlite_sidecar_path(path: impl AsRef<Path>, suffix: &str) -> PathBuf {
+    let path = path.as_ref();
+    let mut file_name: OsString = path
+        .file_name()
+        .map_or_else(|| path.as_os_str().to_os_string(), ToOwned::to_owned);
+    file_name.push(suffix);
+    path.with_file_name(file_name)
+}
+
+fn reject_wal_header_for_read_only(path: &Path) -> StorageResult<()> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(StorageError::Io(error)),
+    };
+    let mut header = [0_u8; 20];
+    match file.read_exact(&mut header) {
+        Ok(()) => {
+            if &header[..16] == b"SQLite format 3 " && header[18] == 2 && header[19] == 2 {
+                return Err(StorageError::UnsupportedWalJournalMode);
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(error) => Err(StorageError::Io(error)),
     }
 }
 
@@ -3122,6 +3159,7 @@ impl LocalStore {
     /// read-only or cannot enable/verify `query_only` on the connection.
     pub fn open_read_only(path: impl AsRef<Path>) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
+        reject_wal_header_for_read_only(&path)?;
         let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.pragma_update(None, "query_only", true)?;
         let query_only =
@@ -3303,7 +3341,8 @@ impl LocalStore {
 
     fn migrate(&self) -> StorageResult<()> {
         self.connection.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA journal_mode = DELETE;
              PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY NOT NULL,
@@ -3567,4 +3606,172 @@ fn collect_payload_rows<T: for<'de> Deserialize<'de>, P: rusqlite::Params>(
     let rows = statement.query_map(params, |row| deserialize_row_json(row, 0))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StorageError::from)
+}
+
+#[cfg(test)]
+mod storage_hardening_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "skynet-edr-core-{name}-{}-{}.sqlite-nonce",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ))
+    }
+
+    fn sidecars(path: &Path) -> [PathBuf; 2] {
+        [
+            sqlite_sidecar_path(path, "-wal"),
+            sqlite_sidecar_path(path, "-shm"),
+        ]
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_file(path);
+        for sidecar in sidecars(path) {
+            let _ = fs::remove_file(sidecar);
+        }
+    }
+
+    fn force_wal_header_without_sidecars(path: &Path) {
+        cleanup(path);
+        mark_existing_db_wal_without_sidecars(path);
+    }
+
+    fn mark_existing_db_wal_without_sidecars(path: &Path) {
+        {
+            let connection = Connection::open(path).expect("raw sqlite opens");
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+                .expect("journal mode switches to WAL");
+            assert_eq!(mode, "wal");
+            connection
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS incidents (id TEXT PRIMARY KEY NOT NULL, payload_json TEXT NOT NULL);\
+                     CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY NOT NULL, payload_json TEXT NOT NULL);\
+                     INSERT OR IGNORE INTO incidents (id, payload_json) VALUES ('inc', '{}');\
+                     PRAGMA wal_checkpoint(TRUNCATE);",
+                )
+                .expect("raw WAL DB initializes");
+        }
+        for sidecar in sidecars(path) {
+            let _ = fs::remove_file(sidecar);
+        }
+        let mut header = [0_u8; 20];
+        File::open(path)
+            .expect("DB file opens")
+            .read_exact(&mut header)
+            .expect("header reads");
+        assert_eq!(&header[..16], b"SQLite format 3\0");
+        assert_eq!(header[18], 2, "read version must be WAL");
+        assert_eq!(header[19], 2, "write version must be WAL");
+    }
+
+    fn sample_source() -> EventSource {
+        EventSource {
+            kind: SourceKind::Configuration,
+            sensor: "linux-passive-fixture".to_owned(),
+            integration: Some("hermes".to_owned()),
+        }
+    }
+
+    fn no_redaction() -> RedactionMetadata {
+        RedactionMetadata {
+            contains_sensitive_data: false,
+            redacted_fields: Vec::new(),
+        }
+    }
+
+    fn sample_incident() -> Incident {
+        let event = Event {
+            id: EventId::new("evt_storage_hardening"),
+            observed_at_unix_ms: 1_781_440_123_000,
+            severity: Severity::High,
+            source: sample_source(),
+            title: "Storage hardening test event".to_owned(),
+            details: Some("Clearly fake test data; no secrets.".to_owned()),
+            attributes: BTreeMap::from([(
+                "event_type".to_owned(),
+                serde_json::json!("agent.mcp.tool.requested"),
+            )]),
+            redaction: no_redaction(),
+        };
+        Incident {
+            id: IncidentId::new("inc_storage_hardening"),
+            created_at_unix_ms: 1_781_440_123_000,
+            updated_at_unix_ms: 1_781_440_124_000,
+            status: IncidentStatus::Open,
+            severity: Severity::High,
+            title: "Storage hardening test incident".to_owned(),
+            summary: "Clearly fake incident; no secrets.".to_owned(),
+            source: event.source.clone(),
+            events: vec![event],
+            redaction: no_redaction(),
+        }
+    }
+
+    #[test]
+    fn read_only_open_fails_closed_for_wal_header_without_creating_appended_sidecars() {
+        let path = temp_db("wal-read-only-fail-closed");
+        force_wal_header_without_sidecars(&path);
+
+        let Err(error) = LocalStore::open_read_only(&path) else {
+            panic!("read-only WAL DB must fail closed")
+        };
+
+        assert!(
+            error.to_string().contains("unsupported WAL journal mode"),
+            "unexpected error: {error}"
+        );
+        for sidecar in sidecars(&path) {
+            assert!(
+                !sidecar.exists(),
+                "read-only open must not create {sidecar:?}"
+            );
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn writable_open_converts_existing_wal_store_to_rollback_journal_and_preserves_rows() {
+        let path = temp_db("wal-migration-preserves-rows");
+        cleanup(&path);
+        {
+            let store = LocalStore::open(&path).expect("initial writable store opens");
+            store
+                .insert_incident(&sample_incident())
+                .expect("sample incident persists");
+        }
+        mark_existing_db_wal_without_sidecars(&path);
+
+        {
+            let store = LocalStore::open(&path).expect("writable open converts WAL store");
+            assert_eq!(store.count_incidents().expect("incident count reads"), 1);
+            assert_eq!(store.count_events().expect("event count reads"), 1);
+            let mode: String = store
+                .connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .expect("journal mode reads");
+            assert_eq!(mode, "delete");
+        }
+        for sidecar in sidecars(&path) {
+            assert!(
+                !sidecar.exists(),
+                "writable migration must close without {sidecar:?}"
+            );
+        }
+        let read_only = LocalStore::open_read_only(&path).expect("converted DB opens read-only");
+        assert_eq!(
+            read_only.count_incidents().expect("incident count reads"),
+            1
+        );
+        assert_eq!(read_only.count_events().expect("event count reads"), 1);
+        cleanup(&path);
+    }
 }

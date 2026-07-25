@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use skynet_edr_core::{
-    Event, EventId, EventSource, Incident, IncidentId, IncidentStatus, LocalStore,
-    RedactionMetadata, Severity, SourceKind,
+    sqlite_sidecar_path, Event, EventId, EventSource, Incident, IncidentId, IncidentStatus,
+    LocalStore, RedactionMetadata, Severity, SourceKind,
 };
 
 #[test]
@@ -22,11 +22,11 @@ fn open_read_only_missing_database_fails_without_creating_db_or_sidecars() {
         "read-only open must not create the DB file"
     );
     assert!(
-        !db_path.with_extension("sqlite-wal").exists(),
+        !sqlite_sidecar_path(&db_path, "-wal").exists(),
         "read-only open must not create a WAL sidecar"
     );
     assert!(
-        !db_path.with_extension("sqlite-shm").exists(),
+        !sqlite_sidecar_path(&db_path, "-shm").exists(),
         "read-only open must not create a SHM sidecar"
     );
 }
@@ -170,8 +170,8 @@ fn temp_path(name: &str) -> std::path::PathBuf {
 
 fn cleanup_sqlite_files(path: &Path) {
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(path.with_extension("sqlite-wal"));
-    let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    let _ = fs::remove_file(sqlite_sidecar_path(path, "-wal"));
+    let _ = fs::remove_file(sqlite_sidecar_path(path, "-shm"));
 }
 
 fn no_redaction() -> RedactionMetadata {
