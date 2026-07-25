@@ -35,11 +35,13 @@ This API is an operator visibility interface, not a control plane.
 
 ## Risk API v1
 
-Risk responses use `schema_version: skynet.risk.v1` and always include `read_only: true`. Pagination defaults are `limit=50` and `offset=0`; `limit` is constrained to `1..=100` and `offset` to `0..=10000`. Malformed, duplicate, unknown, or out-of-range query parameters return structured `400 bad_request` with `read_only: true`.
+Risk responses use `schema_version: skynet.risk.v1` and always include `read_only: true`. Pagination defaults are `limit=50` and `offset=0`; `limit` is constrained to `1..=100` and `offset` to `0..=9007199254740991`. Malformed, duplicate, unknown, or out-of-range query parameters return structured `400 bad_request` with `read_only: true`.
 
-Risk detail IDs are bounded before and after decoding (`<=768` encoded bytes and `<=256` decoded Unicode scalar values). Malformed percent escapes, invalid UTF-8, and literal raw `/` in the opaque-id tail return structured `400 bad_request`. Encoded `/`, `?`, `#`, unicode, and `:` are accepted only as opaque ID data after route selection; they are never interpreted as route separators or filesystem paths.
+Risk detail IDs are bounded before and after decoding (`<=3072` percent-encoded path-segment bytes/chars and `<=256` decoded Unicode scalar values). Malformed percent escapes, invalid UTF-8, and literal raw `/` in the opaque-id tail return structured `400 bad_request`. Encoded `/`, spaces, `?`, `#`, unicode, and `:` are accepted only as opaque ID data after route selection; they are never interpreted as route separators or filesystem paths.
 
-Risk list pagination is bounded in SQLite using `updated_at_unix_ms DESC, id ASC` order before risk projection. The API still caps `limit` at 100 and `offset` at 10,000.
+The large offset ceiling intentionally matches JavaScript `Number.MAX_SAFE_INTEGER` and SQLite signed integer capacity. Very large `OFFSET` scans can be slower, but the endpoint remains loopback-only, read-only, bounded by `limit <= 100`, and timeout-limited by callers rather than hiding reachable incidents behind an arbitrary 10,000 cap.
+
+Risk list pagination is bounded in SQLite using `updated_at_unix_ms DESC, id ASC` order before risk projection. The API still caps `limit` at 100 and `offset` at `9007199254740991`.
 
 Risk detail evidence is an allowlisted projection: event id, timestamp, severity, event type, deterministic event label derived from canonical event type, sensor, explicit typed artifact metadata or conservative unknown artifact fallback, trust level, rule id, redaction count, and known boolean/enum triage indicators. Risk titles are deterministic labels derived from allowlisted rule IDs, and risk summaries are generated from trusted scalar metadata only. Artifact labels are recomputed from fixed `ArtifactKind` constants; stored `display_label` is not trusted. Provider, locator hash, trust level, event type, rule id, sensor, integration, and trace IDs are validated before exposure. It does not expose arbitrary attributes, raw details, stored incident titles/summaries, stored event titles, message/email bodies, prompt text, command text, raw URLs, repository locators, local paths, credentials, or hostile content.
 

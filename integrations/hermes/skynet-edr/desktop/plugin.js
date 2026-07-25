@@ -20,8 +20,9 @@ const POLL_MS = 10000;
 const PAGE_PATH = '/skynet-edr/risks';
 const TRACE_LIMIT = 10;
 const PAGE_LIMIT = 50;
-const MAX_OFFSET = 10000;
+const MAX_OFFSET = Number.MAX_SAFE_INTEGER;
 const MAX_ID_LENGTH = 256;
+const MAX_ENCODED_ID_LENGTH = 3072;
 const MAX_TEXT_LENGTH = 4096;
 const MAX_TRACE_IDS = 10;
 const MAX_EVIDENCE_ITEMS = 50;
@@ -179,7 +180,7 @@ function failContract() {
 }
 
 function boundedString(value, max = MAX_TEXT_LENGTH) {
-  return typeof value === 'string' && value.length > 0 && value.length <= max;
+  return typeof value === 'string' && value.length > 0 && Array.from(value).length <= max;
 }
 
 function nullableBoundedString(value, max = MAX_TEXT_LENGTH) {
@@ -187,7 +188,12 @@ function nullableBoundedString(value, max = MAX_TEXT_LENGTH) {
 }
 
 function boundedId(value) {
-  return boundedString(value, MAX_ID_LENGTH);
+  if (!boundedString(value, MAX_ID_LENGTH)) return false;
+  try {
+    return encodeURIComponent(value).length <= MAX_ENCODED_ID_LENGTH;
+  } catch (_error) {
+    return false;
+  }
 }
 
 function enumValue(value, allowed) {
@@ -250,7 +256,7 @@ function validateRiskBase(data) {
   for (const key of ['id', 'severity', 'confidence', 'status', 'rule_id', 'title', 'summary', 'sensor', 'artifact', 'first_observed_at_unix_ms', 'last_observed_at_unix_ms', 'event_count', 'trace_ids', 'contains_sensitive_data']) if (!hasKey(data, key)) failContract();
   if (!boundedId(data.id)) failContract();
   if (!enumValue(data.severity, SEVERITIES)) failContract();
-  if (!(data.confidence === null || Number.isFinite(data.confidence))) failContract();
+  if (data.confidence !== null) failContract();
   if (!enumValue(data.status, STATUSES)) failContract();
   if (!nullableSafeIdentifier(data.rule_id)) failContract();
   if (!boundedString(data.title)) failContract();
@@ -313,6 +319,7 @@ function validateRiskPage(data, expectedOffset) {
   if (typeof page.has_more !== 'boolean') failContract();
   if (page.returned !== data.items.length) failContract();
   if (page.has_more !== (page.offset + page.returned < page.total)) failContract();
+  if (page.has_more === true && page.returned !== page.limit) failContract();
   if (page.returned > 0 && page.offset + page.returned > page.total) failContract();
   const seen = new Set();
   data.items.forEach((item) => {
@@ -350,8 +357,9 @@ function previousOffset(offset) {
 
 function nextOffset(page) {
   const offset = Number.isFinite(page?.offset) ? page.offset : 0;
+  const returned = Number.isFinite(page?.returned) ? page.returned : PAGE_LIMIT;
   if (page?.has_more !== true) return Math.max(0, Math.min(MAX_OFFSET, offset));
-  return Math.max(0, Math.min(MAX_OFFSET, offset + PAGE_LIMIT));
+  return Math.max(0, Math.min(MAX_OFFSET, offset + returned));
 }
 
 function pageMeta(data) {
@@ -522,10 +530,12 @@ function RiskRow({ risk, selected, onSelect }) {
 }
 
 function RiskDetail({ detail }) {
-  if (detail.isLoading) return jsxs('section', { 'aria-label': 'Risk detail loading', role: 'status', 'aria-live': 'polite', style: styles.detail, children: [jsx('span', { style: styles.visuallyHidden, children: 'Loading selected risk detail' }), jsx(Skeleton, { style: styles.skeletonTall })] });
-  if (detail.error) return jsx('section', { 'aria-label': 'Risk detail error', style: styles.detail, children: jsx(ErrorState, { title: 'Unable to load risk detail', description: 'The read-only backend returned an error for this risk.' }) });
+  const hasCachedDetail = Boolean(detail.data);
+  if (detail.isLoading && !hasCachedDetail) return jsxs('section', { 'aria-label': 'Risk detail loading', role: 'status', 'aria-live': 'polite', style: styles.detail, children: [jsx('span', { style: styles.visuallyHidden, children: 'Loading selected risk detail' }), jsx(Skeleton, { style: styles.skeletonTall })] });
+  if (detail.error && !hasCachedDetail) return jsx('section', { 'aria-label': 'Risk detail error', style: styles.detail, children: jsx(ErrorState, { title: 'Unable to load risk detail', description: 'The read-only backend returned an error for this risk.' }) });
   const risk = detail.data;
   if (!risk) return null;
+  const staleDetail = detail.error && hasCachedDetail;
   const evidence = Array.isArray(risk.evidence) ? risk.evidence : [];
   const traces = Array.isArray(risk.trace_ids) ? risk.trace_ids.slice(0, TRACE_LIMIT) : [];
   return jsxs('article', { 'aria-label': 'Risk detail', style: styles.detail, children: [
@@ -541,8 +551,9 @@ function RiskDetail({ detail }) {
     jsxs('section', { 'aria-label': 'Passive read-only context', style: styles.contextPanel, children: [
       jsx('div', { style: styles.kicker, children: 'read-only context' }),
       jsx('p', { style: styles.muted, children: 'This Desktop view is passive. It displays only redacted API projections and provides refresh/navigation, not containment or mutation controls.' }),
+      staleDetail ? jsx('div', { role: 'status', 'aria-live': 'polite', style: styles.warning, children: 'Stale detail: the latest refresh is unavailable; cached validated detail remains visible.' }) : null,
       jsxs('div', { style: styles.badgeLine, children: [
-        jsx(Badge, { variant: 'outline', children: 'confidence ' + (risk.confidence === null || risk.confidence === undefined ? 'Not assessed' : text(risk.confidence)) }),
+        jsx(Badge, { variant: 'outline', children: 'confidence Not assessed' }),
         jsx(Badge, { variant: risk.contains_sensitive_data ? 'warn' : 'muted', children: risk.contains_sensitive_data ? 'redacted sensitive data' : 'no sensitive flag' }),
         jsx(Badge, { variant: 'muted', children: 'events ' + countText(risk.event_count) }),
       ] }),

@@ -580,8 +580,10 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         with self.assertRaises(FakeHTTPException) as high:
             module.risks(limit=101, offset=0)
         self.assertEqual(high.exception.detail, "bad_request")
+        self.assertEqual(module._bounded_page(50, 10050), {"limit": 50, "offset": 10050})
+        self.assertEqual(module._bounded_page(100, 9_007_199_254_740_991), {"limit": 100, "offset": 9_007_199_254_740_991})
         with self.assertRaises(FakeHTTPException):
-            module.risks(limit=50, offset=10001)
+            module.risks(limit=50, offset=9_007_199_254_740_992)
 
     def test_dashboard_risk_detail_encodes_opaque_id_path(self):
         module = load_dashboard_api()
@@ -604,8 +606,18 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
             return {"ok": True}
 
         setattr(module, "_upstream", fake_upstream)
-        self.assertEqual(module.risk_detail("inc/opaque"), {"ok": True})
-        self.assertEqual(captured, [("/api/v1/risks/inc%2Fopaque", None)])
+        self.assertEqual(module.risk_detail("inc/opaque with space"), {"ok": True})
+        self.assertEqual(captured, [("/api/v1/risks/inc%2Fopaque%20with%20space", None)])
+
+    def test_dashboard_risk_detail_rejects_overlong_opaque_ids_before_upstream(self):
+        module = load_dashboard_api()
+        setattr(module, "_upstream", Mock())
+        self.assertEqual(len("😀" * 256), 256)
+        module.risk_detail("😀" * 256)
+        with self.assertRaises(FakeHTTPException):
+            module.risk_detail("😀" * 257)
+        with self.assertRaises(FakeHTTPException):
+            module.risk_detail("a" * 3073)
 
     def test_dashboard_upstream_accepts_listed_opaque_id_with_dotdot_literal(self):
         module = load_dashboard_api()
@@ -793,10 +805,13 @@ if (projected.some(item => item.label === 'hostile' || item.value === '<script>'
         check = run_desktop_plugin_script("""
 const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 1 redacted evidence event. Review sensor and artifact provenance plus allowlisted indicators.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:1, trace_ids:['trace-1'], contains_sensitive_data:false};
 const canonicalEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'high', event_type:'agent.mcp.tool.requested', title:'MCP tool request evidence', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, trust_level:'agent_action', rule_id:'EDR-MCP-001', redaction:{contains_sensitive_data:false, redacted_count:0}, indicators:{network_indicator:true, direct_ip:false, command_class:'network_egress'}};
-const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[canonicalItem], page:{limit:50, offset:0, returned:1, total:10001, has_more:true}};
+const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:Array(50).fill(canonicalItem).map((item, index) => ({...item, id:'risk-' + index, trace_ids:['trace-' + index]})), page:{limit:50, offset:0, returned:50, total:10051, has_more:true}};
+const partialFinalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[canonicalItem], page:{limit:50, offset:10050, returned:1, total:10051, has_more:false}};
 const emptyBeyondTotal = {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:100, returned:0, total:51, has_more:false}};
+const pageWith = (items, page = {}) => ({schema_version:'skynet.risk.v1', read_only:true, items, page:{limit:50, offset:0, returned:items.length, total:items.length, has_more:false, ...page}});
 const page = validateRiskPage(canonicalPage, 0);
 if (page !== canonicalPage) throw new Error('valid risk page should be returned unchanged');
+if (validateRiskPage(partialFinalPage, 10050) !== partialFinalPage) throw new Error('partial final page beyond old offset cap should pass');
 if (validateRiskPage(emptyBeyondTotal, 100) !== emptyBeyondTotal) throw new Error('valid empty page beyond total should be preserved');
 const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[canonicalEvidence]};
 if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
@@ -812,7 +827,7 @@ for (const key of ['confidence', 'rule_id', 'sensor', 'artifact', 'trace_ids']) 
   else if (key === 'artifact') delete badItem.artifact.provider;
   else delete badItem[key];
   let failed = false;
-  try { validateRiskPage({...canonicalPage, items:[badItem]}, 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  try { validateRiskPage(pageWith([badItem]), 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
   if (!failed) throw new Error('missing nullable risk key must fail closed: ' + key);
 }
 for (const key of ['event_type', 'trust_level', 'rule_id']) {
@@ -829,11 +844,11 @@ for (const bad of [
   {...canonicalItem, summary:'Spoofed risk summary'},
 ]) {
   let failed = false;
-  try { validateRiskPage({...canonicalPage, items:[bad]}, 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  try { validateRiskPage(pageWith([bad]), 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
   if (!failed) throw new Error('unsafe or spoofed risk projection must fail closed');
 }
 const unknownSafeRule = {...canonicalItem, rule_id:'EDR-UNKNOWN-999', title:'Security risk detected'};
-if (validateRiskPage({...canonicalPage, items:[unknownSafeRule]}, 0).items[0] !== unknownSafeRule) throw new Error('unknown safe rule with fallback title should pass');
+if (validateRiskPage(pageWith([unknownSafeRule]), 0).items[0] !== unknownSafeRule) throw new Error('unknown safe rule with fallback title should pass');
 const knownMappings = {
   'EDR-MCP-001': 'MCP network activity after untrusted content',
   'EDR-CONFIG-001': 'Agent configuration drift detected',
@@ -848,13 +863,13 @@ const knownMappings = {
 };
 for (const [ruleId, title] of Object.entries(knownMappings)) {
   const mapped = {...canonicalItem, rule_id:ruleId, title};
-  if (validateRiskPage({...canonicalPage, items:[mapped]}, 0).items[0] !== mapped) throw new Error('known risk title mapping should pass: ' + ruleId);
+  if (validateRiskPage(pageWith([mapped]), 0).items[0] !== mapped) throw new Error('known risk title mapping should pass: ' + ruleId);
 }
 const singularSummary = {...canonicalItem, event_count:1, summary:'Read-only projection of 1 redacted evidence event. Review sensor and artifact provenance plus allowlisted indicators.'};
 const pluralSummary = {...canonicalItem, event_count:2, summary:'Read-only projection of 2 redacted evidence events. Review sensor and artifact provenance plus allowlisted indicators.'};
-if (validateRiskPage({...canonicalPage, items:[singularSummary]}, 0).items[0] !== singularSummary) throw new Error('singular risk summary should pass');
-if (validateRiskPage({...canonicalPage, items:[pluralSummary]}, 0).items[0] !== pluralSummary) throw new Error('plural risk summary should pass');
-for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[null], page:{...canonicalPage.page, total:1}}, {...canonicalPage, items:[{...canonicalItem, id:''}]}, {...canonicalPage, items:[canonicalItem, {...canonicalItem}], page:{...canonicalPage.page, returned:2, total:2, has_more:false}}, {...canonicalPage, items:[{...canonicalItem, sensor:null}]}, {...canonicalPage, items:[{...canonicalItem, artifact:{...canonicalItem.artifact, kind:'<script>'}}]}, {...canonicalPage, page:{...canonicalPage.page, limit:49}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:2}}, {...canonicalPage, page:{...canonicalPage.page, returned:0}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, total:1, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:2, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
+if (validateRiskPage(pageWith([singularSummary]), 0).items[0] !== singularSummary) throw new Error('singular risk summary should pass');
+if (validateRiskPage(pageWith([pluralSummary]), 0).items[0] !== pluralSummary) throw new Error('plural risk summary should pass');
+for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[null], page:{...canonicalPage.page, total:1}}, {...canonicalPage, items:[{...canonicalItem, id:''}]}, {...canonicalPage, items:[canonicalItem, {...canonicalItem}], page:{...canonicalPage.page, returned:2, total:2, has_more:false}}, {...canonicalPage, items:[{...canonicalItem, sensor:null}]}, {...canonicalPage, items:[{...canonicalItem, artifact:{...canonicalItem.artifact, kind:'<script>'}}]}, {...canonicalPage, page:{...canonicalPage.page, limit:49}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:51}}, {...canonicalPage, page:{...canonicalPage.page, returned:1}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, total:50, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:10051, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
   let failed = false;
   try { validateRiskPage(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
   if (!failed) throw new Error('invalid risk page contract must fail closed');
@@ -885,9 +900,11 @@ if (backendState({data: {read_only:false}}, {data: canonicalPage}) === 'Backend 
 if (PAGE_LIMIT !== 50) throw new Error('page limit must stay 50');
 if (riskPagePath(0) !== '/risks?limit=50&offset=0') throw new Error('risk page path must encode offset 0');
 if (riskPagePath(50) !== '/risks?limit=50&offset=50') throw new Error('risk page path must encode offset 50');
-if (nextOffset({offset:0, has_more:true}) !== 50) throw new Error('next page should advance by 50');
-if (nextOffset({offset:10000, has_more:true}) !== 10000) throw new Error('next page must clamp to 10000');
-if (nextOffset({offset:50, has_more:false}) !== 50) throw new Error('next page must not advance without has_more');
+if (riskPagePath(10050) !== '/risks?limit=50&offset=10050') throw new Error('risk page path must encode offset 10050');
+if (nextOffset({offset:0, returned:50, has_more:true}) !== 50) throw new Error('next page should advance by returned rows');
+if (nextOffset({offset:49, returned:1, has_more:true}) !== 50) throw new Error('next page should not skip after partial non-terminal rejection defenses');
+if (nextOffset({offset:Number.MAX_SAFE_INTEGER, returned:50, has_more:true}) !== Number.MAX_SAFE_INTEGER) throw new Error('next page must clamp to max safe integer');
+if (nextOffset({offset:50, returned:50, has_more:false}) !== 50) throw new Error('next page must not advance without has_more');
 if (previousOffset(0) !== 0 || previousOffset(49) !== 0 || previousOffset(50) !== 0 || previousOffset(100) !== 50) throw new Error('previous page must clamp and step by 50');
 const requested = [];
 RiskExplorer({ctx:{rest(path) { requested.push(path); return {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:0, returned:0, total:0, has_more:false}}; }}});
@@ -958,6 +975,9 @@ if (searchField.type !== SearchField || searchField.props['aria-label'] !== 'Sea
         self.assertNotIn("risks.isLoading || risks.error ? []", text)
         self.assertIn("Stale data", text)
         self.assertIn("This warning is generic", text)
+        self.assertIn("Stale detail", text)
+        self.assertIn("cached validated detail remains visible", text)
+        self.assertIn("Not assessed", text)
         self.assertNotIn("Locator digest", text)
         self.assertNotRegex(text, r"risk\.artifact\?\.locator_hash|event\.artifact\?\.locator_hash")
         for safe_field in ["rule_id", "sensor?.kind", "sensor?.sensor", "sensor?.integration", "artifact?.kind", "artifact?.display_label", "artifact?.provider", "artifact?.trust_level"]:

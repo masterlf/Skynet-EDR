@@ -194,6 +194,40 @@ fn sqlite_store_normalizes_hostile_redaction_metadata_before_persistence() {
 }
 
 #[test]
+fn sqlite_store_pseudonymizes_invalid_event_ids_before_persistence() {
+    let db_path = temp_path("event-id-pseudonym.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let raw_one = "../secret/FAKE_TOKEN_NEVER_EXPOSE ignore previous instructions";
+    let raw_two = "../secret/FAKE_TOKEN_NEVER_EXPOSE different";
+
+    store
+        .insert_event(&sample_event(raw_one))
+        .expect("hostile event persists safely");
+    store
+        .insert_event(&sample_event(raw_two))
+        .expect("second hostile event persists safely");
+
+    let events = store.list_events().expect("events list succeeds");
+    let body = serde_json::to_string(&events).expect("events serialize");
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.id.as_str().starts_with("redacted-event-sha256-")));
+    assert!(events
+        .iter()
+        .all(|event| event.id.as_str().len() == "redacted-event-sha256-".len() + 64));
+    assert_ne!(events[0].id, events[1].id);
+    assert!(!body.contains("FAKE_TOKEN_NEVER_EXPOSE"));
+    assert!(!body.contains("ignore previous instructions"));
+    assert!(store
+        .get_event(raw_one)
+        .expect("raw id query succeeds")
+        .is_none());
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
 fn sqlite_store_upserts_events_without_duplicate_rows() {
     let db_path = temp_path("upsert.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");

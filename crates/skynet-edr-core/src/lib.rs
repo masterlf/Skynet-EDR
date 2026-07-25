@@ -13,6 +13,7 @@ use std::{
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Operator-facing Skynet-EDR runtime mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,9 +340,9 @@ impl CanonicalEventEnvelope {
     /// Returns [`CanonicalEventError::Validation`] when identity, provenance,
     /// or redaction metadata is missing, blank, or internally inconsistent.
     pub fn validate(&self) -> Result<(), CanonicalEventError> {
-        if self.event_id.as_str().trim().is_empty() {
+        if !is_safe_event_identifier(self.event_id.as_str()) {
             return Err(CanonicalEventError::Validation(
-                "event_id must not be empty".to_owned(),
+                "event_id must match safe identifier contract".to_owned(),
             ));
         }
         if self.event_type.trim().is_empty() {
@@ -2117,6 +2118,28 @@ impl EventId {
     }
 }
 
+/// Return whether a raw event identifier matches the operator-safe contract.
+#[must_use]
+pub fn is_safe_event_identifier(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed == value
+        && trimmed.len() <= 128
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-'))
+}
+
+/// Return a safe event identifier, pseudonymizing invalid legacy raw values.
+#[must_use]
+pub fn safe_event_identifier(value: &str) -> String {
+    if is_safe_event_identifier(value) {
+        return value.to_owned();
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    format!("redacted-event-sha256-{digest:x}")
+}
+
 /// Stable platform-independent incident identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -3474,6 +3497,7 @@ fn sanitize_event_for_storage(event: &Event) -> Event {
     let mut sanitized = event.clone();
     let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
 
+    sanitized.id = EventId::new(safe_event_identifier(sanitized.id.as_str()));
     sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
     sanitized.details = sanitized
         .details

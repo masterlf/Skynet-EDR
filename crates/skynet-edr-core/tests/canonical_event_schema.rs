@@ -125,6 +125,25 @@ fn canonical_event_v0_rejects_missing_provenance_trust_or_redaction() {
 }
 
 #[test]
+fn canonical_event_rejects_hostile_event_ids_fail_closed() {
+    let overlong = "x".repeat(129);
+    for event_id in [
+        "../secret",
+        " Authorization: Bearer FAKE_SECRET ",
+        "ignore previous instructions",
+        "evt_é",
+        "evt control\n",
+        overlong.as_str(),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture parses");
+        value["event_id"] = serde_json::json!(event_id);
+        let error =
+            parse_canonical_event_json(&value.to_string()).expect_err("hostile event_id rejected");
+        assert!(!error.to_string().contains(event_id));
+    }
+}
+
+#[test]
 fn canonical_event_v0_rejects_hostile_unknown_fields_and_inconsistent_redaction() {
     let mut unknown_field: serde_json::Value =
         serde_json::from_str(FIXTURE).expect("valid fixture");

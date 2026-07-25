@@ -15,6 +15,9 @@ router = APIRouter()
 _DEFAULT_PORT = 8787
 _TIMEOUT_SECONDS = 2.0
 _MAX_RESPONSE_BYTES = 1_048_576
+_MAX_OFFSET = 9_007_199_254_740_991
+_MAX_RISK_ID_CODEPOINTS = 256
+_MAX_RISK_ID_ENCODED_CHARS = 3_072
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -43,7 +46,7 @@ def _bounded_page(limit: int, offset: int) -> dict[str, int]:
         bounded_offset = int(offset)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="bad_request") from exc
-    if not 1 <= bounded_limit <= 100 or not 0 <= bounded_offset <= 10000:
+    if not 1 <= bounded_limit <= 100 or not 0 <= bounded_offset <= _MAX_OFFSET:
         raise HTTPException(status_code=400, detail="bad_request")
     return {"limit": bounded_limit, "offset": bounded_offset}
 
@@ -61,6 +64,16 @@ def _valid_upstream_path(path: str) -> bool:
     if any(segment in {".", ".."} for segment in decoded.split("/")):
         return False
     return True
+
+
+def _valid_risk_id(risk_id: str) -> bool:
+    if not risk_id or len(risk_id) > _MAX_RISK_ID_CODEPOINTS:
+        return False
+    try:
+        quoted = urllib.parse.quote(risk_id, safe="")
+    except UnicodeError:
+        return False
+    return len(quoted) <= _MAX_RISK_ID_ENCODED_CHARS
 
 
 def _upstream(path: str, query: dict[str, int] | None = None) -> Any:
@@ -91,12 +104,14 @@ def _upstream(path: str, query: dict[str, int] | None = None) -> Any:
 
 
 @router.get("/risks")
-def risks(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=10000)) -> Any:
+def risks(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=_MAX_OFFSET)) -> Any:
     return _upstream("/api/v1/risks", _bounded_page(limit, offset))
 
 
 @router.get("/risks/{risk_id:path}")
 def risk_detail(risk_id: str) -> Any:
+    if not _valid_risk_id(risk_id):
+        raise HTTPException(status_code=400, detail="bad_request")
     quoted = urllib.parse.quote(risk_id, safe="")
     return _upstream(f"/api/v1/risks/{quoted}")
 

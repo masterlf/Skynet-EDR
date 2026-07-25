@@ -21,6 +21,9 @@ use skynet_edr_core::{
 
 const SENSOR_NAME: &str = "linux-passive-fixture";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
+const MAX_RISK_OFFSET: usize = 9_007_199_254_740_991;
+const MAX_RISK_ID_ENCODED_BYTES: usize = 3_072;
+const MAX_RISK_ID_DECODED_CHARS: usize = 256;
 
 /// Local read-only HTTP API configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,7 +460,7 @@ fn parse_risk_page(query: Option<&str>) -> Result<(usize, usize), &'static str> 
     if !(1..=100).contains(&limit) {
         return Err("limit out of range");
     }
-    if offset > 10_000 {
+    if offset > MAX_RISK_OFFSET {
         return Err("offset out of range");
     }
     Ok((limit, offset))
@@ -477,9 +480,7 @@ fn route_risk_detail(store: &LocalStore, method: HttpMethod, encoded_id: &str) -
 }
 
 fn decode_risk_id_segment(encoded: &str) -> Result<String, &'static str> {
-    const MAX_ENCODED_BYTES: usize = 768;
-    const MAX_DECODED_CHARS: usize = 256;
-    if encoded.len() > MAX_ENCODED_BYTES {
+    if encoded.len() > MAX_RISK_ID_ENCODED_BYTES {
         return Err("risk id is too long");
     }
     if encoded.contains('/') {
@@ -503,7 +504,7 @@ fn decode_risk_id_segment(encoded: &str) -> Result<String, &'static str> {
         }
     }
     let id = String::from_utf8(decoded).map_err(|_| "risk id is not valid UTF-8")?;
-    if id.chars().count() > MAX_DECODED_CHARS {
+    if id.chars().count() > MAX_RISK_ID_DECODED_CHARS {
         return Err("risk id is too long");
     }
     Ok(id)

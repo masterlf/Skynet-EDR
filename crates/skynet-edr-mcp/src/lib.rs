@@ -7,8 +7,8 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use skynet_edr_core::{
-    ArtifactKind, ArtifactProvenance, Event, Incident, LocalStore, ProductInfo, StorageError,
-    TrustLevel,
+    safe_event_identifier, ArtifactKind, ArtifactProvenance, Event, Incident, LocalStore,
+    ProductInfo, StorageError, TrustLevel,
 };
 
 const RISK_SCHEMA_VERSION: &str = "skynet.risk.v1";
@@ -337,7 +337,7 @@ fn incident_summary(incident: &Incident) -> Value {
 
 fn config_drift_summary(event: &Event) -> Value {
     json!({
-        "event_id": event.id.as_str(),
+        "event_id": safe_event_identifier(event.id.as_str()),
         "observed_at_unix_ms": event.observed_at_unix_ms,
         "severity": enum_label(event.severity),
         "rule_id": event_rule_id(event),
@@ -501,7 +501,7 @@ fn risk_evidence(incident: &Incident) -> Vec<Value> {
         .take(50)
         .map(|event| {
             json!({
-                "event_id": event.id.as_str(),
+                "event_id": safe_event_identifier(event.id.as_str()),
                 "timestamp_unix_ms": event.observed_at_unix_ms,
                 "severity": enum_label(event.severity),
                 "event_type": event.attributes.get("event_type").and_then(Value::as_str).and_then(safe_identifier),

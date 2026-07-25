@@ -250,7 +250,7 @@ fn risk_api_v1_rejects_bad_queries_and_mutations() {
     for path in [
         "/api/v1/risks?limit=0",
         "/api/v1/risks?limit=101",
-        "/api/v1/risks?offset=10001",
+        "/api/v1/risks?offset=9007199254740992",
         "/api/v1/risks?limit=10&limit=20",
         "/api/v1/risks?unexpected=1",
         "/api/v1/risks?limit=wat",
@@ -265,6 +265,39 @@ fn risk_api_v1_rejects_bad_queries_and_mutations() {
     let mutation = handle_http_request(&store, HttpMethod::Post, "/api/v1/risks")
         .expect("known risk route rejects mutation");
     assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
+}
+
+#[test]
+fn risk_api_v1_accepts_offsets_beyond_old_ceiling_and_rejects_above_safe_integer() {
+    let store = temp_store();
+
+    let accepted = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks?limit=50&offset=10050",
+    )
+    .expect("old-ceiling offset returns structured response");
+    let max_accepted = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks?limit=50&offset=9007199254740991",
+    )
+    .expect("max safe offset returns structured response");
+    let rejected = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks?limit=50&offset=9007199254740992",
+    )
+    .expect("above max safe offset returns structured response");
+
+    assert_eq!(accepted.status, HttpStatus::Ok);
+    assert_eq!(accepted.body["page"]["offset"], 10050);
+    assert_eq!(max_accepted.status, HttpStatus::Ok);
+    assert_eq!(
+        max_accepted.body["page"]["offset"],
+        9_007_199_254_740_991i64
+    );
+    assert_eq!(rejected.status, HttpStatus::BadRequest);
 }
 
 #[test]
@@ -287,9 +320,34 @@ fn risk_api_v1_decodes_one_opaque_percent_encoded_risk_id_segment() {
 }
 
 #[test]
+fn risk_api_v1_accepts_256_non_bmp_scalar_opaque_id_and_rejects_257() {
+    let store = temp_store();
+    let incident_id = "😀".repeat(256);
+    store
+        .insert_incident(&stored_incident(&incident_id, Vec::new()))
+        .expect("non-BMP incident persists");
+    let encoded = "%F0%9F%98%80".repeat(256);
+    let overlong = "%F0%9F%98%80".repeat(257);
+
+    let response =
+        handle_http_request(&store, HttpMethod::Get, &format!("/api/v1/risks/{encoded}"))
+            .expect("max scalar risk detail responds");
+    let rejected = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        &format!("/api/v1/risks/{overlong}"),
+    )
+    .expect("overlong scalar risk detail responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["id"], incident_id);
+    assert_eq!(rejected.status, HttpStatus::BadRequest);
+}
+
+#[test]
 fn risk_api_v1_rejects_malformed_percent_utf8_and_overlong_encoded_ids() {
     let store = temp_store();
-    let overlong = format!("/api/v1/risks/{}", "a".repeat(769));
+    let overlong = format!("/api/v1/risks/{}", "a".repeat(3073));
     for path in [
         "/api/v1/risks/inc%ZZ",
         "/api/v1/risks/inc%FF",
