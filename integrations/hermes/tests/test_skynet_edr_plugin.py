@@ -2,9 +2,14 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import stat
+import subprocess
+import sys
 import tempfile
+import types
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "__init__.py"
@@ -19,6 +24,67 @@ def load_plugin():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+class FakeHTTPException(Exception):
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+class FakeAPIRouter:
+    def __init__(self) -> None:
+        self.routes = []
+
+    def get(self, path):
+        def decorator(func):
+            self.routes.append(("GET", path, func.__name__))
+            return func
+
+        return decorator
+
+
+def fake_query(default, ge=None, le=None):
+    return default
+
+
+def load_dashboard_api():
+    fake_fastapi = types.ModuleType("fastapi")
+    setattr(fake_fastapi, "APIRouter", FakeAPIRouter)
+    setattr(fake_fastapi, "HTTPException", FakeHTTPException)
+    setattr(fake_fastapi, "Query", fake_query)
+    spec = importlib.util.spec_from_file_location("skynet_edr_dashboard_api_test", DASHBOARD_API_PATH)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    original = sys.modules.get("fastapi")
+    sys.modules["fastapi"] = fake_fastapi
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if original is None:
+            sys.modules.pop("fastapi", None)
+        else:
+            sys.modules["fastapi"] = original
+    return module
+
+
+class FakeResponse:
+    def __init__(self, body: bytes, content_type: str = "application/json") -> None:
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, limit: int = -1) -> bytes:
+        if limit < 0:
+            return self._body
+        return self._body[:limit]
 
 
 class FakeContext:
@@ -180,6 +246,17 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertTrue(event["attributes"]["network_indicator"])
         self.assertFalse(event["attributes"]["direct_ip"])
 
+    def test_browser_url_with_invalid_port_still_emits_telemetry_without_locator_hash(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        for url in ["https://example.invalid:notaport/path", "https://example.invalid:999999/path"]:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+            event = self.read_events()[-1]
+            self.assertIn(event["event_type"], {"agent.tool.requested", "agent.mcp.tool.requested"})
+            self.assertEqual(event["artifact"]["kind"], "url")
+            self.assertEqual(event["artifact"]["locator_hash"], None)
+            self.assertTrue(event["attributes"]["network_indicator"])
+
     def test_post_tool_call_omits_malware_and_prompt_injection_content_but_records_indicators(self):
         ctx = FakeContext()
         self.plugin.register(ctx)
@@ -272,17 +349,150 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         self.assertNotIn("os.system", text)
         self.assertNotIn("requests", text)
 
+    def test_dashboard_import_registers_routes_without_network(self):
+        with patch("urllib.request.urlopen") as urlopen, patch("urllib.request.build_opener") as build_opener:
+            module = load_dashboard_api()
+
+        urlopen.assert_not_called()
+        build_opener.assert_called_once()
+        self.assertEqual(
+            module.router.routes,
+            [("GET", "/risks", "risks"), ("GET", "/risks/{risk_id}", "risk_detail"), ("GET", "/status", "status")],
+        )
+
+    def test_dashboard_upstream_success_and_content_type_json_parsing(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        module._opener.open.return_value = FakeResponse(b'{"ok": true}', "application/json; charset=utf-8")
+
+        self.assertEqual(module._upstream("/api/status"), {"ok": True})
+        request = module._opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787/api/status")
+        self.assertEqual(request.get_method(), "GET")
+
+    def test_dashboard_upstream_bounds_response_and_rejects_invalid_json_or_content_type(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        cases = [
+            (FakeResponse(b"x" * (module._MAX_RESPONSE_BYTES + 1)), "upstream_response_too_large"),
+            (FakeResponse(b"{}", "text/plain"), "invalid_upstream_content_type"),
+            (FakeResponse(b"{not-json"), "invalid_upstream_json"),
+        ]
+        for response, detail in cases:
+            module._opener.open.reset_mock()
+            module._opener.open.return_value = response
+            with self.assertRaises(FakeHTTPException) as raised:
+                module._upstream("/api/status")
+            self.assertEqual(raised.exception.status_code, 502)
+            self.assertEqual(raised.exception.detail, detail)
+
+    def test_dashboard_upstream_errors_redirects_and_404_are_generic(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        for error in [TimeoutError("/private/path"), OSError("raw socket path"), module.urllib.error.URLError("body")]:
+            module._opener.open.side_effect = error
+            with self.assertRaises(FakeHTTPException) as raised:
+                module._upstream("/api/status")
+            self.assertEqual(raised.exception.status_code, 502)
+            self.assertEqual(raised.exception.detail, "upstream_unavailable")
+            self.assertNotIn("private", raised.exception.detail)
+
+        module._opener.open.side_effect = module.urllib.error.HTTPError(
+            "http://127.0.0.1:8787/api/v1/risks/missing", 404, "not found", {}, None
+        )
+        with self.assertRaises(FakeHTTPException) as raised:
+            module._upstream("/api/v1/risks/missing")
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(raised.exception.detail, "risk_not_found")
+
+        module._opener.open.side_effect = module.urllib.error.HTTPError(
+            "http://127.0.0.1:8787/api/status", 302, "redirect", {"Location": "http://169.254.169.254/"}, None
+        )
+        with self.assertRaises(FakeHTTPException) as raised:
+            module._upstream("/api/status")
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(raised.exception.detail, "upstream_unavailable")
+
+    def test_dashboard_validates_fixed_loopback_port_and_query_bounds(self):
+        module = load_dashboard_api()
+        for raw in ["not-a-port", "0", "65536", "8787;host=evil"]:
+            with patch.dict(os.environ, {"SKYNET_EDR_API_PORT": raw}):
+                self.assertEqual(module._port(), module._DEFAULT_PORT)
+        with patch.dict(os.environ, {"SKYNET_EDR_API_PORT": "8788"}):
+            self.assertEqual(module._port(), 8788)
+
+        with self.assertRaises(FakeHTTPException) as low:
+            module.risks(limit=0, offset=0)
+        self.assertEqual(low.exception.status_code, 400)
+        with self.assertRaises(FakeHTTPException) as high:
+            module.risks(limit=101, offset=0)
+        self.assertEqual(high.exception.detail, "bad_request")
+        with self.assertRaises(FakeHTTPException):
+            module.risks(limit=50, offset=10001)
+
+    def test_dashboard_risk_detail_encodes_opaque_id_path(self):
+        module = load_dashboard_api()
+        captured = []
+
+        def fake_upstream(path, query=None):
+            captured.append((path, query))
+            return {"ok": True}
+
+        setattr(module, "_upstream", fake_upstream)
+        self.assertEqual(module.risk_detail("inc:EDR-X:a/b?query#frag"), {"ok": True})
+        self.assertEqual(captured, [("/api/v1/risks/inc%3AEDR-X%3Aa%2Fb%3Fquery%23frag", None)])
+
     def test_desktop_plugin_is_parseable_read_only_disk_plugin(self):
         text = DESKTOP_PLUGIN_PATH.read_text()
 
-        self.assertIn("id: 'skynet-edr'", text)
-        self.assertIn("/skynet-edr/risks", text)
-        self.assertIn("ctx.rest('/risks", text)
-        self.assertIn("refetchInterval: 10000", text)
-        self.assertNotIn("dangerouslySetInnerHTML", text)
-        self.assertNotIn("<", text)
-        for forbidden in ["POST", "PUT", "PATCH", "DELETE", "sqlite", "child_process"]:
+        imports = dict(re.findall(r"import\s+(.*?)\s+from\s+['\"]([^'\"]+)['\"]", text, re.S))
+        self.assertEqual(set(imports.values()), {"react", "react/jsx-runtime", "@hermes/plugin-sdk"})
+        sdk_import = next(spec for names, spec in imports.items() if spec == "@hermes/plugin-sdk")
+        sdk_symbols = set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", next(names for names, spec in imports.items() if spec == sdk_import)))
+        self.assertEqual(
+            sdk_symbols,
+            {
+                "Badge",
+                "Button",
+                "EmptyState",
+                "ErrorState",
+                "PALETTE_AREA",
+                "ROUTES_AREA",
+                "SIDEBAR_NAV_AREA",
+                "ScrollArea",
+                "SearchField",
+                "Skeleton",
+                "fmtDateTime",
+                "host",
+                "useQuery",
+            },
+        )
+        self.assertIn("register(ctx)", text)
+        self.assertIn("ctx.registerMany", text)
+        self.assertIn("ROUTES_AREA", text)
+        self.assertIn("SIDEBAR_NAV_AREA", text)
+        self.assertIn("PALETTE_AREA", text)
+        self.assertIn("host.navigate('/skynet-edr/risks')", text)
+        self.assertIn("refetchInterval: POLL_MS", text)
+        for forbidden in [
+            "definePlugin",
+            "activate(",
+            "registerRoute",
+            "registerSidebarItem",
+            "registerCommand",
+            "ctx.navigate",
+            "dangerouslySetInnerHTML",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "sqlite",
+            "child_process",
+        ]:
             self.assertNotIn(forbidden, text)
+
+        check = subprocess.run(["node", "--check", str(DESKTOP_PLUGIN_PATH)], capture_output=True, text=True, check=False)
+        self.assertEqual(check.returncode, 0, check.stderr)
 
 
 if __name__ == "__main__":

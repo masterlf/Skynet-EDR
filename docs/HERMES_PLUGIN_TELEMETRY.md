@@ -68,11 +68,11 @@ The v0.4 plugin registers:
 
 ## Risk Explorer boundaries
 
-The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, and optional `GET /status` under Hermes' plugin API mount. It proxies to the fixed loopback Skynet-EDR listener at `127.0.0.1:8787` unless `SKYNET_EDR_API_PORT` is set to a valid numeric port. It has no SQLite access, shell/subprocess use, caller-controlled upstream URL, or mutation route.
+The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, and optional `GET /status` under Hermes' plugin API mount. It proxies to the fixed loopback Skynet-EDR listener at `127.0.0.1:8787` unless `SKYNET_EDR_API_PORT` is set to a valid numeric port. It denies redirects, maps upstream 404 risk detail misses to generic `risk_not_found`, and has no SQLite access, shell/subprocess use, caller-controlled upstream URL, or mutation route.
 
 The Desktop plugin is a read-only UI client for `/skynet-edr/risks`. It uses the backend `ctx.rest('/risks?...')` and `ctx.rest('/risks/<encoded-id>')`, polls no faster than every 10 seconds, renders text only, and does not auto-link URLs or render HTML.
 
-Telemetry events now include optional safe artifact metadata when derivable. Labels are fixed/coarse (`URL content`, `File content`, `Terminal output`), provider values are allowlisted, and locator hashes are computed only from isolated safe locators such as URLs without credentials/query/fragment. Command text, prompts, message bodies, full URLs, repository names, local paths, and secrets are not stored as artifact labels.
+Telemetry events now include optional safe artifact metadata when derivable. Labels are fixed/coarse (`URL content`, `File content`, `Terminal output`), provider values are allowlisted, and locator hashes are computed only from isolated safe locators such as URLs without credentials/query/fragment. Invalid URL ports suppress only the locator hash; the passive telemetry event is still emitted. Command text, prompts, message bodies, full URLs, repository names, local paths, and secrets are not stored as artifact labels. During ingestion, `attributes.artifact` is a reserved synthetic key: only the validated top-level artifact may populate stored artifact metadata.
 
 ## Default user-local outputs
 

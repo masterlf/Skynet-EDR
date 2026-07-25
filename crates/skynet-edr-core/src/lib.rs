@@ -594,6 +594,7 @@ fn trim_line_bytes(segment: &[u8]) -> &[u8] {
 
 fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {
     let mut attributes = event.attributes;
+    attributes.remove("artifact");
     attributes.insert(
         "schema_version".to_owned(),
         serde_json::json!("skynet.event.v0"),

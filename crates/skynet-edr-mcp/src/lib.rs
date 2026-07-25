@@ -6,7 +6,10 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use skynet_edr_core::{Event, Incident, LocalStore, ProductInfo, StorageError};
+use skynet_edr_core::{
+    ArtifactKind, ArtifactProvenance, Event, Incident, LocalStore, ProductInfo, StorageError,
+    TrustLevel,
+};
 
 const RISK_SCHEMA_VERSION: &str = "skynet.risk.v1";
 
@@ -368,7 +371,7 @@ fn event_rule_id(event: &Event) -> Option<String> {
         .attributes
         .get("rule_id")
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        .and_then(safe_identifier)
 }
 
 fn risk_item(incident: &Incident) -> Value {
@@ -378,10 +381,13 @@ fn risk_item(incident: &Incident) -> Value {
         "confidence": Value::Null,
         "status": enum_label(incident.status),
         "rule_id": incident.events.iter().find_map(event_rule_id),
-        "title": incident.title,
-        "summary": incident.summary,
+        "title": operator_text(&incident.title, 200, "untitled incident"),
+        "summary": operator_text(&incident.summary, 500, ""),
         "sensor": sensor_projection(&incident.source),
-        "artifact": incident.events.first().map_or_else(|| unknown_artifact(None), event_artifact),
+        "artifact": incident.events.iter().find_map(valid_event_artifact).unwrap_or_else(|| {
+            let trust = incident.events.iter().find_map(event_trust_level);
+            unknown_artifact(trust)
+        }),
         "first_observed_at_unix_ms": incident.created_at_unix_ms,
         "last_observed_at_unix_ms": incident.updated_at_unix_ms,
         "event_count": incident.events.len(),
@@ -394,39 +400,62 @@ fn risk_item(incident: &Incident) -> Value {
 fn sensor_projection(source: &skynet_edr_core::EventSource) -> Value {
     json!({
         "kind": enum_label(source.kind),
-        "sensor": source.sensor,
-        "integration": source.integration,
+        "sensor": safe_identifier(&source.sensor).unwrap_or_else(|| "unknown".to_owned()),
+        "integration": source.integration.as_deref().and_then(safe_identifier),
     })
 }
 
 fn event_artifact(event: &Event) -> Value {
-    event.attributes.get("artifact").map_or_else(
-        || {
-            let trust = event.attributes.get("trust_level").and_then(Value::as_str);
-            unknown_artifact(trust)
-        },
-        |artifact| {
-            json!({
-                "kind": artifact.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
-                "provider": artifact.get("provider").cloned().unwrap_or(Value::Null),
-                "display_label": artifact
-                    .get("display_label")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unclassified artifact"),
-                "locator_hash": artifact.get("locator_hash").cloned().unwrap_or(Value::Null),
-                "trust_level": artifact.get("trust_level").cloned().unwrap_or(Value::Null),
-            })
-        },
-    )
+    valid_event_artifact(event).unwrap_or_else(|| unknown_artifact(event_trust_level(event)))
 }
 
-fn unknown_artifact(trust_level: Option<&str>) -> Value {
+fn valid_event_artifact(event: &Event) -> Option<Value> {
+    let artifact = event.attributes.get("artifact")?;
+    let artifact = serde_json::from_value::<ArtifactProvenance>(artifact.clone()).ok()?;
+    if artifact
+        .locator_hash
+        .as_deref()
+        .is_some_and(|hash| !valid_locator_hash(hash))
+    {
+        return None;
+    }
+    Some(json!({
+        "kind": enum_label(artifact.kind),
+        "provider": artifact.provider.as_deref().and_then(safe_identifier),
+        "display_label": artifact_label(artifact.kind),
+        "locator_hash": artifact.locator_hash,
+        "trust_level": enum_label(artifact.trust_level),
+    }))
+}
+
+fn artifact_label(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Email => "Email content",
+        ArtifactKind::Url => "URL content",
+        ArtifactKind::GitRepository => "Git repository",
+        ArtifactKind::Code => "Code content",
+        ArtifactKind::File => "File content",
+        ArtifactKind::Message => "Message content",
+        ArtifactKind::Mcp => "MCP content",
+        ArtifactKind::Terminal => "Terminal output",
+        ArtifactKind::Unknown => "Unclassified artifact",
+    }
+}
+
+fn event_trust_level(event: &Event) -> Option<TrustLevel> {
+    event
+        .attributes
+        .get("trust_level")
+        .and_then(|value| serde_json::from_value::<TrustLevel>(value.clone()).ok())
+}
+
+fn unknown_artifact(trust_level: Option<TrustLevel>) -> Value {
     json!({
         "kind": "unknown",
         "provider": Value::Null,
         "display_label": "Unclassified artifact",
         "locator_hash": Value::Null,
-        "trust_level": trust_level,
+        "trust_level": trust_level.map(enum_label),
     })
 }
 
@@ -441,8 +470,11 @@ fn trace_ids(incident: &Incident) -> Value {
         else {
             continue;
         };
-        if !traces.iter().any(|seen| seen == trace) {
-            traces.push(trace.to_owned());
+        let Some(trace) = safe_identifier(trace) else {
+            continue;
+        };
+        if !traces.iter().any(|seen| seen == &trace) {
+            traces.push(trace);
         }
         if traces.len() == 10 {
             break;
@@ -461,11 +493,11 @@ fn risk_evidence(incident: &Incident) -> Vec<Value> {
                 "event_id": event.id.as_str(),
                 "timestamp_unix_ms": event.observed_at_unix_ms,
                 "severity": enum_label(event.severity),
-                "event_type": event.attributes.get("event_type").and_then(Value::as_str),
-                "title": event.title,
+                "event_type": event.attributes.get("event_type").and_then(Value::as_str).and_then(safe_identifier),
+                "title": operator_text(&event.title, 200, "untitled event"),
                 "sensor": sensor_projection(&event.source),
                 "artifact": event_artifact(event),
-                "trust_level": event.attributes.get("trust_level").and_then(Value::as_str),
+                "trust_level": event_trust_level(event).map(enum_label),
                 "rule_id": event_rule_id(event),
                 "redaction": {
                     "contains_sensitive_data": event.redaction.contains_sensitive_data,
@@ -478,27 +510,116 @@ fn risk_evidence(incident: &Incident) -> Vec<Value> {
 }
 
 fn event_indicators(event: &Event) -> Value {
-    let keys = [
+    let bool_keys = [
         "network_indicator",
         "direct_ip",
         "delivery_indicator",
         "sensitive_access",
         "prompt_injection_indicator",
         "malware_indicator",
-        "command_class",
         "content_omitted",
         "result_omitted",
         "instruction_authority",
-        "expected_disposition",
-        "drift_kind",
     ];
+    let string_keys = ["command_class", "expected_disposition", "drift_kind"];
     let mut indicators = serde_json::Map::new();
-    for key in keys {
-        if let Some(value) = event.attributes.get(key) {
-            indicators.insert(key.to_owned(), value.clone());
+    for key in bool_keys {
+        if let Some(value) = event.attributes.get(key).and_then(Value::as_bool) {
+            indicators.insert(key.to_owned(), json!(value));
+        }
+    }
+    for key in string_keys {
+        if let Some(value) = event
+            .attributes
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| allowed_indicator_value(key, value))
+        {
+            indicators.insert(key.to_owned(), json!(value));
         }
     }
     Value::Object(indicators)
+}
+
+fn allowed_indicator_value(key: &str, value: &str) -> bool {
+    match key {
+        "command_class" => matches!(
+            value,
+            "network_egress" | "file_read" | "code_execution" | "other"
+        ),
+        "expected_disposition" => {
+            matches!(value, "benign" | "suspicious" | "malicious" | "unknown")
+        }
+        "drift_kind" => matches!(value, "changed" | "created" | "deleted"),
+        _ => false,
+    }
+}
+
+fn operator_text(value: &str, max_chars: usize, fallback: &str) -> String {
+    if value
+        .to_ascii_lowercase()
+        .contains("ignore previous instructions")
+    {
+        return fallback.to_owned();
+    }
+    let cleaned = value
+        .chars()
+        .filter(|character| !is_stripped_text_char(*character))
+        .collect::<String>();
+    let trimmed = cleaned
+        .split_whitespace()
+        .filter(|token| !token.contains('/') && !token.contains('\\'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let source = if trimmed.is_empty() {
+        fallback
+    } else {
+        &trimmed
+    };
+    let mut output = source.chars().take(max_chars).collect::<String>();
+    if source.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
+}
+
+fn is_stripped_text_char(character: char) -> bool {
+    character == '\0'
+        || character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+fn safe_identifier(value: &str) -> Option<String> {
+    const MAX_IDENTIFIER_CHARS: usize = 128;
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_IDENTIFIER_CHARS {
+        return None;
+    }
+    if trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-'))
+    {
+        Some(trimmed.to_owned())
+    } else {
+        None
+    }
+}
+
+fn valid_locator_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn enum_label<T: Serialize>(value: T) -> String {

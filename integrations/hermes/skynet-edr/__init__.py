@@ -517,8 +517,12 @@ def _safe_url_locator(params: Any, params_text: str) -> str | None:
             continue
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             continue
+        try:
+            parsed_port = parsed.port
+        except ValueError:
+            continue
         host = parsed.hostname.lower()
-        port = f":{parsed.port}" if parsed.port is not None else ""
+        port = f":{parsed_port}" if parsed_port is not None else ""
         return f"{parsed.scheme}://{host}{port}{parsed.path or '/'}"
     return None
 

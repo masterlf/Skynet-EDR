@@ -27,15 +27,17 @@ This API is an operator visibility interface, not a control plane.
 | `/api/sensors` | `GET` | Available sensor metadata. |
 | `/api/config-drift` | `GET` | Redacted config drift findings. |
 | `/api/v1/risks?limit=<n>&offset=<n>` | `GET` | Bounded Hermes/Desktop risk list projection. |
-| `/api/v1/risks/<id>` | `GET` | One risk detail with allowlisted evidence only. |
+| `/api/v1/risks/<id>` | `GET` | One risk detail with allowlisted evidence only. The `<id>` path segment is split while still encoded, then percent-decoded once as opaque incident-id data. |
 
 ## Risk API v1
 
 Risk responses use `schema_version: skynet.risk.v1` and always include `read_only: true`. Pagination defaults are `limit=50` and `offset=0`; `limit` is constrained to `1..=100` and `offset` to `0..=10000`. Malformed, duplicate, unknown, or out-of-range query parameters return structured `400 bad_request` with `read_only: true`.
 
+Risk detail IDs are bounded before and after decoding (`<=768` encoded bytes and `<=256` decoded Unicode scalar values). Malformed percent escapes and invalid UTF-8 return structured `400 bad_request`. Encoded `/`, `?`, `#`, unicode, and `:` are accepted only as opaque ID data after route selection; they are never interpreted as route separators or filesystem paths.
+
 The MVP pages an in-memory list of already-redacted incidents, sorted newest updated first. This is acceptable for the current local/loopback scope; storage-level pagination can replace it later without changing the route contract.
 
-Risk detail evidence is an allowlisted projection: event id, timestamp, severity, event type, short title, sensor, explicit artifact metadata or conservative unknown artifact fallback, trust level, rule id, redaction count, and known boolean/enum triage indicators. It does not expose arbitrary attributes, raw details, message/email bodies, prompt text, command text, raw URLs, repository locators, local paths, credentials, or hostile content.
+Risk detail evidence is an allowlisted projection: event id, timestamp, severity, event type, short bounded title, sensor, explicit typed artifact metadata or conservative unknown artifact fallback, trust level, rule id, redaction count, and known boolean/enum triage indicators. Operator text strips control/bidi characters and private path-like tokens before bounding. Artifact labels are recomputed from fixed `ArtifactKind` constants; stored `display_label` is not trusted. Provider, locator hash, trust level, event type, rule id, sensor, integration, and trace IDs are validated before exposure. It does not expose arbitrary attributes, raw details, message/email bodies, prompt text, command text, raw URLs, repository locators, local paths, credentials, or hostile content.
 
 ## Console routes
 
