@@ -1,6 +1,6 @@
 # Skynet-EDR documentation
 
-This is the v0.2 documentation map for Skynet-EDR: an AI-agent Detection and Response system focused on prompt-injection-aware runtime telemetry, tool/MCP abuse, secret access, automation, and egress correlation.
+This is the documentation map for Skynet-EDR: an AI-agent Detection and Response system focused on prompt-injection-aware runtime telemetry, tool/MCP abuse, secret access, automation, and egress correlation.
 
 The docs are intentionally split by operator journey. Start with the shortest path that matches what you need; the deeper design docs remain linked instead of copied around like documentation confetti. Very elegant, very un-French bureaucracy.
 
@@ -28,7 +28,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 ### Product and security model
 
-- [Concepts](CONCEPTS.md) defines the product model, current scope, non-goals, and v0.2 vocabulary.
+- [Concepts](CONCEPTS.md) defines the product model, current scope, non-goals, and v0.4 vocabulary.
 - [Project goals](GOALS.md) records mission, non-goals, milestones, and success criteria.
 - [Threat model](THREAT_MODEL.md) defines assets, trust boundaries, initial threats, assumptions, and response philosophy.
 - [Quality and security engineering](QUALITY_AND_SECURITY_ENGINEERING.md) defines the engineering baseline for secure development.
@@ -38,6 +38,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 - [Architecture](ARCHITECTURE.md) describes components, deployment modes, and the MVP recommendation.
 - [Rust workspace](WORKSPACE.md) documents crates and development commands.
+- [Current roadmap](ROADMAP.md) is the authoritative milestone and release-positioning map.
 - [Implementation plan](IMPLEMENTATION_PLAN.md) is the long-form roadmap and historical design record. Treat it as background, not the front door.
 - [Local storage and CLI](LOCAL_STORAGE.md) documents SQLite storage and event/incident commands.
 - [Local read-only HTTP API and console](LOCAL_HTTP_API.md) documents localhost visibility routes.
@@ -46,7 +47,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 - [Canonical event schema](EVENT_SCHEMA.md) is the source of truth for `skynet.event.v0` event envelopes.
 - [Integrations](INTEGRATIONS.md) is the integration index for Hermes, OpenClaw, MCP visibility, and local HTTP surfaces.
-- [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.3 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
+- [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.4 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
 - [Hermes event ingestion](HERMES_EVENT_INGESTION.md) documents supported Hermes trace shapes and normalization.
 - [OpenClaw integration](OPENCLAW_INTEGRATION.md) documents MVP adapter requirements.
 - [Read-only MCP integration](MCP_READ_ONLY.md) documents safe MCP visibility tools.
@@ -64,7 +65,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 Current event schema: `skynet.event.v0`.
 
-Current documentation structure target: v0.2. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. If a page blurs that line, fix the page before building on it.
+Current documentation structure target: v0.4. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. If a page blurs that line, fix the page before building on it.
 
 ## Documentation checks
 
@@ -74,4 +75,4 @@ Run the local documentation gate with:
 python3 packaging/scripts/check-docs.py
 ```
 
-The check validates required v0.2 documentation entry points and local Markdown links. It intentionally does not crawl external links; release notes and security documentation should not depend on network luck. Mai pen rai, but deterministic.
+The check validates required documentation entry points and local Markdown links. It intentionally does not crawl external links; release notes and security documentation should not depend on network luck. Mai pen rai, but deterministic.

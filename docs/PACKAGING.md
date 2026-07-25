@@ -101,21 +101,17 @@ Do not grant broad read access to AI-agent secrets as a packaging shortcut. Use 
 For each release tag:
 
 ```text
-skynet-edr_VERSION_linux_amd64.deb
-skynet-edr_VERSION_linux_x86_64.rpm
-skynet-edr_VERSION_linux_x86_64.pkg.tar.zst
-skynet-edr_VERSION_linux_x86_64.tar.gz
+skynet-edr_VERSION_amd64.deb
+skynet-edr-VERSION-1.x86_64.rpm
+skynet-edr-VERSION-1-x86_64.pkg.tar.zst
+skynet-edr-VERSION-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
-checksums.txt.sig
-SBOM.spdx.json
-SBOM.cyclonedx.json
-release-notes.md
-upgrade-notes.md
-rollback-notes.md
 ```
 
 Later production releases should add:
 
+- signed checksum manifests,
+- SPDX and CycloneDX SBOMs,
 - cosign signatures,
 - SLSA/in-toto provenance,
 - signed APT repository metadata,
@@ -173,6 +169,13 @@ tar -tf dist/skynet-edr.pkg.tar.zst
 ```
 
 Smoke tests should eventually run in clean Ubuntu/Debian/Fedora/Arch containers or VMs. Do not call a package production-ready without install/upgrade/remove tests.
+
+The current release workflow runs `packaging/scripts/smoke-install-artifacts.sh`
+after artifact inspection. It executes the `.deb` and custom tarball in clean
+Ubuntu containers, including remove/purge behavior, and keeps RPM/Arch coverage
+to checksum/content validation until distro-native runtime environments are part
+of CI. This is deliberately narrower than pretending a foreign host has proven
+all package managers equally.
 
 ## Maintainer script rules
 

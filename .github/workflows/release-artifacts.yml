@@ -5,27 +5,23 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: "Existing GitHub Release tag to attach package assets to (for example v0.3.0). Leave empty for artifact-only build."
-        required: false
-        type: string
       package_ref:
-        description: "Git ref/SHA to build. Defaults to the workflow ref; for releases use the release tag."
+        description: "Git ref/SHA to build. Defaults to the workflow ref."
         required: false
         type: string
-  release:
-    types: [published]
 permissions:
-  contents: write
-  packages: write
+  contents: read
 jobs:
   linux-packages:
     name: Build Linux package artifacts
     runs-on: ubuntu-latest
+    env:
+      NFPM_VERSION: v2.46.3
+      NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ inputs.package_ref || github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.package_ref || github.ref }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -36,15 +32,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends rpm zstd
-      - name: Install nfpm
-        env:
-          NFPM_VERSION: 2.46.3
+      - name: Install nFPM
         run: |
-          curl -L --fail --proto '=https' --tlsv1.2 \
-            -o /tmp/nfpm.tar.gz \
-            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
-          tar -C /tmp -xzf /tmp/nfpm.tar.gz nfpm
-          sudo install -m 0755 /tmp/nfpm /usr/local/bin/nfpm
+          archive="nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/${archive}"
+          printf '%s  %s\n' "${NFPM_SHA256}" "${archive}" | sha256sum -c -
+          tar -xzf "${archive}" nfpm
+          sudo install -m 0755 nfpm /usr/local/bin/nfpm
           nfpm --version
       - name: Validate packaging baseline
         run: packaging/scripts/validate-packaging.sh
@@ -55,6 +49,8 @@ jobs:
           packaging/scripts/build-packages.sh
       - name: Inspect package contents
         run: packaging/scripts/inspect-artifacts.sh dist
+      - name: Smoke DEB/tarball in clean containers and validate RPM/Arch
+        run: packaging/scripts/smoke-install-artifacts.sh dist
       - name: Upload package artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -66,46 +62,3 @@ jobs:
             dist/*.pkg.tar.zst
             dist/checksums.txt
           if-no-files-found: error
-      - name: Install ORAS
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-        env:
-          ORAS_VERSION: 1.2.3
-        run: |
-          curl -L --fail --proto '=https' --tlsv1.2 \
-            -o /tmp/oras.tar.gz \
-            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
-          tar -C /tmp -xzf /tmp/oras.tar.gz oras
-          sudo install -m 0755 /tmp/oras /usr/local/bin/oras
-          oras version
-      - name: Upload package assets to GitHub Release
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-        run: |
-          gh release upload "$RELEASE_TAG" \
-            dist/*.tar.gz \
-            dist/*.deb \
-            dist/*.rpm \
-            dist/*.pkg.tar.zst \
-            dist/checksums.txt \
-            --clobber
-      - name: Publish package bundle to GitHub Packages
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/skynet-edr-packages
-        run: |
-          echo "$GH_TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-          oras push "$IMAGE:$RELEASE_TAG" \
-            --artifact-type application/vnd.skynet-edr.linux-packages.v1 \
-            --annotation "org.opencontainers.image.title=Skynet-EDR Linux package bundle" \
-            --annotation "org.opencontainers.image.description=Skynet-EDR Linux package artifacts for $RELEASE_TAG" \
-            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --annotation "org.opencontainers.image.version=$RELEASE_TAG" \
-            dist/checksums.txt \
-            dist/*.tar.gz \
-            dist/*.deb \
-            dist/*.rpm \
-            dist/*.pkg.tar.zst

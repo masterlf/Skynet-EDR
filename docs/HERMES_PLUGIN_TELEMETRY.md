@@ -1,12 +1,12 @@
 # Hermes Plugin Telemetry
 
-Skynet-EDR v0.3 ships a passive Hermes Agent plugin. The plugin is the preferred
+Skynet-EDR v0.4 ships a passive Hermes Agent plugin. The plugin is the preferred
 non-invasive live telemetry path for Hermes hosts.
 
 ## Positioning
 
 The plugin is a sensor, not an inline control point. It does not block, approve,
-rewrite, or delay Hermes actions in v0.3. Blocking/policy enforcement remains a
+rewrite, or delay Hermes actions in v0.4. Blocking/policy enforcement remains a
 future guard-mode feature.
 
 ```text
@@ -52,7 +52,7 @@ hermes plugins enable skynet-edr
 
 ## Hooks
 
-The v0.3 plugin registers:
+The v0.4 plugin registers:
 
 | Hook | Purpose |
 |---|---|
@@ -95,11 +95,18 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 
 ## Detection limits
 
-The v0.3 plugin records indicators, not verdicts. `network_indicator` catches
-common direct egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and
-`ncat`. It does not yet fully classify indirect egress inside arbitrary Python,
-SDK, cloud-client, `scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed
-network indicators as a coverage limitation, not proof of safety.
+The v0.4 plugin records indicators, not verdicts. `network_indicator` catches
+common egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and `ncat`.
+For those recognized network operations, the plugin sets `direct_ip=true` when
+it validates an explicit IPv4 destination host in an HTTP(S) URL, `/dev/tcp`, or
+a simple `curl`, `wget`, `nc`, or `ncat` invocation, then emits
+`agent.network.egress`; an IPv4 literal elsewhere in a URL path or payload does
+not qualify. Generic network egress is not enough for `EDR-NET-001`. Unknown tool names are classified
+as MCP tools and emit `agent.mcp.tool.requested`, allowing `EDR-MCP-001` to consume
+the packaged telemetry. The plugin does not yet fully classify IPv6 literals or
+indirect egress inside arbitrary Python, SDK, cloud-client,
+`scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed network indicators
+as a coverage limitation, not proof of safety.
 
 ## Manual ingestion
 
@@ -137,7 +144,7 @@ checkpoint = "/var/lib/skynet-edr/hermes-plugin.offset"
 - Events are canonical `skynet.event.v0` records and are treated as hostile input
   by Skynet-EDR ingestion.
 
-## v0.4 direction
+## Future guard-mode direction
 
 A later guard-mode plugin can use `pre_tool_call` as an optional policy decision
 point:
@@ -146,4 +153,4 @@ point:
 allow / warn / require approval / deny
 ```
 
-That is intentionally out of scope for v0.3.
+That is intentionally out of scope for the passive v0.3 and v0.4 milestones.

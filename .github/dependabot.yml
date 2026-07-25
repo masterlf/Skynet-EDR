@@ -8,6 +8,11 @@ updates:
       time: "06:00"
       timezone: "Europe/Sofia"
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+      semver-major-days: 21
+      semver-minor-days: 7
+      semver-patch-days: 3
     labels:
       - "dependencies"
       - "rust"
@@ -23,24 +28,14 @@ updates:
       time: "06:15"
       timezone: "Europe/Sofia"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 21
+      semver-minor-days: 7
+      semver-patch-days: 3
     labels:
       - "dependencies"
       - "github-actions"
-    commit-message:
-      prefix: "deps"
-      include: "scope"
-
-  - package-ecosystem: "pip"
-    directory: "/integrations/hermes/python"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:30"
-      timezone: "Europe/Sofia"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "python"
     commit-message:
       prefix: "deps"
       include: "scope"

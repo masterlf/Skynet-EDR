@@ -7,8 +7,6 @@ on:
         description: "Optional package version override; defaults to Cargo package version"
         required: false
         type: string
-  release:
-    types: [published]
   push:
     tags:
       - "v*"
@@ -80,6 +78,9 @@ jobs:
       - name: Inspect package contents and generate checksums
         run: packaging/scripts/inspect-artifacts.sh dist
 
+      - name: Smoke DEB/tarball in clean containers and validate RPM/Arch
+        run: packaging/scripts/smoke-install-artifacts.sh dist
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -99,102 +100,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > dist/release-notes.md <<'NOTES'
-          # Skynet-EDR passive Linux-first MVP
-
-          This is the first installable MVP release of Skynet-EDR.
-
-          ## What works
-          - Installable Linux `amd64` packages: Debian/Ubuntu `.deb`, RPM, Arch `.pkg.tar.zst`, and custom tarball.
-          - Passive daemon service path: `skynet-edr-daemon run --config /etc/skynet-edr/config.toml`.
-          - Local CLI storage: initialize SQLite store, ingest events, list/show/export events and incidents.
-          - Hermes/AI-agent trace ingestion with redaction.
-          - MVP correlation rule `EDR-EXFIL-001`: secret/sensitive file access followed by network egress opens a critical incident.
-          - Read-only local API/MCP visibility surfaces.
-
-          ## Install quickly
-          Download the package for your distribution and `checksums.txt`, then verify:
-
-          ```bash
-          sha256sum -c checksums.txt --ignore-missing
-          ```
-
-          Debian/Ubuntu/Mint:
-
-          ```bash
-          sudo apt install ./skynet-edr_0.1.0_amd64.deb
-          skynet-edr --version
-          skynet-edr-daemon status
-          ```
-
-          RHEL/Fedora-compatible:
-
-          ```bash
-          sudo dnf install ./skynet-edr-0.1.0-1.x86_64.rpm
-          ```
-
-          Arch:
-
-          ```bash
-          sudo pacman -U ./skynet-edr-0.1.0-1-x86_64.pkg.tar.zst
-          ```
-
-          Tarball:
-
-          ```bash
-          tar -xzf skynet-edr-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-          cd skynet-edr-0.1.0-x86_64-unknown-linux-gnu
-          sha256sum -c SHA256SUMS
-          sudo ./install.sh
-          ```
-
-          ## Important maturity note
-          This is an MVP/pre-production security tool. It is passive-first and does not yet claim full production EDR coverage, privileged kernel/eBPF sensors, signed packages, SBOMs, or distro repositories. The packages are usable for evaluation/lab deployment and initial passive testing.
-          NOTES
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" \
-              dist/*.tar.gz \
-              dist/*.deb \
-              dist/*.rpm \
-              dist/*.pkg.tar.zst \
-              dist/checksums.txt \
-              --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              dist/*.tar.gz \
-              dist/*.deb \
-              dist/*.rpm \
-              dist/*.pkg.tar.zst \
-              dist/checksums.txt \
-              --title "Skynet-EDR ${GITHUB_REF_NAME} — passive Linux-first MVP" \
-              --notes-file dist/release-notes.md \
-              --prerelease \
-              --verify-tag
+          NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$NOTES_FILE" ]; then
+            echo "missing reviewed release notes: $NOTES_FILE" >&2
+            exit 1
           fi
-
-  attach-release-assets:
-    name: Attach packages to GitHub release
-    if: github.event_name == 'release'
-    needs: package
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - name: Download package artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: skynet-edr-linux-amd64-packages
-          path: dist
-
-      - name: Attach artifacts to GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          cp "$NOTES_FILE" dist/release-notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release already exists; refusing to replace published assets: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
             dist/*.tar.gz \
             dist/*.deb \
             dist/*.rpm \
             dist/*.pkg.tar.zst \
             dist/checksums.txt \
-            --clobber
+            --title "Skynet-EDR ${GITHUB_REF_NAME} — reliable passive detection" \
+            --notes-file dist/release-notes.md \
+            --prerelease \
+            --verify-tag

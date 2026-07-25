@@ -2,7 +2,7 @@
 
 use std::{fs, path::PathBuf};
 
-use skynet_edr_core::{ingest_canonical_jsonl_spool, LocalStore};
+use skynet_edr_core::{ingest_canonical_jsonl_spool, LocalStore, Severity};
 
 const CANONICAL_EVENT: &str = include_str!("fixtures/canonical_event_v0.json");
 
@@ -24,6 +24,41 @@ fn variant_event(id: &str, title: &str) -> String {
     value["event_id"] = serde_json::json!(id);
     value["title"] = serde_json::json!(title);
     serde_json::to_string(&value).expect("variant serializes")
+}
+
+fn plugin_sequence_event(
+    id: &str,
+    event_type: &str,
+    observed_at_unix_ms: u64,
+    trust_level: &str,
+    severity: &str,
+    trace_id: &str,
+    attributes: &serde_json::Value,
+) -> String {
+    serde_json::json!({
+        "schema_version": "skynet.event.v0",
+        "event_id": id,
+        "event_type": event_type,
+        "observed_at_unix_ms": observed_at_unix_ms,
+        "received_at_unix_ms": observed_at_unix_ms,
+        "severity": severity,
+        "source": {"kind": "sensor", "sensor": "skynet-edr-hermes-plugin", "integration": "hermes"},
+        "provenance": {
+            "producer": "hermes-agent",
+            "collector": "skynet-edr-hermes-plugin",
+            "tenant": "local-hermes",
+            "source_event_id": id,
+            "trace_id": trace_id,
+            "span_id": id,
+            "parent_span_id": null
+        },
+        "trust_level": trust_level,
+        "title": "plugin-shaped canonical event",
+        "details": null,
+        "attributes": attributes,
+        "redaction": {"contains_sensitive_data": false, "redacted_fields": []}
+    })
+    .to_string()
 }
 
 #[test]
@@ -162,6 +197,204 @@ fn live_spool_ingestion_resets_stale_checkpoint_after_spool_truncation() {
         fs::read_to_string(&checkpoint_path).expect("checkpoint exists"),
         summary.last_processed_byte.to_string()
     );
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
+
+#[test]
+fn live_spool_ingestion_opens_built_in_incident_for_cross_line_trace_sequence_once() {
+    let db_path = temp_path("sequence-incident.sqlite");
+    let spool_path = temp_path("sequence-incident.jsonl");
+    let checkpoint_path = temp_path("sequence-incident.offset");
+    let prompt = plugin_sequence_event(
+        "evt_spool_pi",
+        "agent.content.ingested",
+        1_781_560_000_000,
+        "untrusted_content",
+        "medium",
+        "trace_spool_sensitive",
+        &serde_json::json!({
+            "instruction_authority": false,
+            "contains_instructional_attack": true
+        }),
+    );
+    let tool = plugin_sequence_event(
+        "evt_spool_terminal",
+        "agent.tool.requested",
+        1_781_560_001_000,
+        "agent_action",
+        "high",
+        "trace_spool_sensitive",
+        &serde_json::json!({
+            "tool_name": "terminal",
+            "network_indicator": true,
+            "delivery_indicator": false,
+            "sensitive_access": true,
+            "params_preview": "[REDACTED:secret]"
+        }),
+    );
+    fs::write(&spool_path, format!("{prompt}\n{tool}\n")).expect("spool is written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let summary = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("sequence spool ingests");
+
+    assert_eq!(summary.ingested_events, 2);
+    assert_eq!(summary.opened_incidents, 1);
+    let incidents = store.list_incidents().expect("incident list succeeds");
+    assert_eq!(incidents.len(), 1);
+    assert_eq!(incidents[0].severity, Severity::High);
+    assert!(incidents[0].id.as_str().starts_with("inc:EDR-PI-001:"));
+    assert!(!incidents[0].id.as_str().contains("evt_spool_pi"));
+    assert!(!incidents[0].id.as_str().contains("evt_spool_terminal"));
+    assert!(!incidents[0].title.contains("trace_spool_sensitive"));
+    assert!(!incidents[0].summary.contains("trace_spool_sensitive"));
+    assert!(!incidents[0].summary.contains("evt_spool_pi"));
+
+    let replay = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("duplicate polling is safe");
+    assert_eq!(replay.ingested_events, 0);
+    assert_eq!(replay.opened_incidents, 0);
+    assert_eq!(
+        store
+            .list_incidents()
+            .expect("incident list succeeds")
+            .len(),
+        1
+    );
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
+
+#[test]
+fn live_spool_ingestion_does_not_checkpoint_sequence_events_before_incidents_persist() {
+    let db_path = temp_path("incident-failure.sqlite");
+    let spool_path = temp_path("incident-failure.jsonl");
+    let checkpoint_path = temp_path("incident-failure.offset");
+    let prompt = plugin_sequence_event(
+        "evt_spool_replay_pi",
+        "agent.content.ingested",
+        1_781_560_000_000,
+        "untrusted_content",
+        "medium",
+        "trace_spool_replay",
+        &serde_json::json!({
+            "instruction_authority": false,
+            "contains_instructional_attack": true
+        }),
+    );
+    let tool = plugin_sequence_event(
+        "evt_spool_replay_terminal",
+        "agent.tool.requested",
+        1_781_560_001_000,
+        "agent_action",
+        "high",
+        "trace_spool_replay",
+        &serde_json::json!({
+            "tool_name": "terminal",
+            "network_indicator": true,
+            "delivery_indicator": false,
+            "sensitive_access": true,
+            "params_preview": "[REDACTED:secret]"
+        }),
+    );
+    fs::write(&spool_path, format!("{prompt}\n{tool}\n")).expect("spool is written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let trigger_connection =
+        rusqlite::Connection::open(&db_path).expect("trigger connection opens");
+    trigger_connection
+        .execute_batch(
+            "CREATE TRIGGER fail_incident_insert
+             BEFORE INSERT ON incidents
+             BEGIN
+                SELECT RAISE(FAIL, 'forced incident persistence failure');
+             END;",
+        )
+        .expect("failure trigger installs");
+
+    let failed = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect_err("incident persistence failure is surfaced");
+    assert!(failed
+        .to_string()
+        .contains("forced incident persistence failure"));
+    assert!(
+        fs::read_to_string(&checkpoint_path).is_err(),
+        "checkpoint must not advance before sequence incidents persist"
+    );
+    assert_eq!(store.list_events().expect("events list").len(), 2);
+    assert!(store
+        .list_incidents()
+        .expect("incident list succeeds")
+        .is_empty());
+
+    trigger_connection
+        .execute_batch("DROP TRIGGER fail_incident_insert;")
+        .expect("failure trigger drops");
+    drop(trigger_connection);
+    let replay = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("replay from unadvanced checkpoint evaluates duplicate sequence");
+
+    assert_eq!(replay.ingested_events, 0);
+    assert_eq!(replay.duplicate_events, 2);
+    assert_eq!(replay.opened_incidents, 1);
+    assert_eq!(
+        fs::read_to_string(&checkpoint_path).expect("checkpoint exists"),
+        replay.last_processed_byte.to_string()
+    );
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
+
+#[test]
+fn live_spool_ingestion_does_not_open_incident_for_benign_spool() {
+    let db_path = temp_path("benign-sequence.sqlite");
+    let spool_path = temp_path("benign-sequence.jsonl");
+    let checkpoint_path = temp_path("benign-sequence.offset");
+    let benign = plugin_sequence_event(
+        "evt_spool_benign_content",
+        "agent.content.ingested",
+        1_781_560_000_000,
+        "untrusted_content",
+        "informational",
+        "trace_spool_benign",
+        &serde_json::json!({
+            "instruction_authority": false,
+            "contains_instructional_attack": false
+        }),
+    );
+    let tool = plugin_sequence_event(
+        "evt_spool_benign_tool",
+        "agent.tool.requested",
+        1_781_560_001_000,
+        "agent_action",
+        "low",
+        "trace_spool_benign",
+        &serde_json::json!({
+            "tool_name": "read_file",
+            "network_indicator": false,
+            "delivery_indicator": false,
+            "sensitive_access": false
+        }),
+    );
+    fs::write(&spool_path, format!("{benign}\n{tool}\n")).expect("spool is written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let summary = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("benign spool ingests");
+
+    assert_eq!(summary.ingested_events, 2);
+    assert_eq!(summary.opened_incidents, 0);
+    assert!(store
+        .list_incidents()
+        .expect("incident list succeeds")
+        .is_empty());
 
     let _ = fs::remove_file(db_path);
     let _ = fs::remove_file(spool_path);

@@ -106,7 +106,7 @@ The v0 contract is intentionally conservative: every event must carry identity, 
 
 ## Recommended event types
 
-These names are the intended direction for v0.2 adapters and rules:
+These names are the canonical vocabulary for v0.4 adapters and rules:
 
 - `agent.message.received`
 - `agent.content.ingested`

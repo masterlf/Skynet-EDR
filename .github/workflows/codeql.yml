@@ -35,15 +35,15 @@ jobs:
           esac
       - name: Initialize CodeQL
         if: steps.detect.outputs.present == 'true'
-        uses: github/codeql-action/init@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3
+        uses: github/codeql-action/init@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4.37.2
         with:
           languages: ${{ matrix.language }}
       - name: Autobuild
         if: steps.detect.outputs.present == 'true'
-        uses: github/codeql-action/autobuild@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/autobuild@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4.37.2
       - name: Perform CodeQL Analysis
         if: steps.detect.outputs.present == 'true'
-        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/analyze@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4.37.2
       - name: No files for language yet
         if: steps.detect.outputs.present != 'true'
         run: echo "No ${{ matrix.language }} files yet; CodeQL will activate when code is added."

@@ -6,6 +6,7 @@ DEB_ARCH="${NFPM_ARCH:-amd64}"
 RPM_ARCH="${NFPM_RPM_ARCH:-x86_64}"
 ARCHLINUX_ARCH="${NFPM_ARCHLINUX_ARCH:-x86_64}"
 NFPM_RENDERED="dist/nfpm.${VERSION}.yaml"
+CARGO_RELEASE_DIR="${CARGO_TARGET_DIR:-target}/release"
 
 mkdir -p dist
 cargo build --release --workspace --bins
@@ -15,15 +16,17 @@ if ! command -v nfpm >/dev/null 2>&1; then
   exit 1
 fi
 
-python3 - "$VERSION" <<'PY'
+python3 - "$VERSION" "$CARGO_RELEASE_DIR" <<'PY'
 import re
 import sys
 from pathlib import Path
 version = sys.argv[1]
+release_dir = sys.argv[2]
 source = Path('packaging/nfpm.yaml')
 target = Path('dist') / f'nfpm.{version}.yaml'
 text = source.read_text()
 text = re.sub(r'^version:.*$', f'version: {version}', text, flags=re.MULTILINE)
+text = text.replace('./target/release/', f'{release_dir}/')
 target.write_text(text)
 PY
 

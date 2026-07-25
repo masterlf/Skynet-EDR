@@ -29,7 +29,7 @@ Packaged installs should create this layout:
 /etc/skynet-edr/config.toml
 /etc/skynet-edr/rules.d/
 /etc/skynet-edr/agents.d/
-/var/lib/skynet-edr/skynet-edr.sqlite
+/var/lib/skynet-edr/skynet.sqlite
 /var/log/skynet-edr/
 /run/skynet-edr/
 /usr/lib/systemd/system/skynet-edr.service
@@ -89,7 +89,7 @@ Initialize local state:
 ```bash
 sudo install -d -m 0750 -o root -g root /etc/skynet-edr
 sudo install -d -m 0750 /var/lib/skynet-edr
-sudo skynet-edr store init --db /var/lib/skynet-edr/skynet-edr.sqlite
+sudo skynet-edr store init --db /var/lib/skynet-edr/skynet.sqlite
 ```
 
 For development-only tests, running from `target/release` without installing is also acceptable.
@@ -102,13 +102,13 @@ Download packages from the GitHub Releases page:
 https://github.com/masterlf/Skynet-EDR/releases
 ```
 
-For `v0.3.0`, the expected Linux `amd64` artifacts are:
+For `v0.4.0`, the expected Linux `amd64` artifacts are:
 
 ```text
-skynet-edr_0.3.0_amd64.deb
-skynet-edr-0.3.0-1.amd64.rpm
-skynet-edr-0.3.0-1-amd64.pkg.tar.zst
-skynet-edr-0.3.0-x86_64-unknown-linux-gnu.tar.gz
+skynet-edr_0.4.0_amd64.deb
+skynet-edr-0.4.0-1.x86_64.rpm
+skynet-edr-0.4.0-1-x86_64.pkg.tar.zst
+skynet-edr-0.4.0-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
 ```
 
@@ -124,7 +124,7 @@ After downloading the `.deb` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo apt install ./skynet-edr_0.3.0_amd64.deb
+sudo apt install ./skynet-edr_0.4.0_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -144,7 +144,7 @@ Current caveat: the service starts the conservative passive daemon path. Review 
 
 ## Install the Hermes plugin
 
-Skynet-EDR v0.3 packages ship a passive Hermes Agent plugin template plus a
+Skynet-EDR v0.4 packages ship a passive Hermes Agent plugin template plus a
 per-user installer. Run the installer as the Hermes user, not through the
 `skynet-edr` service account:
 
@@ -179,7 +179,7 @@ After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo dnf install ./skynet-edr-0.3.0-1.amd64.rpm
+sudo dnf install ./skynet-edr-0.4.0-1.x86_64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -202,7 +202,7 @@ After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo pacman -U ./skynet-edr-0.3.0-1-amd64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-0.4.0-1-x86_64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```
@@ -245,9 +245,14 @@ sudo ./install.sh
 Optional paths:
 
 ```bash
-sudo PREFIX=/opt/skynet-edr ./install.sh
+sudo ./install.sh --prefix /opt/skynet-edr --no-systemd
 sudo ./install.sh --no-systemd
 ```
+
+Custom prefixes require `--no-systemd` because the packaged unit deliberately
+uses `/usr/bin`. The prefix changes binary placement only; configuration, state,
+documentation, and the optional Hermes plugin template retain their standard
+system paths.
 
 Uninstall while preserving data:
 
@@ -288,8 +293,20 @@ skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
 skynet-edr-daemon status
-sudo -u skynet-edr skynet-edr store init --db /var/lib/skynet-edr/skynet-edr.sqlite
-sudo -u skynet-edr skynet-edr events list --db /var/lib/skynet-edr/skynet-edr.sqlite
+sudo -u skynet-edr skynet-edr store init --db /var/lib/skynet-edr/skynet.sqlite
+skynet-edr doctor
+skynet-edr diagnostics collect --output ./skynet-edr-diagnostics
+```
+
+`skynet-edr doctor` uses `/etc/skynet-edr/config.toml` and `/var/lib/skynet-edr/skynet.sqlite` by default. It checks readiness through loopback-only API access or plugin-spool availability and refuses non-loopback API targets instead of probing them. It does not require `rules.d` or `agents.d` to exist.
+
+Diagnostics bundles are redaction-safe by default: no raw event export, no missing database creation, private `0700` output directory, and `0600` files. Add operator-provided evidence explicitly, for example:
+
+```bash
+journalctl -u skynet-edr.service -n 100 --no-pager > /tmp/skynet-edr-status.txt
+skynet-edr diagnostics collect \
+  --output ./skynet-edr-diagnostics \
+  --service-status-file /tmp/skynet-edr-status.txt
 ```
 
 Service checks:
@@ -360,6 +377,7 @@ Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default
 | RHEL/Fedora denial | `ausearch -m avc -ts recent` and SELinux policy status |
 | API unreachable | verify bind is loopback-only and service is active |
 | Agent evidence missing | verify the agent adapter/export path and ingestion logs |
+| Operator bundle needed | `skynet-edr diagnostics collect --output ./skynet-edr-diagnostics` |
 
 ## Current limitation
 

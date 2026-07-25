@@ -3,7 +3,7 @@ set -eu
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--prefix /usr|/usr/local] [--source <bin-dir>] [--no-systemd]
+Usage: install.sh [--prefix <absolute-path>] [--source <bin-dir>] [--no-systemd]
 
 Installs Skynet-EDR binaries and Linux service templates from a source checkout
 or release tarball. Run as root. Existing /etc/skynet-edr/config.toml is
@@ -31,11 +31,24 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 case "$PREFIX" in
+  /*) ;;
+  *)
+    echo "prefix must be an absolute path: $PREFIX" >&2
+    exit 1
+    ;;
+esac
+
+case "$PREFIX" in
   /|/tmp|/var/tmp)
     echo "refusing unsafe prefix: $PREFIX" >&2
     exit 1
     ;;
 esac
+
+if [ "$PREFIX" != /usr ] && [ "$INSTALL_SYSTEMD" -eq 1 ]; then
+  echo "custom --prefix requires --no-systemd because the packaged service uses /usr/bin" >&2
+  exit 1
+fi
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ -d "$SCRIPT_DIR/packaging" ]; then

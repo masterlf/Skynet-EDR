@@ -23,7 +23,8 @@
     "command_class": "network_egress",
     "network_indicator": true,
     "command": "[REDACTED:local_context]",
-    "token": "[REDACTED:secret]"
+    "token": "[REDACTED:secret]",
+    "direct_ip": true
   },
   "redaction": {
     "contains_sensitive_data": true,

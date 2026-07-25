@@ -54,16 +54,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Detect Python integration
-        id: py
-        run: |
-          if find integrations -name 'pyproject.toml' -o -name 'requirements.txt' 2>/dev/null | grep -q .; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
-      - name: No Python integration yet
-        if: steps.py.outputs.present != 'true'
-        run: echo "No Python integration package yet; Python CI will activate when added."
-      - name: Python checks deferred
-        if: steps.py.outputs.present == 'true'
-        run: |
-          echo "Python integration detected."
-          echo "Add a pinned Python toolchain workflow with hashed requirements before enabling checks."
-          exit 1
+      - name: Test dependency-free Hermes plugin
+        run: python3 -m unittest discover -s integrations/hermes/tests -p 'test_*.py'

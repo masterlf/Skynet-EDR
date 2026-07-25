@@ -57,6 +57,17 @@ Follow the validation gates in [Packaging plan](PACKAGING.md#validation-gates). 
 - verify `skynet-edr status` and basic CLI commands;
 - verify uninstall/rollback behavior for package-manager formats.
 
+After package artifacts are built and inspected, run the clean-artifact smoke
+where Docker or Podman is available:
+
+```bash
+packaging/scripts/smoke-install-artifacts.sh dist
+```
+
+The smoke installs/removes the `.deb` and tarball in clean Ubuntu containers and
+validates RPM/Arch package contents/checksums without claiming full Fedora/Arch
+runtime support from a foreign CI host.
+
 ## Publish
 
 1. Create or update the release tag according to the repository's GitHub workflow.
@@ -64,6 +75,12 @@ Follow the validation gates in [Packaging plan](PACKAGING.md#validation-gates). 
 3. Verify the published assets and checksums from a clean download.
 4. Update release notes with install, upgrade, rollback, and known-limitation sections.
 5. Confirm [Install](INSTALL.md#download-release-packages) remains accurate.
+
+Public-download verification must use unauthenticated release URLs only:
+
+```bash
+packaging/scripts/verify-public-release.sh --repo masterlf/Skynet-EDR --tag vX.Y.Z
+```
 
 ## Post-release smoke test
 

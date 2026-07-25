@@ -1,6 +1,6 @@
 # Operations
 
-This page is the v0.2 operator index for running and validating Skynet-EDR after installation.
+This page is the v0.4 operator index for running and validating Skynet-EDR after installation.
 
 Use [Install](INSTALL.md) for package installation and rollback commands. Use [Quickstart](QUICKSTART.md) for the shortest first-run path.
 
@@ -24,10 +24,21 @@ After installing or building, run:
 
 ```bash
 skynet-edr status
-skynet-edr store init
-skynet-edr events list --limit 5
-skynet-edr incidents list --limit 5
+sudo -u skynet-edr skynet-edr store init --db /var/lib/skynet-edr/skynet.sqlite
+skynet-edr doctor
+skynet-edr diagnostics collect --output ./skynet-edr-diagnostics
 ```
+
+`skynet-edr doctor` checks the packaged operator layout by default:
+
+- `/etc/skynet-edr/config.toml` exists and is readable;
+- the local store exists at `/var/lib/skynet-edr/skynet.sqlite` and opens successfully;
+- readiness is available through either a loopback-only local API endpoint or a plugin spool file;
+- config/API readiness fails closed when the API bind or supplied API target is not loopback.
+
+The doctor command intentionally does not require `rules.d` or `agents.d` directories. Those directories may exist in package layouts for future policy/adaptor drops, but current readiness is based on config, store, and local daemon/API or plugin-spool availability.
+
+`skynet-edr diagnostics collect` creates a private bundle directory (`0700`) and writes private files (`0600`). By default it includes versions, a redacted config summary, and store counts only; it does not export raw events or create a missing database. Operator-supplied logs or service status can be added with `--log-file` and `--service-status-file`; their contents are redacted before writing.
 
 For source checkouts, also run:
 

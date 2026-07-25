@@ -240,6 +240,8 @@ pub struct CanonicalSpoolIngestSummary {
     pub malformed_lines: Vec<usize>,
     /// Valid events skipped because their stable event id was already present.
     pub duplicate_events: usize,
+    /// Built-in sequence-rule incidents opened during this pass.
+    pub opened_incidents: usize,
     /// Byte offset durably checkpointed after the last complete processed line.
     pub last_processed_byte: u64,
 }
@@ -251,6 +253,8 @@ pub enum CanonicalSpoolIngestError {
     Io(std::io::Error),
     /// Persisting a valid canonical event failed.
     Storage(StorageError),
+    /// Built-in sequence rule validation failed closed.
+    SequenceRule(SequenceRuleError),
 }
 
 impl std::fmt::Display for CanonicalSpoolIngestError {
@@ -258,6 +262,7 @@ impl std::fmt::Display for CanonicalSpoolIngestError {
         match self {
             Self::Io(error) => write!(formatter, "canonical spool I/O error: {error}"),
             Self::Storage(error) => write!(formatter, "canonical spool storage error: {error}"),
+            Self::SequenceRule(error) => write!(formatter, "canonical spool rule error: {error}"),
         }
     }
 }
@@ -273,6 +278,12 @@ impl From<std::io::Error> for CanonicalSpoolIngestError {
 impl From<StorageError> for CanonicalSpoolIngestError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error)
+    }
+}
+
+impl From<SequenceRuleError> for CanonicalSpoolIngestError {
+    fn from(error: SequenceRuleError) -> Self {
+        Self::SequenceRule(error)
     }
 }
 
@@ -394,9 +405,10 @@ pub fn serialize_canonical_event_json(
 /// Ingest complete lines from a live canonical event JSONL spool file.
 ///
 /// The checkpoint stores a byte offset and is advanced only after complete lines
-/// are processed. A trailing partial JSONL record is left unread for the next
-/// pass. Valid event identifiers are idempotent: events whose ids already exist
-/// are counted as duplicates and not reinserted.
+/// are inserted/accounted and built-in sequence incidents are durably persisted.
+/// A trailing partial JSONL record is left unread for the next pass. Valid event
+/// identifiers are idempotent: events whose ids already exist are counted as
+/// duplicates and still allow replayed sequences to be evaluated.
 ///
 /// # Errors
 ///
@@ -427,8 +439,10 @@ pub fn ingest_canonical_jsonl_spool(
         dropped_events: 0,
         malformed_lines: Vec::new(),
         duplicate_events: 0,
+        opened_incidents: 0,
         last_processed_byte: offset,
     };
+    let mut processed_valid_event = false;
 
     let mut segment = Vec::new();
     loop {
@@ -448,27 +462,32 @@ pub fn ingest_canonical_jsonl_spool(
         })?;
         let line = trim_line_bytes(&segment);
         if !line.iter().all(u8::is_ascii_whitespace) {
-            if let Some(event) = std::str::from_utf8(line)
+            if let Some(canonical_event) = std::str::from_utf8(line)
                 .ok()
                 .and_then(|line| parse_canonical_event_json(line).ok())
             {
-                let event = canonical_event_to_storage_event(event);
+                let event = canonical_event_to_storage_event(canonical_event);
                 if store.get_event(event.id.as_str())?.is_some() {
                     summary.duplicate_events += 1;
                 } else {
                     store.insert_event(&event)?;
                     summary.ingested_events += 1;
                 }
+                processed_valid_event = true;
             } else {
                 summary.dropped_events += 1;
                 summary.malformed_lines.push(line_number);
             }
         }
         offset += consumed;
-        write_spool_checkpoint(checkpoint_path, offset)?;
         summary.last_processed_byte = offset;
         line_number += 1;
     }
+
+    if processed_valid_event {
+        summary.opened_incidents = open_built_in_sequence_incidents_for_store(store)?;
+    }
+    write_spool_checkpoint(checkpoint_path, summary.last_processed_byte)?;
 
     Ok(summary)
 }
@@ -512,6 +531,147 @@ fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {
         details: event.details,
         attributes,
         redaction: event.redaction,
+    }
+}
+
+fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvelope> {
+    let event_type = event
+        .attributes
+        .get("event_type")
+        .and_then(serde_json::Value::as_str)?
+        .to_owned();
+    let trust_level =
+        serde_json::from_value::<TrustLevel>(event.attributes.get("trust_level")?.clone()).ok()?;
+    let provenance =
+        serde_json::from_value::<EventProvenance>(event.attributes.get("provenance")?.clone())
+            .ok()?;
+    let received_at_unix_ms = event
+        .attributes
+        .get("received_at_unix_ms")
+        .and_then(serde_json::Value::as_u64);
+    let mut attributes = event.attributes.clone();
+    for synthetic_key in [
+        "schema_version",
+        "event_type",
+        "trust_level",
+        "provenance",
+        "received_at_unix_ms",
+    ] {
+        attributes.remove(synthetic_key);
+    }
+
+    Some(CanonicalEventEnvelope {
+        schema_version: EventSchemaVersion::V0,
+        event_id: event.id.clone(),
+        event_type,
+        observed_at_unix_ms: event.observed_at_unix_ms,
+        received_at_unix_ms,
+        severity: event.severity,
+        source: event.source.clone(),
+        provenance,
+        trust_level,
+        title: event.title.clone(),
+        details: event.details.clone(),
+        attributes,
+        redaction: event.redaction.clone(),
+    })
+}
+
+fn open_built_in_sequence_incidents_for_store(
+    store: &LocalStore,
+) -> Result<usize, CanonicalSpoolIngestError> {
+    let stored_events = store.list_events()?;
+    let canonical_events = stored_events
+        .iter()
+        .filter_map(storage_event_to_canonical_event)
+        .collect::<Vec<_>>();
+    let matches = correlate_sequence_rules(&built_in_ai_agent_sequence_rules(), &canonical_events)?;
+    let mut opened = 0;
+
+    for sequence_match in matches {
+        let incident = sequence_match_incident(&sequence_match, &stored_events);
+        if store.get_incident(incident.id.as_str())?.is_some() {
+            continue;
+        }
+        store.insert_incident(&incident)?;
+        opened += 1;
+    }
+
+    Ok(opened)
+}
+
+fn sequence_match_incident(sequence_match: &SequenceMatch, stored_events: &[Event]) -> Incident {
+    let events = sequence_match
+        .matched_event_ids
+        .iter()
+        .filter_map(|event_id| {
+            stored_events
+                .iter()
+                .find(|event| &event.id == event_id)
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    let created_at_unix_ms = events.first().map_or(0, |event| event.observed_at_unix_ms);
+    let updated_at_unix_ms = events
+        .last()
+        .map_or(created_at_unix_ms, |event| event.observed_at_unix_ms);
+    let source = events
+        .last()
+        .map_or_else(default_sequence_incident_source, |event| {
+            event.source.clone()
+        });
+    let incident_id = sequence_incident_id(sequence_match);
+
+    Incident {
+        id: IncidentId::new(incident_id),
+        created_at_unix_ms,
+        updated_at_unix_ms,
+        status: IncidentStatus::Open,
+        severity: sequence_match.severity,
+        title: format!("AI-agent sequence rule {} matched", sequence_match.rule_id),
+        summary: format!(
+            "{}: built-in AI-agent sequence matched {} redacted canonical event(s) within the configured window.",
+            sequence_match.rule_id,
+            sequence_match.matched_event_ids.len()
+        ),
+        source,
+        redaction: incident_redaction_from_events(&events),
+        events,
+    }
+}
+
+fn sequence_incident_id(sequence_match: &SequenceMatch) -> String {
+    let digest = sequence_incident_digest(sequence_match);
+    format!("inc:{}:{digest:016x}", sequence_match.rule_id)
+}
+
+fn sequence_incident_digest(sequence_match: &SequenceMatch) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut digest = FNV_OFFSET_BASIS;
+    for byte in sequence_match.rule_id.as_bytes() {
+        digest ^= u64::from(*byte);
+        digest = digest.wrapping_mul(FNV_PRIME);
+    }
+    digest ^= 0xff;
+    digest = digest.wrapping_mul(FNV_PRIME);
+    for event_id in &sequence_match.matched_event_ids {
+        for byte in event_id.as_str().as_bytes() {
+            digest ^= u64::from(*byte);
+            digest = digest.wrapping_mul(FNV_PRIME);
+        }
+        digest ^= 0x00;
+        digest = digest.wrapping_mul(FNV_PRIME);
+    }
+    digest
+}
+
+fn default_sequence_incident_source() -> EventSource {
+    EventSource {
+        kind: SourceKind::Sensor,
+        sensor: "built-in-sequence-rule-engine".to_owned(),
+        integration: None,
     }
 }
 
@@ -986,13 +1146,16 @@ impl ApprovalBoundary {
     pub const fn allows(self, action: ResponseAction) -> bool {
         matches!(
             (self, action),
-            (
-                _,
-                ResponseAction::EmitAlert | ResponseAction::RequireApproval
-            ) | (Self::OperatorRequired, ResponseAction::PauseAutomation)
+            (_, ResponseAction::EmitAlert)
+                | (
+                    Self::OperatorRequired,
+                    ResponseAction::RequireApproval | ResponseAction::PauseAutomation,
+                )
                 | (
                     Self::PreApprovedContainment,
-                    ResponseAction::PauseAutomation | ResponseAction::BlockNetworkEgress,
+                    ResponseAction::RequireApproval
+                        | ResponseAction::PauseAutomation
+                        | ResponseAction::BlockNetworkEgress,
                 )
         )
     }
@@ -1314,6 +1477,519 @@ pub fn parse_detection_rule_yaml(input: &str) -> Result<DetectionRule, Detection
         .map_err(|error| DetectionRuleError::Parse(error.to_string()))?;
     rule.validate()?;
     Ok(rule)
+}
+
+/// How a sequence rule constrains identity across matched canonical events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceJoin {
+    /// All matched events must share `attributes.session_id`.
+    SameSession,
+    /// All matched events must share `provenance.trace_id`.
+    SameTrace,
+}
+
+/// Attribute predicate evaluated against a canonical event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceAttributePredicate {
+    /// Dotted field path. The v0 engine supports `attributes.<key>`.
+    pub field: String,
+    /// Optional exact string value expected at `field`.
+    pub equals: Option<String>,
+    /// Optional substring expected inside a string value at `field`.
+    pub contains: Option<String>,
+    /// Optional exact boolean value expected at `field`.
+    pub equals_bool: Option<bool>,
+}
+
+impl SequenceAttributePredicate {
+    /// Build an exact string attribute predicate.
+    #[must_use]
+    pub fn equals(field: impl Into<String>, expected: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            equals: Some(expected.into()),
+            contains: None,
+            equals_bool: None,
+        }
+    }
+
+    /// Build a substring string attribute predicate.
+    #[must_use]
+    pub fn contains(field: impl Into<String>, expected: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            equals: None,
+            contains: Some(expected.into()),
+            equals_bool: None,
+        }
+    }
+
+    /// Build an exact boolean attribute predicate.
+    #[must_use]
+    pub fn equals_bool(field: impl Into<String>, expected: bool) -> Self {
+        Self {
+            field: field.into(),
+            equals: None,
+            contains: None,
+            equals_bool: Some(expected),
+        }
+    }
+
+    fn validate(&self) -> Result<(), SequenceRuleError> {
+        if self.field.trim().is_empty() {
+            return Err(SequenceRuleError::Validation(
+                "attribute predicate field must not be empty".to_owned(),
+            ));
+        }
+        if !self.field.starts_with("attributes.") {
+            return Err(SequenceRuleError::Validation(
+                "attribute predicate field must start with attributes.".to_owned(),
+            ));
+        }
+        if self.equals.is_none() && self.contains.is_none() && self.equals_bool.is_none() {
+            return Err(SequenceRuleError::Validation(
+                "attribute predicate must include equals, contains, or equals_bool".to_owned(),
+            ));
+        }
+        if self.equals.as_deref() == Some("") || self.contains.as_deref() == Some("") {
+            return Err(SequenceRuleError::Validation(
+                "attribute predicate string match must not be empty".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One ordered predicate in a canonical-event sequence rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceStep {
+    /// Human-readable step name included in match explanations.
+    pub name: String,
+    /// Exact canonical event type predicate.
+    pub event_type: String,
+    /// Exact canonical trust-level predicate.
+    pub trust_level: TrustLevel,
+    /// Additional high-signal attribute predicates.
+    pub attributes: Vec<SequenceAttributePredicate>,
+}
+
+/// Minimal deterministic sequence correlation rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceRule {
+    /// Stable rule identifier.
+    pub id: String,
+    /// Operator-facing rule name.
+    pub name: String,
+    /// Severity assigned to explainable matches.
+    pub severity: Severity,
+    /// Maximum elapsed time from first matched event to final matched event.
+    pub window_ms: u64,
+    /// Shared session or trace identity required across all matched events.
+    pub join: SequenceJoin,
+    /// Ordered event predicates that must match as a subsequence.
+    pub steps: Vec<SequenceStep>,
+}
+
+/// Explainable output from a sequence rule match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceMatch {
+    /// Rule identifier that matched.
+    pub rule_id: String,
+    /// Severity assigned by the rule.
+    pub severity: Severity,
+    /// Canonical event identifiers in step order.
+    pub matched_event_ids: Vec<EventId>,
+    /// Shared join identity, prefixed as `session:` or `trace:`.
+    pub join_key: Option<String>,
+    /// Deterministic human-readable explanations for every matched step.
+    pub explanations: Vec<String>,
+}
+
+/// Sequence rule validation or evaluation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequenceRuleError {
+    /// The rule is structurally ambiguous and must not be evaluated.
+    Validation(String),
+}
+
+impl std::fmt::Display for SequenceRuleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(message) => {
+                write!(formatter, "sequence rule validation error: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SequenceRuleError {}
+
+impl SequenceRule {
+    /// Validate the sequence rule before evaluation so ambiguous rules fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SequenceRuleError::Validation`] when identifiers, windows,
+    /// identity joins, or step predicates are missing or ambiguous.
+    pub fn validate(&self) -> Result<(), SequenceRuleError> {
+        if self.id.trim().is_empty() {
+            return Err(SequenceRuleError::Validation(
+                "id must not be empty".to_owned(),
+            ));
+        }
+        if self.name.trim().is_empty() {
+            return Err(SequenceRuleError::Validation(
+                "name must not be empty".to_owned(),
+            ));
+        }
+        if self.window_ms == 0 {
+            return Err(SequenceRuleError::Validation(
+                "window_ms must be greater than zero".to_owned(),
+            ));
+        }
+        if self.steps.len() < 2 {
+            return Err(SequenceRuleError::Validation(
+                "sequence rules require at least two steps".to_owned(),
+            ));
+        }
+        for step in &self.steps {
+            step.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl SequenceStep {
+    fn validate(&self) -> Result<(), SequenceRuleError> {
+        if self.name.trim().is_empty() {
+            return Err(SequenceRuleError::Validation(
+                "step name must not be empty".to_owned(),
+            ));
+        }
+        if self.event_type.trim().is_empty() {
+            return Err(SequenceRuleError::Validation(
+                "step event_type must not be empty".to_owned(),
+            ));
+        }
+        for attribute in &self.attributes {
+            attribute.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Evaluate multiple deterministic sequence rules over canonical events.
+///
+/// # Errors
+///
+/// Returns [`SequenceRuleError::Validation`] if any rule is ambiguous.
+pub fn correlate_sequence_rules(
+    rules: &[SequenceRule],
+    events: &[CanonicalEventEnvelope],
+) -> Result<Vec<SequenceMatch>, SequenceRuleError> {
+    let mut matches = Vec::new();
+    for rule in rules {
+        matches.extend(correlate_sequence_rule(rule, events)?);
+    }
+    matches.sort_by(|left, right| {
+        left.rule_id
+            .cmp(&right.rule_id)
+            .then_with(|| left.matched_event_ids.cmp(&right.matched_event_ids))
+    });
+    Ok(matches)
+}
+
+/// Evaluate a deterministic ordered sequence rule over canonical events.
+///
+/// Events are evaluated in `observed_at_unix_ms` then `event_id` order. A match is
+/// an ordered subsequence where every step predicate matches, every candidate is
+/// inside `window_ms` from the first event, and the configured join key is stable.
+///
+/// # Errors
+///
+/// Returns [`SequenceRuleError::Validation`] if the rule is ambiguous.
+pub fn correlate_sequence_rule(
+    rule: &SequenceRule,
+    events: &[CanonicalEventEnvelope],
+) -> Result<Vec<SequenceMatch>, SequenceRuleError> {
+    rule.validate()?;
+
+    let mut ordered_events = events.iter().collect::<Vec<_>>();
+    ordered_events.sort_by(|left, right| {
+        left.observed_at_unix_ms
+            .cmp(&right.observed_at_unix_ms)
+            .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
+    });
+
+    let mut matches = Vec::new();
+    for (start_index, start_event) in ordered_events.iter().enumerate() {
+        if !step_matches(&rule.steps[0], start_event) {
+            continue;
+        }
+        let Some(join_key) = event_join_key(start_event, rule.join) else {
+            continue;
+        };
+        let Some(sequence_match) =
+            match_remaining_sequence(rule, &ordered_events, start_index, start_event, &join_key)
+        else {
+            continue;
+        };
+        matches.push(sequence_match);
+    }
+
+    Ok(matches)
+}
+
+fn match_remaining_sequence(
+    rule: &SequenceRule,
+    ordered_events: &[&CanonicalEventEnvelope],
+    start_index: usize,
+    start_event: &CanonicalEventEnvelope,
+    join_key: &str,
+) -> Option<SequenceMatch> {
+    let mut matched_events = vec![start_event];
+    let mut search_from = start_index + 1;
+
+    for step in rule.steps.iter().skip(1) {
+        // The earliest candidate is complete for this model: step predicates are
+        // local to each event, while the join key and time window stay anchored
+        // to the first event. Any successor available after a later candidate is
+        // therefore also available after the earlier one.
+        let (candidate_index, candidate) = ordered_events
+            .iter()
+            .enumerate()
+            .skip(search_from)
+            .find(|(_, candidate)| {
+                candidate.observed_at_unix_ms >= start_event.observed_at_unix_ms
+                    && candidate.observed_at_unix_ms - start_event.observed_at_unix_ms
+                        <= rule.window_ms
+                    && event_join_key(candidate, rule.join).as_deref() == Some(join_key)
+                    && step_matches(step, candidate)
+            })?;
+        matched_events.push(candidate);
+        search_from = candidate_index + 1;
+    }
+
+    Some(SequenceMatch {
+        rule_id: rule.id.clone(),
+        severity: rule.severity,
+        matched_event_ids: matched_events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect(),
+        join_key: Some(join_key.to_owned()),
+        explanations: explain_sequence_match(rule, &matched_events),
+    })
+}
+
+fn step_matches(step: &SequenceStep, event: &CanonicalEventEnvelope) -> bool {
+    event.event_type == step.event_type
+        && event.trust_level == step.trust_level
+        && step
+            .attributes
+            .iter()
+            .all(|predicate| attribute_matches(predicate, event))
+}
+
+fn attribute_matches(
+    predicate: &SequenceAttributePredicate,
+    event: &CanonicalEventEnvelope,
+) -> bool {
+    let Some(key) = predicate.field.strip_prefix("attributes.") else {
+        return false;
+    };
+    let Some(value) = event.attributes.get(key) else {
+        return false;
+    };
+    predicate
+        .equals
+        .as_deref()
+        .map_or(true, |expected| value.as_str() == Some(expected))
+        && predicate.contains.as_deref().map_or(true, |needle| {
+            value.as_str().is_some_and(|text| text.contains(needle))
+        })
+        && predicate
+            .equals_bool
+            .map_or(true, |expected| value.as_bool() == Some(expected))
+}
+
+fn event_join_key(event: &CanonicalEventEnvelope, join: SequenceJoin) -> Option<String> {
+    match join {
+        SequenceJoin::SameSession => {
+            event_session_id(event).map(|session| format!("session:{session}"))
+        }
+        SequenceJoin::SameTrace => event
+            .provenance
+            .trace_id
+            .as_deref()
+            .filter(|trace_id| !trace_id.trim().is_empty())
+            .map(|trace_id| format!("trace:{trace_id}")),
+    }
+}
+
+fn event_session_id(event: &CanonicalEventEnvelope) -> Option<&str> {
+    event
+        .attributes
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|session_id| !session_id.trim().is_empty())
+}
+
+fn explain_sequence_match(
+    rule: &SequenceRule,
+    matched_events: &[&CanonicalEventEnvelope],
+) -> Vec<String> {
+    let start_time = matched_events[0].observed_at_unix_ms;
+    matched_events
+        .iter()
+        .zip(rule.steps.iter())
+        .enumerate()
+        .map(|(index, (event, step))| {
+            format!(
+                "step {} '{}' matched {} ({}) within {}ms of sequence start",
+                index + 1,
+                step.name,
+                event.event_id.as_str(),
+                event.event_type,
+                event.observed_at_unix_ms - start_time
+            )
+        })
+        .collect()
+}
+
+/// Return the built-in high-signal AI-agent sequence rule pack.
+#[must_use]
+pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
+    vec![
+        sequence_rule(
+            "EDR-MCP-001",
+            "MCP network tool request after untrusted content",
+            Severity::High,
+            "agent.mcp.tool.requested",
+            "MCP network tool request",
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.network_indicator",
+                true,
+            )],
+        ),
+        sequence_rule(
+            "EDR-CONFIG-001",
+            "Agent configuration drift after untrusted content",
+            Severity::High,
+            "agent.config.changed",
+            "high-risk config drift",
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.approval_required",
+                false,
+            )],
+        ),
+        sequence_rule(
+            "EDR-CRON-001",
+            "Risky unattended automation after untrusted content",
+            Severity::High,
+            "agent.automation.scheduled",
+            "risky unattended automation",
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.persistence_indicator",
+                true,
+            )],
+        ),
+        sequence_rule(
+            "EDR-PI-001",
+            "Prompt injection followed by privileged tool request",
+            Severity::High,
+            "agent.tool.requested",
+            "privileged tool request",
+            vec![
+                SequenceAttributePredicate::equals_bool("attributes.network_indicator", true),
+                SequenceAttributePredicate::equals_bool("attributes.sensitive_access", true),
+            ],
+        ),
+        sequence_rule(
+            "EDR-MSG-001",
+            "Suspicious messaging delivery after untrusted content",
+            Severity::High,
+            "agent.tool.requested",
+            "sensitive message delivery",
+            vec![
+                SequenceAttributePredicate::equals_bool("attributes.delivery_indicator", true),
+                SequenceAttributePredicate::equals_bool("attributes.sensitive_access", true),
+            ],
+        ),
+        sequence_rule(
+            "EDR-NET-001",
+            "Direct-IP egress after untrusted content",
+            Severity::High,
+            "agent.network.egress",
+            "direct IP egress",
+            vec![
+                SequenceAttributePredicate::equals_bool("attributes.network_indicator", true),
+                SequenceAttributePredicate::equals_bool("attributes.direct_ip", true),
+            ],
+        ),
+        sequence_rule(
+            "EDR-SCOPE-001",
+            "Privilege or scope expansion after untrusted content",
+            Severity::High,
+            "agent.approval.granted",
+            "scope expansion approval",
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.scope_expansion",
+                true,
+            )],
+        ),
+        sequence_rule(
+            "EDR-PERSIST-001",
+            "Agent persistence change after untrusted content",
+            Severity::High,
+            "agent.config.changed",
+            "persistence change",
+            vec![SequenceAttributePredicate::equals_bool(
+                "attributes.persistence_indicator",
+                true,
+            )],
+        ),
+    ]
+}
+
+fn sequence_rule(
+    id: &str,
+    name: &str,
+    severity: Severity,
+    action_event_type: &str,
+    action_step_name: &str,
+    action_attributes: Vec<SequenceAttributePredicate>,
+) -> SequenceRule {
+    SequenceRule {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        severity,
+        window_ms: 60_000,
+        join: SequenceJoin::SameTrace,
+        steps: vec![
+            SequenceStep {
+                name: "untrusted prompt-injection content".to_owned(),
+                event_type: "agent.content.ingested".to_owned(),
+                trust_level: TrustLevel::UntrustedContent,
+                attributes: vec![
+                    SequenceAttributePredicate::equals_bool(
+                        "attributes.instruction_authority",
+                        false,
+                    ),
+                    SequenceAttributePredicate::equals_bool(
+                        "attributes.contains_instructional_attack",
+                        true,
+                    ),
+                ],
+            },
+            SequenceStep {
+                name: action_step_name.to_owned(),
+                event_type: action_event_type.to_owned(),
+                trust_level: TrustLevel::AgentAction,
+                attributes: action_attributes,
+            },
+        ],
+    }
 }
 
 /// Stable platform-independent event identifier.

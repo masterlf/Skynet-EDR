@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - uses: trufflesecurity/trufflehog@c1a1d6a28a601e902d8652e75425c4b3d3294053 # main, pinned 2026-06-14
+      - uses: trufflesecurity/trufflehog@f2cd191b97098913a07522227d2b5e40e57252f4 # main, pinned 2026-07-06
         with:
           path: ./
           base: ${{ github.event.pull_request.base.sha }}
@@ -47,7 +47,7 @@ jobs:
         run: semgrep scan --config auto --sarif --output semgrep.sarif --error
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/upload-sarif@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4.37.2
         with:
           sarif_file: semgrep.sarif
   trivy:
@@ -60,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@bfa4b33a029b9aa80ddb784b45574c30e072c59e # master, pinned 2026-06-14
+        uses: aquasecurity/trivy-action@c07df6fec6fa692e6fd1200d50aaa1fdd66f03c8 # master, pinned 2026-07-06
         with:
           scan-type: fs
           scan-ref: .
@@ -69,7 +69,7 @@ jobs:
           severity: CRITICAL,HIGH
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/upload-sarif@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4.37.2
         with:
           sarif_file: trivy-results.sarif
   osv:

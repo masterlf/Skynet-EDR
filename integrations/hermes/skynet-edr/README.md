@@ -1,6 +1,6 @@
 # Skynet-EDR Hermes Plugin
 
-Passive Hermes Agent telemetry plugin for Skynet-EDR v0.3.
+Passive Hermes Agent telemetry plugin for Skynet-EDR v0.4.
 
 The plugin observes Hermes lifecycle hooks and emits canonical `skynet.event.v0`
 JSONL events. It is intentionally non-blocking: it does not approve, deny, or
@@ -42,7 +42,7 @@ Both the spool and log are created with user-only permissions where supported.
 
 - No outbound network.
 - No LLM calls from the plugin.
-- No inline blocking in v0.3.
+- No inline blocking in v0.4.
 - Raw tool output is omitted; only lengths and indicators are stored.
 - Sensitive parameter previews are replaced as whole fields with
   `[REDACTED:secret]` or `[REDACTED:local_context]`.
