@@ -302,6 +302,48 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertNotEqual(hashes[0], hashes[1])
         self.assertNotEqual(hashes[2], hashes[3])
 
+    def test_git_locator_hash_rejects_github_substring_in_structured_params_and_fallback(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        hostile_locators = [
+            "https://notgithub.com/owner/repo",
+            "https://github.com.evil/owner/repo",
+            "https://evil.invalid/path/github.com/repo",
+        ]
+        for locator in hostile_locators:
+            ctx.hooks["pre_tool_call"]("git", {"repository": locator})
+            ctx.hooks["pre_tool_call"]("git", {"payload": f"clone {locator}"})
+
+        events = self.read_events()[-6:]
+        serialized = "\n".join(json.dumps(event) for event in events)
+
+        self.assertTrue(all(event["artifact"]["kind"] == "git_repository" for event in events))
+        self.assertTrue(all(event["artifact"]["locator_hash"] is None for event in events))
+        for locator in hostile_locators:
+            self.assertNotIn(locator, serialized)
+
+    def test_git_locator_hash_accepts_exact_github_host_and_bounded_scp_syntax(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        valid_locators = [
+            "https://github.com/owner/repo",
+            "ssh://git@github.com/owner/repo",
+            "git@github.com:owner/repo",
+            "github.com/owner/repo",
+        ]
+        for locator in valid_locators:
+            ctx.hooks["pre_tool_call"]("git", {"repository": locator})
+            ctx.hooks["pre_tool_call"]("git", {"payload": f"clone {locator}"})
+
+        events = self.read_events()[-8:]
+        serialized = "\n".join(json.dumps(event) for event in events)
+
+        self.assertTrue(all(event["artifact"]["kind"] == "git_repository" for event in events))
+        self.assertTrue(all(re.fullmatch(r"sha256:[0-9a-f]{64}", event["artifact"]["locator_hash"] or "") for event in events))
+        self.assertEqual(len({event["artifact"]["locator_hash"] for event in events}), 1)
+        for locator in valid_locators:
+            self.assertNotIn(locator, serialized)
+
     def test_known_secret_redaction_metadata_still_works_without_raw_value(self):
         ctx = FakeContext()
         self.plugin.register(ctx)

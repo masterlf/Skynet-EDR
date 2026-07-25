@@ -36,6 +36,11 @@ _LOCAL_CONTEXT_RE = re.compile(
 )
 _NETWORK_RE = re.compile(r"(?i)(\bcurl\b|\bwget\b|https?://|/dev/tcp|\bnc\b|\bncat\b)")
 _URL_RE = re.compile(r"(?i)https?://[^\s\"'\\]+")
+_GITHUB_SCP_RE = re.compile(r"(?i)git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?")
+_GITHUB_BARE_RE = re.compile(r"(?i)github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?")
+_GITHUB_FALLBACK_RE = re.compile(
+    r"(?i)(?:https?://[^\s\"'\\]+|ssh://[^\s\"'\\]+|(?<![/\w.-])git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?|(?<![/\w.-])github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)"
+)
 _DEV_TCP_DESTINATION_RE = re.compile(r"(?i)/dev/tcp/([^/\s\"'\\]+)/\d+")
 _SIMPLE_DIRECT_IPV4_DESTINATION_RE = re.compile(
     r"(?i)\b(?:curl|wget|nc|ncat)\b\s+(?:https?://)?((?:\d{1,3}\.){3}\d{1,3})(?=$|[\s/:\"'\\])"
@@ -651,14 +656,40 @@ def _remove_last_path_segment(path: str) -> str:
 
 
 def _safe_git_locator(params: Any, params_text: str) -> str | None:
+    candidates: list[str] = []
     if isinstance(params, dict):
         for key in ("repository", "repo", "remote", "url"):
             value = params.get(key)
-            if isinstance(value, str) and "github.com" in value.lower():
-                return "github.com/repository"
-    if "github.com" in params_text.lower():
-        return "github.com/repository"
+            if isinstance(value, str):
+                candidates.append(value)
+    candidates.extend(_GITHUB_FALLBACK_RE.findall(params_text))
+    for candidate in candidates:
+        if _is_github_git_locator(candidate):
+            return "github.com/repository"
     return None
+
+
+def _is_github_git_locator(candidate: str) -> bool:
+    locator = candidate.strip().rstrip(",;)}]")
+    if _is_github_url_locator(locator):
+        return True
+    if _GITHUB_SCP_RE.fullmatch(locator):
+        return True
+    return bool(_GITHUB_BARE_RE.fullmatch(locator))
+
+
+def _is_github_url_locator(locator: str) -> bool:
+    try:
+        parsed = urlsplit(locator)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"https", "ssh"}:
+        return False
+    try:
+        parsed.port
+    except ValueError:
+        return False
+    return parsed.hostname == "github.com"
 
 
 def _contains_direct_ipv4_destination(text: str) -> bool:
