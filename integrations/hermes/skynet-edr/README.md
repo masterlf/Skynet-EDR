@@ -54,7 +54,7 @@ This package also includes a read-only Hermes dashboard backend (`dashboard/plug
 
 Install with `skynet-edr-install-hermes-plugin`; it copies telemetry/backend files to `~/.hermes/plugins/skynet-edr/` and the Desktop page to `~/.hermes/desktop-plugins/skynet-edr/plugin.js`. Enable the Hermes plugin allow-list entry and restart the Hermes gateway/backend process so `plugin_api.py` is mounted. The Desktop renderer can hot reload the disk plugin.
 
-The Risk Explorer displays only `skynet.risk.v1` redacted projections from Skynet-EDR. Artifact labels are fixed by typed artifact kind, hostile text is bounded/sanitized, and arbitrary stored attributes are not displayed. It does not render raw prompts, command text, full URLs, repository locators, local paths, message bodies, arbitrary attributes, or hostile content.
+The Risk Explorer displays only `skynet.risk.v1` redacted projections from Skynet-EDR. Risk titles/summaries and evidence titles are deterministic labels generated from allowlisted rule IDs, event types, and scalar metadata; stored incident titles/summaries and stored event titles are not projected. Artifact labels are fixed by typed artifact kind, and arbitrary stored attributes are not displayed. It does not render raw prompts, command text, full URLs, repository locators, local paths, message bodies, arbitrary attributes, or hostile content.
 
 ## Ingesting into Skynet-EDR
 

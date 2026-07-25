@@ -482,6 +482,9 @@ fn decode_risk_id_segment(encoded: &str) -> Result<String, &'static str> {
     if encoded.len() > MAX_ENCODED_BYTES {
         return Err("risk id is too long");
     }
+    if encoded.contains('/') {
+        return Err("risk id must be a single encoded path segment");
+    }
     let bytes = encoded.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;

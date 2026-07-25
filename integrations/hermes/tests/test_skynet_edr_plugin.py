@@ -357,7 +357,7 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         build_opener.assert_called_once()
         self.assertEqual(
             module.router.routes,
-            [("GET", "/risks", "risks"), ("GET", "/risks/{risk_id}", "risk_detail"), ("GET", "/status", "status")],
+            [("GET", "/risks", "risks"), ("GET", "/risks/{risk_id:path}", "risk_detail"), ("GET", "/status", "status")],
         )
 
     def test_dashboard_upstream_success_and_content_type_json_parsing(self):
@@ -441,6 +441,18 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         setattr(module, "_upstream", fake_upstream)
         self.assertEqual(module.risk_detail("inc:EDR-X:a/b?query#frag"), {"ok": True})
         self.assertEqual(captured, [("/api/v1/risks/inc%3AEDR-X%3Aa%2Fb%3Fquery%23frag", None)])
+
+    def test_dashboard_risk_detail_encodes_decoded_slash_once_for_upstream(self):
+        module = load_dashboard_api()
+        captured = []
+
+        def fake_upstream(path, query=None):
+            captured.append((path, query))
+            return {"ok": True}
+
+        setattr(module, "_upstream", fake_upstream)
+        self.assertEqual(module.risk_detail("inc/opaque"), {"ok": True})
+        self.assertEqual(captured, [("/api/v1/risks/inc%2Fopaque", None)])
 
     def test_desktop_plugin_is_parseable_read_only_disk_plugin(self):
         text = DESKTOP_PLUGIN_PATH.read_text()

@@ -290,7 +290,12 @@ fn risk_api_v1_decodes_one_opaque_percent_encoded_risk_id_segment() {
 fn risk_api_v1_rejects_malformed_percent_utf8_and_overlong_encoded_ids() {
     let store = temp_store();
     let overlong = format!("/api/v1/risks/{}", "a".repeat(769));
-    for path in ["/api/v1/risks/inc%ZZ", "/api/v1/risks/inc%FF", &overlong] {
+    for path in [
+        "/api/v1/risks/inc%ZZ",
+        "/api/v1/risks/inc%FF",
+        "/api/v1/risks/inc/raw/slash",
+        &overlong,
+    ] {
         let response = handle_http_request(&store, HttpMethod::Get, path)
             .expect("bad id returns structured response");
         assert_eq!(response.status, HttpStatus::BadRequest);
@@ -312,6 +317,21 @@ fn risk_api_v1_missing_decoded_id_is_not_found_and_detail_mutation_is_rejected()
     assert_eq!(missing.body["error"], "not_found");
     assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
     assert_eq!(mutation.body["error"], "method_not_allowed");
+}
+
+#[test]
+fn risk_api_v1_accepts_percent_encoded_slash_as_opaque_id_data() {
+    let store = temp_store();
+    let incident_id = "inc/encoded";
+    store
+        .insert_incident(&stored_incident(incident_id, Vec::new()))
+        .expect("incident persists");
+
+    let response = handle_http_request(&store, HttpMethod::Get, "/api/v1/risks/inc%2Fencoded")
+        .expect("encoded slash risk detail responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["id"], incident_id);
 }
 
 #[test]

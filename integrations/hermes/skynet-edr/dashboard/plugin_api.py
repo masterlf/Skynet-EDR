@@ -80,7 +80,7 @@ def risks(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=
     return _upstream("/api/v1/risks", _bounded_page(limit, offset))
 
 
-@router.get("/risks/{risk_id}")
+@router.get("/risks/{risk_id:path}")
 def risk_detail(risk_id: str) -> Any:
     quoted = urllib.parse.quote(risk_id, safe="")
     return _upstream(f"/api/v1/risks/{quoted}")

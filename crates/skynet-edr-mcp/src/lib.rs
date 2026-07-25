@@ -190,28 +190,16 @@ pub fn get_incident(store: &LocalStore, incident_id: &str) -> Result<Value, McpR
 
 /// List bounded read-only risk projections for Hermes/Desktop clients.
 ///
-/// The MVP pages an in-memory redacted incident list, sorted newest updated
-/// first. This keeps the projection passive/read-only while future storage-level
-/// pagination can replace the in-memory step without changing the schema.
+/// Pagination is applied by local storage so list responses stay bounded before
+/// risk projection.
 ///
 /// # Errors
 ///
 /// Returns [`McpReadError::Storage`] if local incident listing fails.
 pub fn list_risks(store: &LocalStore, limit: usize, offset: usize) -> Result<Value, McpReadError> {
-    let mut incidents = store.list_incidents()?;
-    incidents.sort_by(|left, right| {
-        right
-            .updated_at_unix_ms
-            .cmp(&left.updated_at_unix_ms)
-            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
-    });
-    let total = incidents.len();
-    let items = incidents
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .map(risk_item)
-        .collect::<Vec<_>>();
+    let total = store.count_incidents()?;
+    let incidents = store.list_incidents_page(limit, offset)?;
+    let items = incidents.iter().map(risk_item).collect::<Vec<_>>();
     let returned = items.len();
     Ok(json!({
         "schema_version": RISK_SCHEMA_VERSION,
@@ -375,14 +363,15 @@ fn event_rule_id(event: &Event) -> Option<String> {
 }
 
 fn risk_item(incident: &Incident) -> Value {
+    let rule_id = incident.events.iter().find_map(event_rule_id);
     json!({
         "id": incident.id.as_str(),
         "severity": enum_label(incident.severity),
         "confidence": Value::Null,
         "status": enum_label(incident.status),
-        "rule_id": incident.events.iter().find_map(event_rule_id),
-        "title": operator_text(&incident.title, 200, "untitled incident"),
-        "summary": operator_text(&incident.summary, 500, ""),
+        "rule_id": rule_id,
+        "title": risk_title(rule_id.as_deref()),
+        "summary": risk_summary(incident.events.len()),
         "sensor": sensor_projection(&incident.source),
         "artifact": incident.events.iter().find_map(valid_event_artifact).unwrap_or_else(|| {
             let trust = incident.events.iter().find_map(event_trust_level);
@@ -395,6 +384,29 @@ fn risk_item(incident: &Incident) -> Value {
         "contains_sensitive_data": incident.redaction.contains_sensitive_data
             || incident.events.iter().any(|event| event.redaction.contains_sensitive_data),
     })
+}
+
+fn risk_title(rule_id: Option<&str>) -> &'static str {
+    match rule_id {
+        Some("EDR-MCP-001") => "MCP network activity after untrusted content",
+        Some("EDR-CONFIG-001") => "Agent configuration drift detected",
+        Some("EDR-CRON-001") => "Risky unattended automation detected",
+        Some("EDR-PI-001") => "Privileged tool request after untrusted content",
+        Some("EDR-MSG-001") => "Suspicious message delivery activity",
+        Some("EDR-NET-001") => "Direct-IP egress activity",
+        Some("EDR-SCOPE-001") => "Privilege or scope expansion activity",
+        Some("EDR-PERSIST-001") => "Agent persistence change activity",
+        Some("EDR-EXFIL-001") => "Sensitive access followed by outbound delivery",
+        Some("EDR-MALWARE-001") => "Malware-like content supplied to AI runtime",
+        Some(_) | None => "Security risk detected",
+    }
+}
+
+fn risk_summary(event_count: usize) -> String {
+    let noun = if event_count == 1 { "event" } else { "events" };
+    format!(
+        "Read-only projection of {event_count} redacted evidence {noun}. Review sensor and artifact provenance plus allowlisted indicators."
+    )
 }
 
 fn sensor_projection(source: &skynet_edr_core::EventSource) -> Value {
@@ -494,7 +506,7 @@ fn risk_evidence(incident: &Incident) -> Vec<Value> {
                 "timestamp_unix_ms": event.observed_at_unix_ms,
                 "severity": enum_label(event.severity),
                 "event_type": event.attributes.get("event_type").and_then(Value::as_str).and_then(safe_identifier),
-                "title": operator_text(&event.title, 200, "untitled event"),
+                "title": evidence_title(event.attributes.get("event_type").and_then(Value::as_str)),
                 "sensor": sensor_projection(&event.source),
                 "artifact": event_artifact(event),
                 "trust_level": event_trust_level(event).map(enum_label),
@@ -507,6 +519,23 @@ fn risk_evidence(incident: &Incident) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn evidence_title(event_type: Option<&str>) -> &'static str {
+    match event_type {
+        Some("agent.tool.requested") => "Tool request evidence",
+        Some("agent.tool.completed") => "Tool completion evidence",
+        Some("agent.content.ingested") => "Content ingestion evidence",
+        Some("agent.network.egress") => "Network egress evidence",
+        Some("agent.file.accessed") => "File access evidence",
+        Some("agent.mcp.tool.requested") => "MCP tool request evidence",
+        Some("agent.config.changed") => "Configuration change evidence",
+        Some("agent.automation.scheduled") => "Automation schedule evidence",
+        Some("agent.approval.granted") => "Approval or scope change evidence",
+        Some("agent.llm.call.requested") => "Model call request evidence",
+        Some("agent.llm.call.completed") => "Model call completion evidence",
+        Some(_) | None => "Security event evidence",
+    }
 }
 
 fn event_indicators(event: &Event) -> Value {
@@ -553,47 +582,6 @@ fn allowed_indicator_value(key: &str, value: &str) -> bool {
         "drift_kind" => matches!(value, "changed" | "created" | "deleted"),
         _ => false,
     }
-}
-
-fn operator_text(value: &str, max_chars: usize, fallback: &str) -> String {
-    if value
-        .to_ascii_lowercase()
-        .contains("ignore previous instructions")
-    {
-        return fallback.to_owned();
-    }
-    let cleaned = value
-        .chars()
-        .filter(|character| !is_stripped_text_char(*character))
-        .collect::<String>();
-    let trimmed = cleaned
-        .split_whitespace()
-        .filter(|token| !token.contains('/') && !token.contains('\\'))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let source = if trimmed.is_empty() {
-        fallback
-    } else {
-        &trimmed
-    };
-    let mut output = source.chars().take(max_chars).collect::<String>();
-    if source.chars().count() > max_chars {
-        output.push('…');
-    }
-    output
-}
-
-fn is_stripped_text_char(character: char) -> bool {
-    character == '\0'
-        || character.is_control()
-        || matches!(
-            character,
-            '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
 }
 
 fn safe_identifier(value: &str) -> Option<String> {

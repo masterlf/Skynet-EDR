@@ -3198,6 +3198,44 @@ impl LocalStore {
         collect_payload_rows(&mut statement, [])
     }
 
+    /// Count all stored incidents without loading incident payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the `SQLite` count query fails or the count
+    /// cannot be represented as `usize`.
+    pub fn count_incidents(&self) -> StorageResult<usize> {
+        let count = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM incidents", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        usize::try_from(count).map_err(|_| StorageError::IntegerOutOfRange {
+            field: "incident.count",
+            value: u64::MAX,
+        })
+    }
+
+    /// List one `SQLite`-bounded incident page ordered newest update first.
+    ///
+    /// Incidents are ordered by `updated_at_unix_ms DESC, id ASC`, with `LIMIT`
+    /// and `OFFSET` applied inside `SQLite` using bound parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when integer conversion, `SQLite` query, or JSON
+    /// deserialization fails.
+    pub fn list_incidents_page(&self, limit: usize, offset: usize) -> StorageResult<Vec<Incident>> {
+        let limit = sqlite_usize("incident.page.limit", limit)?;
+        let offset = sqlite_usize("incident.page.offset", offset)?;
+        let mut statement = self.connection.prepare(
+            "SELECT payload_json FROM incidents
+             ORDER BY updated_at_unix_ms DESC, id ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        collect_payload_rows(&mut statement, params![limit, offset])
+    }
+
     fn migrate(&self) -> StorageResult<()> {
         self.connection.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -3293,6 +3331,13 @@ fn insert_incident_on_connection(
 
 fn sqlite_unix_ms(field: &'static str, value: u64) -> StorageResult<i64> {
     i64::try_from(value).map_err(|_| StorageError::IntegerOutOfRange { field, value })
+}
+
+fn sqlite_usize(field: &'static str, value: usize) -> StorageResult<i64> {
+    i64::try_from(value).map_err(|_| StorageError::IntegerOutOfRange {
+        field,
+        value: u64::try_from(value).unwrap_or(u64::MAX),
+    })
 }
 
 fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
