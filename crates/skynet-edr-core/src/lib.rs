@@ -3264,6 +3264,43 @@ impl LocalStore {
         collect_payload_rows(&mut statement, params![limit, offset])
     }
 
+    /// Count all incidents and list one bounded page from one `SQLite` read snapshot.
+    ///
+    /// The count and page are read inside one explicit transaction on this
+    /// connection so readers cannot observe a total from one snapshot and rows
+    /// from another during concurrent ingestion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when integer conversion, `SQLite` query, or JSON
+    /// deserialization fails.
+    pub fn count_and_list_incidents_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> StorageResult<(usize, Vec<Incident>)> {
+        let limit = sqlite_usize("incident.page.limit", limit)?;
+        let offset = sqlite_usize("incident.page.offset", offset)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let count = transaction.query_row("SELECT COUNT(*) FROM incidents", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let total = usize::try_from(count).map_err(|_| StorageError::IntegerOutOfRange {
+            field: "incident.count",
+            value: u64::MAX,
+        })?;
+        let incidents = {
+            let mut statement = transaction.prepare(
+                "SELECT payload_json FROM incidents
+                 ORDER BY updated_at_unix_ms DESC, id ASC
+                 LIMIT ?1 OFFSET ?2",
+            )?;
+            collect_payload_rows(&mut statement, params![limit, offset])?
+        };
+        transaction.commit()?;
+        Ok((total, incidents))
+    }
+
     fn migrate(&self) -> StorageResult<()> {
         self.connection.execute_batch(
             "PRAGMA journal_mode = WAL;

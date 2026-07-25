@@ -44,6 +44,27 @@ fn local_store_counts_and_pages_incidents_in_sqlite_order() {
     assert!(empty_page.is_empty());
 }
 
+#[test]
+fn local_store_counts_and_pages_incidents_from_one_read_snapshot() {
+    let store = temp_store();
+    for (id, updated) in [("inc-old", 100), ("inc-new", 200), ("inc-mid", 150)] {
+        store
+            .insert_incident(&incident(id, updated))
+            .expect("incident persists");
+    }
+
+    let (total, incidents) = store
+        .count_and_list_incidents_page(2, 0)
+        .expect("snapshot page succeeds");
+    let ids = incidents
+        .into_iter()
+        .map(|incident| incident.id.as_str().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(total, 3);
+    assert_eq!(ids, ["inc-new", "inc-mid"]);
+}
+
 fn temp_store() -> LocalStore {
     let db_path = std::env::temp_dir().join(format!(
         "skynet-edr-local-store-pagination-{}-{}.sqlite",

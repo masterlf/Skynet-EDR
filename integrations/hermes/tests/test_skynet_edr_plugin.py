@@ -222,6 +222,33 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
 
         self.assertNotEqual(first["artifact"]["locator_hash"], second["artifact"]["locator_hash"])
 
+    def test_url_locator_hash_canonicalizes_only_safe_equivalences(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        equivalent_urls = [
+            "HTTPS://Example.Invalid:443/a/b/../c/%7euser/%41",
+            "https://example.invalid/a/c/~user/A",
+            "https://example.invalid:443/a/%2e/b/%2E%2e/c/~user/A",
+        ]
+        for url in equivalent_urls:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-3:]]
+        self.assertEqual(len(set(hashes)), 1)
+
+    def test_url_locator_hash_preserves_non_default_ports_and_reserved_escapes(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        for url in [
+            "https://example.invalid/path",
+            "https://example.invalid:444/path",
+            "https://example.invalid/a%2Fb",
+            "https://example.invalid/a/b",
+        ]:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-4:]]
+        self.assertNotEqual(hashes[0], hashes[1])
+        self.assertNotEqual(hashes[2], hashes[3])
+
     def test_known_secret_redaction_metadata_still_works_without_raw_value(self):
         ctx = FakeContext()
         self.plugin.register(ctx)
@@ -711,26 +738,28 @@ if (projected.some(item => item.label === 'hostile' || item.value === '<script>'
 
     def test_desktop_pagination_contracts_and_backend_state_are_fail_closed(self):
         check = run_desktop_plugin_script("""
-const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[{id:'risk-1'}], page:{limit:50, offset:0, returned:1, total:51, has_more:true}};
+const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 1 redacted evidence event.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:1, trace_ids:['trace-1'], contains_sensitive_data:false};
+const canonicalEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'high', event_type:'agent.mcp.tool.requested', title:'MCP tool request evidence', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, trust_level:'agent_action', rule_id:'EDR-MCP-001', redaction:{contains_sensitive_data:false, redacted_count:0}, indicators:{network_indicator:true, direct_ip:false, command_class:'network_egress'}};
+const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[canonicalItem], page:{limit:50, offset:0, returned:1, total:10001, has_more:true}};
 const emptyBeyondTotal = {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:100, returned:0, total:51, has_more:false}};
-const page = validateRiskPage(canonicalPage);
+const page = validateRiskPage(canonicalPage, 0);
 if (page !== canonicalPage) throw new Error('valid risk page should be returned unchanged');
-if (validateRiskPage(emptyBeyondTotal) !== emptyBeyondTotal) throw new Error('valid empty page beyond total should be preserved');
-const canonicalDetail = {schema_version:'skynet.risk.v1', read_only:true, id:'risk-1'};
-if (validateRiskDetail(canonicalDetail) !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
-const canonicalStatus = {read_only:true, ok:true};
+if (validateRiskPage(emptyBeyondTotal, 100) !== emptyBeyondTotal) throw new Error('valid empty page beyond total should be preserved');
+const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[canonicalEvidence]};
+if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
+const canonicalStatus = {product:'Skynet-EDR', binary:'skynet-edr', run_mode:'local', server:'skynet-edr-mcp', read_only:true, tool_count:6, incident_count:1, event_count:1};
 if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('valid status should be returned unchanged');
-for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[{id:'risk-1'}, {id:'risk-2'}]}, {...canonicalPage, page:{...canonicalPage.page, limit:101}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:2}}, {...canonicalPage, page:{...canonicalPage.page, returned:0}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:1, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:2, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
+for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[null], page:{...canonicalPage.page, total:1}}, {...canonicalPage, items:[{...canonicalItem, id:''}]}, {...canonicalPage, items:[canonicalItem, {...canonicalItem}], page:{...canonicalPage.page, returned:2, total:2, has_more:false}}, {...canonicalPage, items:[{...canonicalItem, sensor:null}]}, {...canonicalPage, items:[{...canonicalItem, artifact:{...canonicalItem.artifact, kind:'<script>'}}]}, {...canonicalPage, page:{...canonicalPage.page, limit:49}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:2}}, {...canonicalPage, page:{...canonicalPage.page, returned:0}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, total:1, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:2, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
   let failed = false;
   try { validateRiskPage(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
   if (!failed) throw new Error('invalid risk page contract must fail closed');
 }
-for (const bad of [null, [], {}, {...canonicalDetail, schema_version:'wrong'}, {...canonicalDetail, read_only:false}, {...canonicalDetail, id:''}, {...canonicalDetail, id:'x'.repeat(257)}]) {
+for (const bad of [null, [], {}, {...canonicalDetail, schema_version:'wrong'}, {...canonicalDetail, read_only:false}, {...canonicalDetail, id:''}, {...canonicalDetail, id:'x'.repeat(257)}, {...canonicalDetail, id:'other'}, {...canonicalDetail, evidence:[null]}, {...canonicalDetail, evidence:[{...canonicalEvidence, event_id:''}]}, {...canonicalDetail, evidence:[canonicalEvidence, {...canonicalEvidence}], event_count:2}, {...canonicalDetail, trace_ids:['trace-1','trace-1']}, {...canonicalDetail, evidence:[{...canonicalEvidence, redaction:null}]}, {...canonicalDetail, evidence:[{...canonicalEvidence, indicators:{network_indicator:'yes'}}]}]) {
   let failed = false;
-  try { validateRiskDetail(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  try { validateRiskDetail(bad, 'risk-1'); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
   if (!failed) throw new Error('invalid risk detail contract must fail closed');
 }
-for (const bad of [null, [], {}, {read_only:false}]) {
+for (const bad of [null, [], {}, {read_only:false}, {read_only:true}, {...canonicalStatus, product:''}, {...canonicalStatus, incident_count:-1}, {...canonicalStatus, tool_count:'6'}]) {
   let failed = false;
   try { validateStatus(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
   if (!failed) throw new Error('invalid status contract must fail closed');

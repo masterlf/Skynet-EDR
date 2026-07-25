@@ -318,7 +318,18 @@ fn risk_v1_pages_with_sqlite_bounded_metadata_and_stable_order() {
 
     let first = list_risks(&store, 2, 0).expect("first page succeeds");
     let second = list_risks(&store, 2, 2).expect("second page succeeds");
+    let source = include_str!("../src/lib.rs");
+    let list_risks_body = source
+        .split("pub fn list_risks(store: &LocalStore, limit: usize, offset: usize) -> Result<Value, McpReadError> {")
+        .nth(1)
+        .expect("list_risks function exists")
+        .split("\n}")
+        .next()
+        .expect("list_risks body exists");
 
+    assert!(list_risks_body.contains("count_and_list_incidents_page(limit, offset)?"));
+    assert!(!list_risks_body.contains("store.count_incidents()?"));
+    assert!(!list_risks_body.contains("store.list_incidents_page("));
     assert_eq!(first["page"]["total"], 4);
     assert_eq!(first["page"]["returned"], 2);
     assert_eq!(first["page"]["has_more"], true);

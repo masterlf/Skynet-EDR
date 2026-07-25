@@ -197,8 +197,7 @@ pub fn get_incident(store: &LocalStore, incident_id: &str) -> Result<Value, McpR
 ///
 /// Returns [`McpReadError::Storage`] if local incident listing fails.
 pub fn list_risks(store: &LocalStore, limit: usize, offset: usize) -> Result<Value, McpReadError> {
-    let total = store.count_incidents()?;
-    let incidents = store.list_incidents_page(limit, offset)?;
+    let (total, incidents) = store.count_and_list_incidents_page(limit, offset)?;
     let items = incidents.iter().map(risk_item).collect::<Vec<_>>();
     let returned = items.len();
     Ok(json!({

@@ -520,9 +520,63 @@ def _safe_url_locator(params: Any, params_text: str) -> str | None:
         except ValueError:
             continue
         host = parsed.hostname.lower()
-        port = f":{parsed_port}" if parsed_port is not None else ""
-        return f"{parsed.scheme}://{host}{port}{parsed.path or '/'}"
+        port = _canonical_port(parsed.scheme, parsed_port)
+        path = _canonical_url_path(parsed.path)
+        return f"{parsed.scheme.lower()}://{host}{port}{path}"
     return None
+
+
+def _canonical_port(scheme: str, port: int | None) -> str:
+    if port is None:
+        return ""
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        return ""
+    return f":{port}"
+
+
+def _canonical_url_path(path: str) -> str:
+    normalized = _decode_unreserved_and_uppercase_escapes(path or "/")
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return _remove_dot_segments(normalized)
+
+
+def _decode_unreserved_and_uppercase_escapes(value: str) -> str:
+    output: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "%" and index + 2 < len(value) and all(c in "0123456789abcdefABCDEF" for c in value[index + 1:index + 3]):
+            hex_value = value[index + 1:index + 3]
+            decoded = chr(int(hex_value, 16))
+            if decoded.isascii() and (decoded.isalnum() or decoded in "-._~"):
+                output.append(decoded)
+            else:
+                output.append("%" + hex_value.upper())
+            index += 3
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _remove_dot_segments(path: str) -> str:
+    trailing_slash = path.endswith("/")
+    output: list[str] = []
+    for segment in path.split("/"):
+        if segment == ".":
+            continue
+        if segment == "..":
+            if output and output[-1] != "":
+                output.pop()
+            continue
+        output.append(segment)
+    normalized = "/".join(output)
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if trailing_slash and normalized != "/" and not normalized.endswith("/"):
+        normalized += "/"
+    return normalized or "/"
 
 
 def _safe_git_locator(params: Any, params_text: str) -> str | None:

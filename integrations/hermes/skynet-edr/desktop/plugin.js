@@ -22,7 +22,22 @@ const TRACE_LIMIT = 10;
 const PAGE_LIMIT = 50;
 const MAX_OFFSET = 10000;
 const MAX_ID_LENGTH = 256;
+const MAX_TEXT_LENGTH = 4096;
+const MAX_TRACE_IDS = 10;
+const MAX_EVIDENCE_ITEMS = 50;
 const CONTRACT_ERROR = 'Invalid read-only risk projection';
+const SEVERITIES = new Set(['critical', 'high', 'medium', 'low', 'informational']);
+const STATUSES = new Set(['open', 'investigating', 'contained', 'resolved', 'dismissed']);
+const SOURCE_KINDS = new Set(['sensor', 'process', 'file', 'network', 'mcp_tool', 'configuration', 'scheduled_task', 'messaging']);
+const ARTIFACT_KINDS = new Set(['email', 'url', 'git_repository', 'code', 'file', 'message', 'mcp', 'terminal', 'unknown']);
+const TRUST_LEVELS = new Set(['sensor_observation', 'agent_action', 'tool_output', 'untrusted_content', 'unknown']);
+const EVENT_TYPES = new Set(['agent.tool.requested', 'agent.tool.completed', 'agent.content.ingested', 'agent.network.egress', 'agent.file.accessed', 'agent.mcp.tool.requested', 'agent.config.changed', 'agent.automation.scheduled', 'agent.approval.granted', 'agent.llm.call.requested', 'agent.llm.call.completed']);
+const INDICATOR_BOOL_KEYS = new Set(['network_indicator', 'direct_ip', 'delivery_indicator', 'sensitive_access', 'prompt_injection_indicator', 'malware_indicator', 'content_omitted', 'result_omitted', 'instruction_authority']);
+const INDICATOR_STRING_VALUES = {
+  command_class: new Set(['network_egress', 'file_read', 'code_execution', 'other']),
+  expected_disposition: new Set(['benign', 'suspicious', 'malicious', 'unknown']),
+  drift_kind: new Set(['changed', 'created', 'deleted']),
+};
 
 function text(value, fallback = 'unknown') {
   if (value === null || value === undefined || value === '') return fallback;
@@ -149,33 +164,149 @@ function boundedPageNumber(value, max = MAX_OFFSET) {
   return Number.isInteger(value) && value >= 0 && value <= max;
 }
 
+function boundedSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
 function failContract() {
   throw new Error(CONTRACT_ERROR);
 }
 
-function validateRiskPage(data) {
+function boundedString(value, max = MAX_TEXT_LENGTH) {
+  return typeof value === 'string' && value.length > 0 && value.length <= max;
+}
+
+function nullableBoundedString(value, max = MAX_TEXT_LENGTH) {
+  return value === null || value === undefined || boundedString(value, max);
+}
+
+function boundedId(value) {
+  return boundedString(value, MAX_ID_LENGTH);
+}
+
+function enumValue(value, allowed) {
+  return typeof value === 'string' && allowed.has(value);
+}
+
+function validateSensor(value) {
+  if (!isPlainObject(value)) failContract();
+  if (!enumValue(value.kind, SOURCE_KINDS)) failContract();
+  if (!boundedId(value.sensor)) failContract();
+  if (!nullableBoundedString(value.integration, MAX_ID_LENGTH)) failContract();
+}
+
+function validateArtifact(value) {
+  if (!isPlainObject(value)) failContract();
+  if (!enumValue(value.kind, ARTIFACT_KINDS)) failContract();
+  if (!nullableBoundedString(value.provider, MAX_ID_LENGTH)) failContract();
+  if (!boundedString(value.display_label, MAX_TEXT_LENGTH)) failContract();
+  if (!nullableBoundedString(value.trust_level, MAX_ID_LENGTH)) failContract();
+  if (typeof value.trust_level === 'string' && !enumValue(value.trust_level, TRUST_LEVELS)) failContract();
+}
+
+function validateTraceIds(value) {
+  if (!Array.isArray(value) || value.length > MAX_TRACE_IDS) failContract();
+  const seen = new Set();
+  value.forEach((trace) => {
+    if (!boundedId(trace) || seen.has(trace)) failContract();
+    seen.add(trace);
+  });
+}
+
+function validateRiskBase(data) {
+  if (!boundedId(data.id)) failContract();
+  if (!enumValue(data.severity, SEVERITIES)) failContract();
+  if (!(data.confidence === null || data.confidence === undefined || Number.isFinite(data.confidence))) failContract();
+  if (!enumValue(data.status, STATUSES)) failContract();
+  if (!nullableBoundedString(data.rule_id, MAX_ID_LENGTH)) failContract();
+  if (!boundedString(data.title)) failContract();
+  if (!boundedString(data.summary)) failContract();
+  validateSensor(data.sensor);
+  validateArtifact(data.artifact);
+  if (!boundedSafeInteger(data.first_observed_at_unix_ms)) failContract();
+  if (!boundedSafeInteger(data.last_observed_at_unix_ms)) failContract();
+  if (data.last_observed_at_unix_ms < data.first_observed_at_unix_ms) failContract();
+  if (!boundedSafeInteger(data.event_count)) failContract();
+  validateTraceIds(data.trace_ids);
+  if (typeof data.contains_sensitive_data !== 'boolean') failContract();
+}
+
+function validateIndicators(value) {
+  if (!isPlainObject(value)) failContract();
+  Object.entries(value).forEach(([key, val]) => {
+    if (INDICATOR_BOOL_KEYS.has(key)) {
+      if (typeof val !== 'boolean') failContract();
+      return;
+    }
+    const allowed = INDICATOR_STRING_VALUES[key];
+    if (!allowed || !enumValue(val, allowed)) failContract();
+  });
+}
+
+function validateRedaction(value) {
+  if (!isPlainObject(value)) failContract();
+  if (typeof value.contains_sensitive_data !== 'boolean') failContract();
+  if (!boundedSafeInteger(value.redacted_count)) failContract();
+}
+
+function validateEvidence(value, seenEvents) {
+  if (!isPlainObject(value)) failContract();
+  if (!boundedId(value.event_id) || seenEvents.has(value.event_id)) failContract();
+  seenEvents.add(value.event_id);
+  if (!boundedSafeInteger(value.timestamp_unix_ms)) failContract();
+  if (!enumValue(value.severity, SEVERITIES)) failContract();
+  if (!nullableBoundedString(value.event_type, MAX_ID_LENGTH)) failContract();
+  if (typeof value.event_type === 'string' && !enumValue(value.event_type, EVENT_TYPES)) failContract();
+  if (!boundedString(value.title)) failContract();
+  validateSensor(value.sensor);
+  validateArtifact(value.artifact);
+  if (!nullableBoundedString(value.trust_level, MAX_ID_LENGTH)) failContract();
+  if (typeof value.trust_level === 'string' && !enumValue(value.trust_level, TRUST_LEVELS)) failContract();
+  if (!nullableBoundedString(value.rule_id, MAX_ID_LENGTH)) failContract();
+  validateRedaction(value.redaction);
+  validateIndicators(value.indicators);
+}
+
+function validateRiskPage(data, expectedOffset) {
   if (!isPlainObject(data) || data.schema_version !== 'skynet.risk.v1' || data.read_only !== true || !Array.isArray(data.items)) failContract();
   const page = data.page;
   if (!isPlainObject(page)) failContract();
-  if (!boundedPageNumber(page.limit, 100) || page.limit < 1) failContract();
-  if (!boundedPageNumber(page.offset)) failContract();
+  if (page.limit !== PAGE_LIMIT) failContract();
+  if (!boundedPageNumber(page.offset) || page.offset !== expectedOffset) failContract();
   if (!boundedPageNumber(page.returned, page.limit)) failContract();
-  if (!boundedPageNumber(page.total)) failContract();
+  if (!boundedSafeInteger(page.total)) failContract();
   if (typeof page.has_more !== 'boolean') failContract();
   if (page.returned !== data.items.length) failContract();
   if (page.has_more !== (page.offset + page.returned < page.total)) failContract();
   if (page.returned > 0 && page.offset + page.returned > page.total) failContract();
+  const seen = new Set();
+  data.items.forEach((item) => {
+    if (!isPlainObject(item)) failContract();
+    validateRiskBase(item);
+    if (seen.has(item.id)) failContract();
+    seen.add(item.id);
+  });
   return data;
 }
 
-function validateRiskDetail(data) {
+function validateRiskDetail(data, expectedId) {
   if (!isPlainObject(data) || data.schema_version !== 'skynet.risk.v1' || data.read_only !== true) failContract();
-  if (typeof data.id !== 'string' || data.id.length < 1 || data.id.length > MAX_ID_LENGTH) failContract();
+  validateRiskBase(data);
+  if (data.id !== expectedId) failContract();
+  if (!Array.isArray(data.evidence) || data.evidence.length > MAX_EVIDENCE_ITEMS) failContract();
+  const seenEvents = new Set();
+  data.evidence.forEach((event) => validateEvidence(event, seenEvents));
   return data;
 }
 
 function validateStatus(data) {
   if (!isPlainObject(data) || data.read_only !== true) failContract();
+  for (const key of ['product', 'binary', 'run_mode', 'server']) {
+    if (!boundedString(data[key], MAX_ID_LENGTH)) failContract();
+  }
+  for (const key of ['tool_count', 'incident_count', 'event_count']) {
+    if (!boundedSafeInteger(data[key])) failContract();
+  }
   return data;
 }
 
@@ -206,7 +337,7 @@ function backendState(status, risks) {
   if (status.error || risks.error) return 'Backend health: unavailable or invalid response';
   try {
     validateStatus(status.data);
-    validateRiskPage(risks.data);
+    validateRiskPage(risks.data, risks.data?.page?.offset);
     return 'Backend health: passive read-only projection online';
   } catch (_error) {
     return 'Backend health: response received, read-only flag not asserted';
@@ -227,7 +358,7 @@ function RiskExplorer({ ctx }) {
   const [artifactKind, setArtifactKind] = React.useState('all');
   const risks = useQuery({
     queryKey: ['skynet-edr', 'risks', offset],
-    queryFn: () => Promise.resolve(ctx.rest(riskPagePath(offset))).then(validateRiskPage),
+    queryFn: () => Promise.resolve(ctx.rest(riskPagePath(offset))).then((data) => validateRiskPage(data, offset)),
     refetchInterval: POLL_MS,
   });
   const health = useQuery({
@@ -237,7 +368,7 @@ function RiskExplorer({ ctx }) {
   });
   const detail = useQuery({
     queryKey: ['skynet-edr', 'risk', selectedId],
-    queryFn: () => Promise.resolve(ctx.rest('/risks/' + encodeURIComponent(selectedId))).then(validateRiskDetail),
+    queryFn: () => Promise.resolve(ctx.rest('/risks/' + encodeURIComponent(selectedId))).then((data) => validateRiskDetail(data, selectedId)),
     enabled: Boolean(selectedId),
     refetchInterval: POLL_MS,
   });
@@ -358,7 +489,7 @@ function RiskRow({ risk, selected, onSelect }) {
 }
 
 function RiskDetail({ detail }) {
-  if (detail.isLoading) return jsx('section', { 'aria-label': 'Risk detail loading', style: styles.detail, children: jsx(Skeleton, { style: styles.skeletonTall }) });
+  if (detail.isLoading) return jsxs('section', { 'aria-label': 'Risk detail loading', role: 'status', 'aria-live': 'polite', style: styles.detail, children: [jsx('span', { style: styles.visuallyHidden, children: 'Loading selected risk detail' }), jsx(Skeleton, { style: styles.skeletonTall })] });
   if (detail.error) return jsx('section', { 'aria-label': 'Risk detail error', style: styles.detail, children: jsx(ErrorState, { title: 'Unable to load risk detail', description: 'The read-only backend returned an error for this risk.' }) });
   const risk = detail.data;
   if (!risk) return null;
@@ -432,7 +563,7 @@ function EvidenceItem({ event }) {
   const badges = indicatorBadges(event.indicators);
   return jsxs('li', { style: styles.evidenceItem, children: [
     jsxs('div', { style: styles.evidenceTop, children: [
-      jsx('span', { style: styles.kicker, children: formatTime(event.timestamp_unix_ms) }),
+      jsx('span', { style: styles.kicker, children: formatTime(event.timestamp_unix_ms) + ' · event ' + text(event.event_id) }),
       jsx(Badge, { variant: badgeVariantForSeverity(event.severity), children: labelFor(event.severity) }),
     ] }),
     jsx('div', { style: styles.evidenceTitle, children: titleText(event.title, 'Untitled event') }),
