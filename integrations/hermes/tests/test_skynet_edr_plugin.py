@@ -566,6 +566,40 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         check = subprocess.run(["node", "--check", str(DESKTOP_PLUGIN_PATH)], capture_output=True, text=True, check=False)
         self.assertEqual(check.returncode, 0, check.stderr)
 
+    def test_desktop_plugin_registers_palette_command_with_current_sdk_shape(self):
+        text = DESKTOP_PLUGIN_PATH.read_text()
+        transformed = re.sub(r"import\s+React\s+from\s+['\"]react['\"];\n", "const React = {useState() { return [null, () => {}]; }};\n", text)
+        transformed = re.sub(r"import\s+\{\s*jsx,\s*jsxs\s*\}\s+from\s+['\"]react/jsx-runtime['\"];\n", "const jsx = (type, props) => ({type, props}); const jsxs = jsx;\n", transformed)
+        transformed = re.sub(
+            r"import\s+\{.*?\}\s+from\s+['\"]@hermes/plugin-sdk['\"];\n",
+            "const Badge = 'Badge'; const Button = 'Button'; const EmptyState = 'EmptyState'; const ErrorState = 'ErrorState'; const ScrollArea = 'ScrollArea'; const SearchField = 'SearchField'; const Skeleton = 'Skeleton'; const PALETTE_AREA = 'palette'; const ROUTES_AREA = 'routes'; const SIDEBAR_NAV_AREA = 'sidebar'; const navigateCalls = []; const host = {navigate(path) { navigateCalls.push(path); }}; const useQuery = () => ({}); const fmtDateTime = {format(value) { return Number.isNaN(value.getTime()) ? 'bad' : `fmt:${value.getTime()}`; }};\n",
+            transformed,
+            flags=re.S,
+        )
+        transformed = transformed.replace("export default", "const pluginDefault =")
+        transformed += """
+const registered = [];
+pluginDefault.register({registerMany(items) { registered.push(...items); }});
+const palette = registered.find(item => item.area === PALETTE_AREA && item.id === 'open-risks');
+if (!palette) throw new Error('missing open-risks palette contribution');
+if (palette.id !== 'open-risks') throw new Error('palette contribution id must be open-risks');
+if (!palette.data || palette.data.id !== 'skynet-edr.open-risks') throw new Error('palette data id must be skynet-edr.open-risks');
+if (palette.data.label !== 'Open Skynet-EDR risks') throw new Error('palette label must be Open Skynet-EDR risks');
+if (JSON.stringify(palette.data.keywords) !== JSON.stringify(['security', 'risk', 'edr'])) throw new Error('palette keywords must stay stable');
+if (typeof palette.data.run !== 'function') throw new Error('palette data.run must be callable');
+if (Object.prototype.hasOwnProperty.call(palette, 'run')) throw new Error('palette contribution must not have top-level run');
+palette.data.run();
+if (JSON.stringify(navigateCalls) !== JSON.stringify(['/skynet-edr/risks'])) throw new Error('palette command must navigate to risks exactly once');
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as handle:
+            handle.write(transformed)
+            script_path = handle.name
+        try:
+            check = subprocess.run(["node", script_path], capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stderr)
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
     def test_desktop_plugin_pure_helpers_project_safe_operator_text(self):
         text = DESKTOP_PLUGIN_PATH.read_text()
         transformed = re.sub(r"import\s+React\s+from\s+['\"]react['\"];\n", "const React = {useState() { return [null, () => {}]; }};\n", text)

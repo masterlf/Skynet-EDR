@@ -412,7 +412,7 @@ export default {
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PAGE_PATH }, render: () => jsx(RiskExplorer, { ctx }) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PAGE_PATH, label: 'Skynet-EDR', codicon: 'shield' } },
-      { id: 'open-risks', area: PALETTE_AREA, data: { title: 'Open Skynet-EDR risks', keywords: ['security', 'risk', 'edr'] }, run: () => host.navigate('/skynet-edr/risks') },
+      { id: 'open-risks', area: PALETTE_AREA, data: { id: 'skynet-edr.open-risks', label: 'Open Skynet-EDR risks', keywords: ['security', 'risk', 'edr'], run: () => host.navigate('/skynet-edr/risks') } },
     ]);
   },
 };
