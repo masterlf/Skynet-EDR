@@ -388,6 +388,27 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertFalse((self.state_dir / "events.jsonl").exists())
 
 
+def run_desktop_plugin_script(extra_js: str, react_stub: str = "const React = {useState(initial) { return [initial, () => {}]; }};\n") -> subprocess.CompletedProcess:
+    text = DESKTOP_PLUGIN_PATH.read_text()
+    transformed = re.sub(r"import\s+React\s+from\s+['\"]react['\"];\n", react_stub, text)
+    transformed = re.sub(r"import\s+\{\s*jsx,\s*jsxs\s*\}\s+from\s+['\"]react/jsx-runtime['\"];\n", "const jsx = (type, props) => ({type, props: props || {}}); const jsxs = jsx;\n", transformed)
+    transformed = re.sub(
+        r"import\s+\{.*?\}\s+from\s+['\"]@hermes/plugin-sdk['\"];\n",
+        "const Badge = 'Badge'; const Button = 'Button'; const EmptyState = 'EmptyState'; const ErrorState = 'ErrorState'; const ScrollArea = 'ScrollArea'; const SearchField = 'SearchField'; const Skeleton = 'Skeleton'; const PALETTE_AREA = 'palette'; const ROUTES_AREA = 'routes'; const SIDEBAR_NAV_AREA = 'sidebar'; const navigateCalls = []; const host = {navigate(path) { navigateCalls.push(path); }}; let queryCalls = []; const useQuery = (config) => { queryCalls.push(config); return {data: undefined, isLoading: false, isFetching: false, error: null, refetch() {}}; }; const fmtDateTime = {format(value) { return Number.isNaN(value.getTime()) ? 'bad' : `fmt:${value.getTime()}`; }};\n",
+        transformed,
+        flags=re.S,
+    )
+    transformed = transformed.replace("export default", "const pluginDefault =")
+    transformed += extra_js
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as handle:
+        handle.write(transformed)
+        script_path = handle.name
+    try:
+        return subprocess.run(["node", script_path], capture_output=True, text=True, check=False)
+    finally:
+        Path(script_path).unlink(missing_ok=True)
+
+
 class SkynetEdrHermesDashboardTests(unittest.TestCase):
     def test_dashboard_backend_source_is_read_only_loopback_proxy(self):
         text = DASHBOARD_API_PATH.read_text()
@@ -674,17 +695,7 @@ if (JSON.stringify(navigateCalls) !== JSON.stringify(['/skynet-edr/risks'])) thr
             Path(script_path).unlink(missing_ok=True)
 
     def test_desktop_plugin_pure_helpers_project_safe_operator_text(self):
-        text = DESKTOP_PLUGIN_PATH.read_text()
-        transformed = re.sub(r"import\s+React\s+from\s+['\"]react['\"];\n", "const React = {useState() { return [null, () => {}]; }};\n", text)
-        transformed = re.sub(r"import\s+\{\s*jsx,\s*jsxs\s*\}\s+from\s+['\"]react/jsx-runtime['\"];\n", "const jsx = (type, props) => ({type, props}); const jsxs = jsx;\n", transformed)
-        transformed = re.sub(
-            r"import\s+\{.*?\}\s+from\s+['\"]@hermes/plugin-sdk['\"];\n",
-            "const Badge = 'Badge'; const Button = 'Button'; const EmptyState = 'EmptyState'; const ErrorState = 'ErrorState'; const ScrollArea = 'ScrollArea'; const SearchField = 'SearchField'; const Skeleton = 'Skeleton'; const PALETTE_AREA = 'palette'; const ROUTES_AREA = 'routes'; const SIDEBAR_NAV_AREA = 'sidebar'; const host = {navigate() {}}; const useQuery = () => ({}); const fmtDateTime = {format(value) { return Number.isNaN(value.getTime()) ? 'bad' : `fmt:${value.getTime()}`; }};\n",
-            transformed,
-            flags=re.S,
-        )
-        transformed = transformed.replace("export default", "const pluginDefault =")
-        transformed += """
+        check = run_desktop_plugin_script("""
 if (formatTime(1234) !== 'fmt:1234') throw new Error('finite timestamp must use fmtDateTime.format(new Date(...))');
 for (const value of [null, undefined, '', 'not-a-number', Number.NaN, Infinity, -Infinity]) {
   if (formatTime(value) !== 'unknown') throw new Error('invalid timestamp must be unknown');
@@ -695,15 +706,79 @@ if (filterRisks(filtered, {search:'nomatch', severity:'all', status:'all', artif
 const projected = indicatorBadges({network_indicator: true, direct_ip: false, command_class: 'network_egress', hostile: '<script>'});
 if (!projected.some(item => item.label === 'Network') || !projected.some(item => item.label === 'Command class' && item.value === 'network egress')) throw new Error('allowlisted indicators must project to stable labels');
 if (projected.some(item => item.label === 'hostile' || item.value === '<script>')) throw new Error('unallowlisted indicators must not render');
-"""
-        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as handle:
-            handle.write(transformed)
-            script_path = handle.name
-        try:
-            check = subprocess.run(["node", script_path], capture_output=True, text=True, check=False)
-            self.assertEqual(check.returncode, 0, check.stderr)
-        finally:
-            Path(script_path).unlink(missing_ok=True)
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_pagination_contracts_and_backend_state_are_fail_closed(self):
+        check = run_desktop_plugin_script("""
+const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[{id:'risk-1'}], page:{limit:50, offset:0, returned:1, total:51, has_more:true}};
+const page = validateRiskPage(canonicalPage);
+if (page !== canonicalPage) throw new Error('valid risk page should be returned unchanged');
+const canonicalDetail = {schema_version:'skynet.risk.v1', read_only:true, id:'risk-1'};
+if (validateRiskDetail(canonicalDetail) !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
+const canonicalStatus = {read_only:true, ok:true};
+if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('valid status should be returned unchanged');
+for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, page:{...canonicalPage.page, limit:101}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
+  let failed = false;
+  try { validateRiskPage(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('invalid risk page contract must fail closed');
+}
+for (const bad of [null, [], {}, {...canonicalDetail, schema_version:'wrong'}, {...canonicalDetail, read_only:false}, {...canonicalDetail, id:''}, {...canonicalDetail, id:'x'.repeat(257)}]) {
+  let failed = false;
+  try { validateRiskDetail(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('invalid risk detail contract must fail closed');
+}
+for (const bad of [null, [], {}, {read_only:false}]) {
+  let failed = false;
+  try { validateStatus(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('invalid status contract must fail closed');
+}
+if (backendState({data: canonicalStatus}, {data: canonicalPage}) !== 'Backend health: passive read-only projection online') throw new Error('both valid contracts should be online');
+if (backendState({data: canonicalStatus}, {data: undefined}) === 'Backend health: passive read-only projection online') throw new Error('status alone must not be online');
+if (backendState({data: undefined}, {data: canonicalPage}) === 'Backend health: passive read-only projection online') throw new Error('risk page alone must not be online');
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_pagination_url_query_key_and_offset_helpers(self):
+        check = run_desktop_plugin_script("""
+if (PAGE_LIMIT !== 50) throw new Error('page limit must stay 50');
+if (nextOffset({offset:0, has_more:true}) !== 50) throw new Error('next page should advance by 50');
+if (nextOffset({offset:10000, has_more:true}) !== 10000) throw new Error('next page must clamp to 10000');
+if (nextOffset({offset:50, has_more:false}) !== 50) throw new Error('next page must not advance without has_more');
+if (previousOffset(0) !== 0 || previousOffset(49) !== 0 || previousOffset(50) !== 0 || previousOffset(100) !== 50) throw new Error('previous page must clamp and step by 50');
+const requested = [];
+RiskExplorer({ctx:{rest(path) { requested.push(path); return {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:0, returned:0, total:0, has_more:false}}; }}});
+const riskQuery = queryCalls.find(call => JSON.stringify(call.queryKey) === JSON.stringify(['skynet-edr','risks',0]));
+if (!riskQuery) throw new Error('risk queryKey must include offset 0');
+riskQuery.queryFn();
+if (!requested.includes('/risks?limit=50&offset=0')) throw new Error('risk query must request offset 0');
+queryCalls = [];
+const React50 = {calls: 0, useState(initial) { this.calls += 1; return [this.calls === 2 ? 50 : initial, () => {}]; }};
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_ui_remediation_source_semantics_and_stale_data(self):
+        text = DESKTOP_PLUGIN_PATH.read_text()
+        self.assertIn("setOffset(0)", text)
+        self.assertIn("setSelectedId(null)", text)
+        self.assertIn("detail.refetch()", text)
+        self.assertIn("role: 'status'", text)
+        self.assertIn("'aria-live': 'polite'", text)
+        self.assertIn("'Previous page'", text)
+        self.assertIn("'Next page'", text)
+        self.assertRegex(text, r"jsx\('ul', \{[^\n]+children: items\.map")
+        self.assertRegex(text, r"jsx\('li', \{[^\n]+jsx\('button'")
+        self.assertNotIn("role: 'listitem'", text)
+        self.assertIn("riskPageAvailable", text)
+        self.assertNotIn("risks.isLoading || risks.error ? []", text)
+        self.assertIn("Stale data", text)
+        self.assertIn("This warning is generic", text)
+        self.assertNotIn("Locator digest", text)
+        self.assertNotIn("locator_hash", text)
+        for safe_field in ["rule_id", "sensor?.kind", "sensor?.sensor", "sensor?.integration", "artifact?.kind", "artifact?.display_label", "artifact?.provider", "artifact?.trust_level"]:
+            self.assertIn(safe_field, text)
+        for unsafe_field in ["attributes", "url", "path", "command", "raw_content"]:
+            self.assertNotRegex(text, rf"event\.{unsafe_field}|risk\.{unsafe_field}")
 
 
 if __name__ == "__main__":

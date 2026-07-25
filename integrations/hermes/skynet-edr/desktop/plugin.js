@@ -19,6 +19,10 @@ import {
 const POLL_MS = 10000;
 const PAGE_PATH = '/skynet-edr/risks';
 const TRACE_LIMIT = 10;
+const PAGE_LIMIT = 50;
+const MAX_OFFSET = 10000;
+const MAX_ID_LENGTH = 256;
+const CONTRACT_ERROR = 'Invalid read-only risk projection';
 
 function text(value, fallback = 'unknown') {
   if (value === null || value === undefined || value === '') return fallback;
@@ -137,45 +141,112 @@ function indicatorBadges(indicators) {
   return badges;
 }
 
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function boundedPageNumber(value, max = MAX_OFFSET) {
+  return Number.isInteger(value) && value >= 0 && value <= max;
+}
+
+function failContract() {
+  throw new Error(CONTRACT_ERROR);
+}
+
+function validateRiskPage(data) {
+  if (!isPlainObject(data) || data.schema_version !== 'skynet.risk.v1' || data.read_only !== true || !Array.isArray(data.items)) failContract();
+  const page = data.page;
+  if (!isPlainObject(page)) failContract();
+  if (!boundedPageNumber(page.limit, 100) || page.limit < 1) failContract();
+  if (!boundedPageNumber(page.offset)) failContract();
+  if (!boundedPageNumber(page.returned, page.limit)) failContract();
+  if (!boundedPageNumber(page.total)) failContract();
+  if (typeof page.has_more !== 'boolean') failContract();
+  return data;
+}
+
+function validateRiskDetail(data) {
+  if (!isPlainObject(data) || data.schema_version !== 'skynet.risk.v1' || data.read_only !== true) failContract();
+  if (typeof data.id !== 'string' || data.id.length < 1 || data.id.length > MAX_ID_LENGTH) failContract();
+  return data;
+}
+
+function validateStatus(data) {
+  if (!isPlainObject(data) || data.read_only !== true) failContract();
+  return data;
+}
+
+function previousOffset(offset) {
+  if (!Number.isFinite(offset)) return 0;
+  return Math.max(0, Math.min(MAX_OFFSET, Math.floor(offset / PAGE_LIMIT) * PAGE_LIMIT) - PAGE_LIMIT);
+}
+
+function nextOffset(page) {
+  const offset = Number.isFinite(page?.offset) ? page.offset : 0;
+  if (page?.has_more !== true) return Math.max(0, Math.min(MAX_OFFSET, offset));
+  return Math.max(0, Math.min(MAX_OFFSET, offset + PAGE_LIMIT));
+}
+
 function pageMeta(data) {
-  return data?.page || { returned: 0, total: 0, limit: 50, offset: 0, has_more: false };
+  return data?.page || { returned: 0, total: 0, limit: PAGE_LIMIT, offset: 0, has_more: false };
+}
+
+function pageRangeText(meta) {
+  if (!meta || meta.returned < 1) return 'Showing 0 of ' + countText(meta?.total) + ' risks';
+  const start = meta.offset + 1;
+  const end = meta.offset + meta.returned;
+  return 'Showing ' + countText(start) + '–' + countText(end) + ' of ' + countText(meta.total) + ' risks';
 }
 
 function backendState(status, risks) {
   if (status.isLoading || risks.isLoading) return 'Backend health: checking read-only loopback';
   if (status.error || risks.error) return 'Backend health: unavailable or invalid response';
-  if (status.data?.read_only === true || risks.data?.read_only === true) return 'Backend health: passive read-only projection online';
+  if (status.data?.read_only === true && risks.data?.read_only === true && risks.data?.schema_version === 'skynet.risk.v1') return 'Backend health: passive read-only projection online';
   return 'Backend health: response received, read-only flag not asserted';
 }
 
 function RiskExplorer({ ctx }) {
   const [selectedId, setSelectedId] = React.useState(null);
+  const [offset, setOffset] = React.useState(0);
   const [search, setSearch] = React.useState('');
   const [severity, setSeverity] = React.useState('all');
   const [status, setStatus] = React.useState('all');
   const [artifactKind, setArtifactKind] = React.useState('all');
   const risks = useQuery({
-    queryKey: ['skynet-edr', 'risks'],
-    queryFn: () => ctx.rest('/risks?limit=50&offset=0'),
+    queryKey: ['skynet-edr', 'risks', offset],
+    queryFn: () => Promise.resolve(ctx.rest('/risks?limit=' + PAGE_LIMIT + '&offset=' + offset)).then(validateRiskPage),
     refetchInterval: POLL_MS,
   });
   const health = useQuery({
     queryKey: ['skynet-edr', 'status'],
-    queryFn: () => ctx.rest('/status'),
+    queryFn: () => Promise.resolve(ctx.rest('/status')).then(validateStatus),
     refetchInterval: POLL_MS,
   });
   const detail = useQuery({
     queryKey: ['skynet-edr', 'risk', selectedId],
-    queryFn: () => ctx.rest('/risks/' + encodeURIComponent(selectedId)),
+    queryFn: () => Promise.resolve(ctx.rest('/risks/' + encodeURIComponent(selectedId))).then(validateRiskDetail),
     enabled: Boolean(selectedId),
     refetchInterval: POLL_MS,
   });
-  const pageItems = Array.isArray(risks.data?.items) ? risks.data.items : [];
-  const items = risks.isLoading || risks.error ? [] : filterRisks(pageItems, { search, severity, status, artifactKind });
+  const resetPageForFilter = (setter) => (value) => {
+    setter(value);
+    setOffset(0);
+    setSelectedId(null);
+  };
+  const changePage = (next) => {
+    setOffset(next);
+    setSelectedId(null);
+  };
+  const riskPageAvailable = Boolean(risks.data);
+  const pageItems = riskPageAvailable && Array.isArray(risks.data.items) ? risks.data.items : [];
+  const items = riskPageAvailable ? filterRisks(pageItems, { search, severity, status, artifactKind }) : [];
   const meta = pageMeta(risks.data);
-  const hasPageRisks = pageItems.length > 0;
+  const hasPageRisks = riskPageAvailable && pageItems.length > 0;
   const noFilterMatch = hasPageRisks && !items.length;
   const isFetching = risks.isFetching || health.isFetching;
+  const initialLoading = risks.isLoading && !riskPageAvailable;
+  const initialError = !risks.isLoading && risks.error && !riskPageAvailable;
+  const staleError = risks.error && riskPageAvailable;
   return jsxs('section', { 'aria-label': 'Skynet-EDR Risk Explorer', style: styles.shell, children: [
     jsxs('header', { style: styles.header, children: [
       jsxs('div', { style: styles.titleBlock, children: [
@@ -184,31 +255,36 @@ function RiskExplorer({ ctx }) {
           jsx(Badge, { variant: health.error || risks.error ? 'destructive' : 'muted', children: backendState(health, risks) }),
         ] }),
         jsx('h2', { style: styles.heading, children: 'Skynet-EDR Risk Explorer' }),
-        jsx('p', { style: styles.muted, children: 'Current page risk triage from redacted skynet.risk.v1 projections. Raw prompts, commands, destinations and local paths are not rendered.' }),
+        jsx('p', { style: styles.muted, children: 'Current server page risk triage from redacted skynet.risk.v1 projections. Search and filters apply only to the loaded server page. Raw prompts, commands, destinations and local paths are not rendered.' }),
       ] }),
-      jsx(Button, { type: 'button', variant: 'outline', onClick: () => { risks.refetch(); health.refetch(); }, disabled: isFetching, children: isFetching ? 'Refreshing…' : 'Refresh' }),
+      jsx(Button, { type: 'button', variant: 'outline', onClick: () => { risks.refetch(); health.refetch(); if (selectedId) detail.refetch(); }, disabled: isFetching, children: isFetching ? 'Refreshing…' : 'Refresh' }),
     ] }),
-    jsx(PageMetadata, { meta, loadedCount: pageItems.length, visibleCount: items.length }),
-    jsx(Filters, { search, setSearch, severity, setSeverity, status, setStatus, artifactKind, setArtifactKind }),
-    risks.isLoading ? jsx(LoadingState, {}) : null,
-    !risks.isLoading && risks.error ? jsx(ErrorState, { title: 'Unable to load risks', description: 'The read-only backend did not return a valid risk page.' }) : null,
-    !risks.isLoading && !risks.error && !hasPageRisks ? jsx(EmptyState, { title: 'No risks recorded', description: 'The loaded current page contains no risk projections.' }) : null,
-    !risks.isLoading && !risks.error && noFilterMatch ? jsx(EmptyState, { title: 'No current-page matches', description: 'The current page has risks, but none match the active filters or search.' }) : null,
-    !risks.isLoading && !risks.error && items.length ? jsxs('div', { style: styles.workspace, children: [
+    riskPageAvailable ? jsx(PageMetadata, { meta, loadedCount: pageItems.length, visibleCount: items.length, onPrevious: () => changePage(previousOffset(meta.offset)), onNext: () => changePage(nextOffset(meta)) }) : null,
+    jsx(Filters, { search, setSearch: resetPageForFilter(setSearch), severity, setSeverity: resetPageForFilter(setSeverity), status, setStatus: resetPageForFilter(setStatus), artifactKind, setArtifactKind: resetPageForFilter(setArtifactKind) }),
+    initialLoading ? jsx(LoadingState, {}) : null,
+    initialError ? jsx(ErrorState, { title: 'Unable to load risks', description: 'The read-only backend did not return a valid risk page.' }) : null,
+    staleError ? jsx('div', { role: 'status', 'aria-live': 'polite', style: styles.warning, children: 'Stale data: the latest refresh is unavailable. This warning is generic and cached validated rows remain visible.' }) : null,
+    riskPageAvailable && !hasPageRisks ? jsx(EmptyState, { title: 'No risks recorded', description: 'The loaded current server page contains no risk projections.' }) : null,
+    riskPageAvailable && noFilterMatch ? jsx(EmptyState, { title: 'No current-page matches', description: 'The current server page has risks, but none match the active filters or search.' }) : null,
+    riskPageAvailable && items.length ? jsxs('div', { style: styles.workspace, children: [
       jsx(RiskList, { items, selectedId, setSelectedId }),
       selectedId ? jsx(RiskDetail, { detail }) : jsx(EmptyState, { title: 'Select a risk', description: 'Open an item to inspect read-only context, provenance, traces and bounded evidence.' }),
     ] }) : null,
   ] });
 }
 
-function PageMetadata({ meta, loadedCount, visibleCount }) {
+function PageMetadata({ meta, loadedCount, visibleCount, onPrevious, onNext }) {
   return jsxs('aside', { 'aria-label': 'Page metadata', style: styles.metaGrid, children: [
     jsx(MetaCard, { label: 'Current page returned', value: countText(meta.returned), note: 'API returned count' }),
     jsx(MetaCard, { label: 'Current page visible', value: countText(visibleCount), note: 'after current-page filters' }),
     jsx(MetaCard, { label: 'Current page loaded', value: countText(loadedCount), note: 'items available locally' }),
     jsx(MetaCard, { label: 'Total reported by API', value: countText(meta.total), note: 'server-reported total' }),
-    jsx(MetaCard, { label: 'Limit / offset', value: countText(meta.limit) + ' / ' + countText(meta.offset), note: 'pagination metadata' }),
-    jsx(MetaCard, { label: 'Has more', value: meta.has_more ? 'yes' : 'no', note: 'no local page control' }),
+    jsx(MetaCard, { label: 'Page range', value: pageRangeText(meta), note: 'server pagination window' }),
+    jsx(MetaCard, { label: 'Has more', value: meta.has_more ? 'yes' : 'no', note: 'server page control' }),
+    jsxs('div', { style: styles.pager, children: [
+      jsx(Button, { type: 'button', variant: 'outline', onClick: onPrevious, disabled: meta.offset <= 0, 'aria-label': 'Previous page', children: 'Previous' }),
+      jsx(Button, { type: 'button', variant: 'outline', onClick: onNext, disabled: meta.has_more !== true || meta.offset >= MAX_OFFSET, 'aria-label': 'Next page', children: 'Next' }),
+    ] }),
   ] });
 }
 
@@ -240,18 +316,19 @@ function SelectField({ label, value, onChange, children }) {
 }
 
 function LoadingState() {
-  return jsxs('div', { style: styles.loading, children: [
+  return jsxs('div', { role: 'status', 'aria-live': 'polite', style: styles.loading, children: [
+    jsx('span', { style: styles.visuallyHidden, children: 'Loading read-only risk projections' }),
     jsx(Skeleton, { style: styles.skeletonTall }),
     jsx(Skeleton, { style: styles.skeletonShort }),
   ] });
 }
 
 function RiskList({ items, selectedId, setSelectedId }) {
-  return jsx('section', { 'aria-label': 'Current page risk list', style: styles.panel, children: jsx(ScrollArea, { style: styles.list, children: jsx('div', { role: 'list', style: styles.listInner, children: items.map((risk) => jsx(RiskRow, { risk, selected: selectedId === risk.id, onSelect: () => setSelectedId(risk.id) }, risk.id)) }) }) });
+  return jsx('section', { 'aria-label': 'Current page risk list', style: styles.panel, children: jsx(ScrollArea, { style: styles.list, children: jsx('ul', { style: styles.listInner, children: items.map((risk) => jsx(RiskRow, { risk, selected: selectedId === risk.id, onSelect: () => setSelectedId(risk.id) }, risk.id)) }) }) });
 }
 
 function RiskRow({ risk, selected, onSelect }) {
-  return jsxs('button', { type: 'button', role: 'listitem', 'aria-pressed': selected, onClick: onSelect, style: selected ? styles.rowSelected : styles.row, children: [
+  return jsx('li', { style: styles.listItem, children: jsx('button', { type: 'button', 'aria-pressed': selected, onClick: onSelect, style: selected ? styles.rowSelected : styles.row, children: [
     jsxs('span', { style: styles.rowTop, children: [
       jsx('span', { style: styles.rowTitle, children: titleText(risk.title) }),
       jsx(Badge, { variant: badgeVariantForSeverity(risk.severity), children: labelFor(risk.severity) }),
@@ -264,7 +341,7 @@ function RiskRow({ risk, selected, onSelect }) {
     jsxs('span', { style: styles.rowMeta, children: [
       'sensor ', text(risk.sensor?.sensor), ' · integration ', text(risk.sensor?.integration, 'none'), ' · events ', countText(risk.event_count), ' · last observed ', formatTime(risk.last_observed_at_unix_ms),
     ] }),
-  ] });
+  ] }) });
 }
 
 function RiskDetail({ detail }) {
@@ -299,7 +376,6 @@ function RiskDetail({ detail }) {
         ['Label', text(risk.artifact?.display_label)],
         ['Provider', text(risk.artifact?.provider, 'none')],
         ['Trust', labelFor(risk.artifact?.trust_level)],
-        ['Locator digest', risk.artifact?.locator_hash ? 'sha256 digest present' : 'none'],
       ] }),
       jsx(ProvenanceBlock, { title: 'Sensor provenance', rows: [
         ['Kind', labelFor(risk.sensor?.kind)],
@@ -348,6 +424,11 @@ function EvidenceItem({ event }) {
     ] }),
     jsx('div', { style: styles.evidenceTitle, children: titleText(event.title, 'Untitled event') }),
     jsxs('div', { style: styles.rowMeta, children: ['type ', text(event.event_type, 'unknown'), ' · trust ', labelFor(event.trust_level), ' · redaction count ', countText(event.redaction?.redacted_count)] }),
+    jsxs('div', { style: styles.rowMeta, children: [
+      'rule ', text(event.rule_id, 'none'),
+      ' · sensor ', text(event.sensor?.kind), '/', text(event.sensor?.sensor), ' · integration ', text(event.sensor?.integration, 'none'),
+      ' · artifact ', text(event.artifact?.kind), '/', text(event.artifact?.display_label), ' · provider ', text(event.artifact?.provider, 'none'), ' · trust ', labelFor(event.artifact?.trust_level),
+    ] }),
     jsxs('div', { style: styles.badgeLine, children: [
       jsx(Badge, { variant: event.redaction?.contains_sensitive_data ? 'warn' : 'muted', children: event.redaction?.contains_sensitive_data ? 'contains redactions' : 'no redaction flag' }),
       ...(badges.length ? badges.map((badge) => jsx(Badge, { variant: badge.tone, children: badge.label + (badge.value === 'true' ? '' : ' · ' + badge.value) }, badge.label + badge.value)) : [jsx(Badge, { variant: 'muted', children: 'no allowlisted indicators' }, 'no-indicators')]),
@@ -374,12 +455,16 @@ const styles = {
   label: { color: 'var(--ui-text-tertiary)', fontSize: '0.72rem' },
   select: { width: '100%', color: 'var(--ui-text-primary)', background: 'var(--ui-bg-input)', border: '1px solid var(--ui-stroke-primary)', borderRadius: 'var(--radius-md, 0.375rem)', padding: '0.42rem 0.5rem', minHeight: '2rem' },
   loading: { display: 'grid', gap: '0.5rem' },
+  warning: { border: '1px solid var(--ui-stroke-secondary)', borderRadius: 'var(--radius-md, 0.375rem)', padding: '0.65rem', color: 'var(--ui-text-primary)', background: 'var(--ui-bg-card)' },
+  pager: { display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 'var(--radius-md, 0.375rem)', padding: '0.65rem', background: 'var(--ui-bg-card)' },
+  visuallyHidden: { position: 'absolute', width: '1px', height: '1px', padding: 0, margin: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 },
   skeletonTall: { minHeight: '8rem', background: 'var(--ui-bg-card)' },
   skeletonShort: { minHeight: '3rem', background: 'var(--ui-bg-quaternary)' },
   workspace: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 24rem), 1fr))', gap: '0.85rem', alignItems: 'start', minHeight: 0 },
   panel: { minWidth: 0, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 'var(--radius-lg, 0.5rem)', background: 'var(--ui-bg-elevated)', overflow: 'hidden' },
   list: { maxHeight: 'min(42rem, 62vh)' },
-  listInner: { display: 'grid' },
+  listInner: { display: 'grid', gap: 0, margin: 0, padding: 0, listStyle: 'none' },
+  listItem: { margin: 0, padding: 0 },
   row: { display: 'grid', gap: '0.42rem', width: '100%', textAlign: 'left', padding: '0.78rem', color: 'var(--ui-text-primary)', background: 'var(--ui-control-hover-background)', border: 0, borderBottom: '1px solid var(--ui-stroke-secondary)' },
   rowSelected: { display: 'grid', gap: '0.42rem', width: '100%', textAlign: 'left', padding: '0.78rem', color: 'var(--ui-text-primary)', background: 'var(--ui-control-active-background)', border: 0, borderLeft: '3px solid var(--ui-base)', borderBottom: '1px solid var(--ui-stroke-primary)' },
   rowTop: { display: 'flex', justifyContent: 'space-between', gap: '0.65rem', alignItems: 'start' },
