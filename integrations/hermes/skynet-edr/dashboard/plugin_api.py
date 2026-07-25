@@ -61,7 +61,7 @@ def _valid_upstream_path(path: str) -> bool:
     if not opaque_id or "/" in opaque_id:
         return False
     decoded = urllib.parse.unquote(opaque_id)
-    if any(segment in {".", ".."} for segment in decoded.split("/")):
+    if decoded in {".", ".."} and opaque_id == decoded:
         return False
     return True
 
@@ -103,6 +103,14 @@ def _upstream(path: str, query: dict[str, int] | None = None) -> Any:
         raise HTTPException(status_code=502, detail="invalid_upstream_json") from exc
 
 
+def _quote_risk_id(risk_id: str) -> str:
+    if risk_id == ".":
+        return "%2E"
+    if risk_id == "..":
+        return "%2E%2E"
+    return urllib.parse.quote(risk_id, safe="")
+
+
 @router.get("/risks")
 def risks(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=_MAX_OFFSET)) -> Any:
     return _upstream("/api/v1/risks", _bounded_page(limit, offset))
@@ -112,7 +120,7 @@ def risks(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=
 def risk_detail(risk_id: str) -> Any:
     if not _valid_risk_id(risk_id):
         raise HTTPException(status_code=400, detail="bad_request")
-    quoted = urllib.parse.quote(risk_id, safe="")
+    quoted = _quote_risk_id(risk_id)
     return _upstream(f"/api/v1/risks/{quoted}")
 
 

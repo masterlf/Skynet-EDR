@@ -319,7 +319,7 @@ function validateRiskPage(data, expectedOffset) {
   if (typeof page.has_more !== 'boolean') failContract();
   if (page.returned !== data.items.length) failContract();
   if (page.has_more !== (page.offset + page.returned < page.total)) failContract();
-  if (page.has_more === true && page.returned !== page.limit) failContract();
+  if (page.has_more === true && page.returned <= 0) failContract();
   if (page.returned > 0 && page.offset + page.returned > page.total) failContract();
   const seen = new Set();
   data.items.forEach((item) => {
@@ -362,6 +362,43 @@ function nextOffset(page) {
   return Math.max(0, Math.min(MAX_OFFSET, offset + returned));
 }
 
+function initialPageNavigationState() {
+  return { offset: 0, history: [] };
+}
+
+function boundedHistory(history) {
+  return history.slice(-64);
+}
+
+function recordNextPage(state, page) {
+  const offset = Number.isFinite(page?.offset) ? Math.max(0, Math.min(MAX_OFFSET, Math.floor(page.offset))) : state.offset;
+  const next = nextOffset(page);
+  return { offset: next, history: boundedHistory([...(Array.isArray(state.history) ? state.history : []), offset]) };
+}
+
+function recordPreviousPage(state) {
+  const history = Array.isArray(state.history) ? state.history : [];
+  if (history.length > 0) {
+    const previous = history[history.length - 1];
+    return { offset: previous, history: history.slice(0, -1) };
+  }
+  return { offset: previousOffset(state.offset), history: [] };
+}
+
+function resetPageNavigation(_state) {
+  return initialPageNavigationState();
+}
+
+function encodeRiskPathSegment(id) {
+  if (id === '.') return '%2E';
+  if (id === '..') return '%2E%2E';
+  return encodeURIComponent(id);
+}
+
+function riskDetailPath(id) {
+  return '/risks/' + encodeRiskPathSegment(id);
+}
+
 function pageMeta(data) {
   return data?.page || { returned: 0, total: 0, limit: PAGE_LIMIT, offset: 0, has_more: false };
 }
@@ -393,6 +430,7 @@ function riskPagePath(offset) {
 function RiskExplorer({ ctx }) {
   const [selectedId, setSelectedId] = React.useState(null);
   const [offset, setOffset] = React.useState(0);
+  const [offsetHistory, setOffsetHistory] = React.useState([]);
   const [search, setSearch] = React.useState('');
   const [severity, setSeverity] = React.useState('all');
   const [status, setStatus] = React.useState('all');
@@ -409,18 +447,28 @@ function RiskExplorer({ ctx }) {
   });
   const detail = useQuery({
     queryKey: ['skynet-edr', 'risk', selectedId],
-    queryFn: () => Promise.resolve(ctx.rest('/risks/' + encodeURIComponent(selectedId))).then((data) => validateRiskDetail(data, selectedId)),
+    queryFn: () => Promise.resolve(ctx.rest(riskDetailPath(selectedId))).then((data) => validateRiskDetail(data, selectedId)),
     enabled: Boolean(selectedId),
     refetchInterval: POLL_MS,
   });
   const resetPageForFilter = (setter) => (value) => {
     setter(value);
     setOffset(0);
+    setOffsetHistory([]);
     setSelectedId(null);
   };
-  const changePage = (next) => {
+  const changePage = (next, history = offsetHistory) => {
     setOffset(next);
+    setOffsetHistory(history);
     setSelectedId(null);
+  };
+  const goNext = () => {
+    const state = recordNextPage({ offset, history: offsetHistory }, meta);
+    changePage(state.offset, state.history);
+  };
+  const goPrevious = () => {
+    const state = recordPreviousPage({ offset, history: offsetHistory });
+    changePage(state.offset, state.history);
   };
   const riskPageAvailable = Boolean(risks.data);
   const pageItems = riskPageAvailable && Array.isArray(risks.data.items) ? risks.data.items : [];
@@ -444,7 +492,7 @@ function RiskExplorer({ ctx }) {
       ] }),
       jsx(Button, { type: 'button', variant: 'outline', onClick: () => { risks.refetch(); health.refetch(); if (selectedId) detail.refetch(); }, disabled: isFetching, children: isFetching ? 'Refreshing…' : 'Refresh' }),
     ] }),
-    riskPageAvailable ? jsx(PageMetadata, { meta, loadedCount: pageItems.length, visibleCount: items.length, onPrevious: () => changePage(previousOffset(meta.offset)), onNext: () => changePage(nextOffset(meta)) }) : null,
+    riskPageAvailable ? jsx(PageMetadata, { meta, loadedCount: pageItems.length, visibleCount: items.length, onPrevious: goPrevious, onNext: goNext }) : null,
     jsx(Filters, { search, setSearch: resetPageForFilter(setSearch), severity, setSeverity: resetPageForFilter(setSeverity), status, setStatus: resetPageForFilter(setStatus), artifactKind, setArtifactKind: resetPageForFilter(setArtifactKind) }),
     initialLoading ? jsx(LoadingState, {}) : null,
     initialError ? jsx(ErrorState, { title: 'Unable to load risks', description: 'The read-only backend did not return a valid risk page.' }) : null,
@@ -675,6 +723,15 @@ const styles = {
   evidenceItem: { display: 'grid', gap: '0.42rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 'var(--radius-md, 0.375rem)', padding: '0.7rem', background: 'var(--ui-bg-card)' },
   evidenceTop: { display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center' },
   evidenceTitle: { color: 'var(--ui-text-primary)', fontWeight: 600 },
+};
+
+export const __desktopTest = {
+  validateRiskPage,
+  initialPageNavigationState,
+  recordNextPage,
+  recordPreviousPage,
+  resetPageNavigation,
+  riskDetailPath,
 };
 
 export default {

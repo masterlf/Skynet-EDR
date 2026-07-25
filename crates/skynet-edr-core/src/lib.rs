@@ -2159,6 +2159,22 @@ impl IncidentId {
     }
 }
 
+/// Return whether a raw incident identifier matches the routable opaque contract.
+#[must_use]
+pub fn is_routable_incident_identifier(value: &str) -> bool {
+    !value.is_empty() && value.chars().count() <= 256
+}
+
+/// Return a routable incident identifier, pseudonymizing invalid legacy raw values.
+#[must_use]
+pub fn safe_incident_identifier(value: &str) -> String {
+    if is_routable_incident_identifier(value) {
+        return value.to_owned();
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    format!("redacted-incident-sha256-{digest:x}")
+}
+
 /// Platform-independent security event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
@@ -3389,6 +3405,57 @@ impl LocalStore {
              CREATE INDEX IF NOT EXISTS idx_incidents_updated_at
                 ON incidents(updated_at_unix_ms);",
         )?;
+        self.normalize_legacy_incident_ids()?;
+        Ok(())
+    }
+
+    fn normalize_legacy_incident_ids(&self) -> StorageResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let rows = {
+            let mut statement = transaction.prepare(
+                "SELECT id, payload_json FROM incidents WHERE id = '' OR length(id) > 256 ORDER BY id ASC",
+            )?;
+            let mapped = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (raw_id, payload_json) in rows {
+            let mut incident: Incident = serde_json::from_str(&payload_json)?;
+            let safe_id = safe_incident_identifier(&raw_id);
+            incident.id = IncidentId::new(safe_id);
+            let incident = sanitize_incident_for_storage(&incident);
+            let payload = serde_json::to_string(&incident)?;
+            let severity = serde_json::to_value(incident.severity)?;
+            let status = serde_json::to_value(incident.status)?;
+            let created_at_unix_ms =
+                sqlite_unix_ms("incident.created_at_unix_ms", incident.created_at_unix_ms)?;
+            let updated_at_unix_ms =
+                sqlite_unix_ms("incident.updated_at_unix_ms", incident.updated_at_unix_ms)?;
+            transaction.execute(
+                "UPDATE incidents
+                 SET id = ?1,
+                     created_at_unix_ms = ?2,
+                     updated_at_unix_ms = ?3,
+                     status = ?4,
+                     severity = ?5,
+                     title = ?6,
+                     payload_json = ?7
+                 WHERE id = ?8",
+                params![
+                    incident.id.as_str(),
+                    created_at_unix_ms,
+                    updated_at_unix_ms,
+                    json_string_value(&status),
+                    json_string_value(&severity),
+                    incident.title,
+                    payload,
+                    raw_id,
+                ],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -3481,6 +3548,7 @@ fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
     let mut sanitized = incident.clone();
     let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
 
+    sanitized.id = IncidentId::new(safe_incident_identifier(sanitized.id.as_str()));
     sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
     sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut fields);
     sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
