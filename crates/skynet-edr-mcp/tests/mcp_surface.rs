@@ -82,6 +82,52 @@ fn status_reports_store_counts_without_mutating_local_storage() {
 }
 
 #[test]
+fn status_counts_multiple_rows_exactly_without_materializing_lists() {
+    let db_path = temp_path("mcp-status-counts.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    for index in 0..3 {
+        store
+            .insert_event(&sample_mcp_event(
+                &format!("evt_status_count_extra_{index}"),
+                "EDR-NET-001",
+            ))
+            .expect("event persists");
+    }
+    for index in 0..4 {
+        store
+            .insert_incident(&sample_incident(
+                &format!("inc_status_count_{index}"),
+                IncidentStatus::Open,
+                sample_mcp_event(&format!("evt_status_count_embedded_{index}"), "EDR-MCP-001"),
+            ))
+            .expect("incident persists");
+    }
+
+    let value = status(&store).expect("status query succeeds");
+
+    assert_eq!(value["incident_count"], 4);
+    assert_eq!(value["event_count"], 7);
+    cleanup_sqlite_files(&db_path);
+}
+
+#[test]
+fn status_source_uses_count_queries_instead_of_bulk_lists() {
+    let source = include_str!("../src/lib.rs");
+    let status_body = source
+        .split("pub fn status(store: &LocalStore) -> Result<Value, McpReadError> {")
+        .nth(1)
+        .expect("status function exists")
+        .split("\n}")
+        .next()
+        .expect("status body exists");
+
+    assert!(status_body.contains("count_incidents()?"));
+    assert!(status_body.contains("count_events()?"));
+    assert!(!status_body.contains("list_incidents()?"));
+    assert!(!status_body.contains("list_events()?"));
+}
+
+#[test]
 fn incidents_tools_list_summaries_and_fetch_one_redacted_incident() {
     let db_path = temp_path("mcp-incidents.sqlite");
     let store = seeded_store(&db_path);
@@ -298,6 +344,12 @@ fn temp_path(name: &str) -> PathBuf {
             .as_nanos()
     ));
     path
+}
+
+fn cleanup_sqlite_files(path: &PathBuf) {
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = fs::remove_file(path.with_extension("sqlite-shm"));
 }
 
 fn no_redaction() -> RedactionMetadata {

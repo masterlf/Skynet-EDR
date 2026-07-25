@@ -136,6 +136,7 @@ fn start_http_api_if_enabled(
         DaemonCliError::new("HTTP API is enabled but no bind address is configured")
     })?;
     let store_path = config.http_store_path();
+    LocalStore::open(&store_path)?;
     let listener = TcpListener::bind(bind).map_err(|error| {
         DaemonCliError::new(format!(
             "failed to bind read-only HTTP API on {bind}: {error}"
@@ -187,7 +188,7 @@ fn write_http_connection_response(
     let raw_path = parts.next().unwrap_or("/");
     let path = raw_path.split('?').next().unwrap_or(raw_path);
 
-    let store = LocalStore::open(store_path)?;
+    let store = LocalStore::open_read_only(store_path)?;
     if path == "/" || path.starts_with("/console") {
         let response = handle_console_request(&store, method, path)
             .map_err(|error| DaemonCliError::new(format!("console request failed: {error}")))?;
@@ -483,5 +484,179 @@ impl From<skynet_edr_core::StorageError> for DaemonCliError {
 impl From<skynet_edr_core::CanonicalSpoolIngestError> for DaemonCliError {
     fn from(error: skynet_edr_core::CanonicalSpoolIngestError) -> Self {
         Self::new(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        fs,
+        net::{Shutdown, TcpStream},
+    };
+
+    use skynet_edr_core::{
+        Event, EventId, EventSource, Incident, IncidentId, IncidentStatus, RedactionMetadata,
+        Severity, SourceKind,
+    };
+
+    use super::*;
+
+    #[test]
+    fn http_listener_initializes_fresh_configured_database_before_serving_read_only_requests() {
+        let db_path = temp_path("fresh-http-listener.sqlite");
+        cleanup_sqlite_files(&db_path);
+        let config = DaemonConfig {
+            mode: "passive".to_owned(),
+            data_dir: db_path
+                .parent()
+                .expect("temporary DB has parent")
+                .to_path_buf(),
+            http_api_enabled: true,
+            http_api_bind: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            http_api_read_only: true,
+            linux_privileged_sensors: false,
+            spool: Some(SpoolConfig {
+                db: db_path.clone(),
+                path: temp_path("unused-spool.jsonl"),
+                checkpoint: temp_path("unused-checkpoint"),
+            }),
+        };
+
+        let _server = start_http_api_if_enabled(&config).expect("HTTP API starts");
+        let read_only = LocalStore::open_read_only(&db_path).expect("fresh DB is initialized");
+
+        assert_eq!(read_only.count_events().expect("event count succeeds"), 0);
+        assert_eq!(
+            read_only
+                .count_incidents()
+                .expect("incident count succeeds"),
+            0
+        );
+        cleanup_sqlite_files(&db_path);
+    }
+
+    #[test]
+    fn http_connection_status_and_risk_gets_are_served_from_read_only_store() {
+        let db_path = temp_path("http-read-only-get.sqlite");
+        cleanup_sqlite_files(&db_path);
+        {
+            let writable = LocalStore::open(&db_path).expect("writable DB opens");
+            writable
+                .insert_incident(&sample_incident())
+                .expect("incident persists");
+        }
+
+        let status = http_get_response(&db_path, "/api/status");
+        let risks = http_get_response(&db_path, "/api/v1/risks?limit=10&offset=0");
+
+        assert!(status.contains("HTTP/1.1 200 OK"));
+        assert!(status.contains(r#""incident_count":1"#));
+        assert!(risks.contains("HTTP/1.1 200 OK"));
+        assert!(risks.contains(r#""schema_version":"skynet.risk.v1""#));
+        assert!(risks.contains(r#""total":1"#));
+        cleanup_sqlite_files(&db_path);
+    }
+
+    #[test]
+    fn http_connection_response_source_uses_read_only_store_per_request() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split("fn write_http_connection_response(")
+            .nth(1)
+            .expect("connection response function exists")
+            .split("\n}")
+            .next()
+            .expect("connection response body exists");
+
+        assert!(body.contains("LocalStore::open_read_only(store_path)?"));
+        assert!(!body.contains("LocalStore::open(store_path)?"));
+    }
+
+    fn http_get_response(db_path: &Path, path: &str) -> String {
+        let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .expect("test listener binds");
+        let address = listener.local_addr().expect("test listener address");
+        let mut client = TcpStream::connect(address).expect("client connects");
+        let (mut server, _) = listener.accept().expect("server accepts");
+        write!(
+            client,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        .expect("request writes");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("request is complete");
+
+        write_http_connection_response(&mut server, db_path).expect("response writes");
+        drop(server);
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("response reads");
+        response
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "skynet-edr-daemon-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_sqlite_files(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    fn sample_incident() -> Incident {
+        let event = Event {
+            id: EventId::new("evt_http_read_only_get"),
+            observed_at_unix_ms: 1_781_440_123_000,
+            severity: Severity::High,
+            source: sample_source(),
+            title: "Fake HTTP read-only event".to_owned(),
+            details: Some("Clearly fake test data; no secrets.".to_owned()),
+            attributes: BTreeMap::from([
+                ("rule_id".to_owned(), serde_json::json!("EDR-MCP-001")),
+                (
+                    "event_type".to_owned(),
+                    serde_json::json!("agent.mcp.tool.requested"),
+                ),
+            ]),
+            redaction: no_redaction(),
+        };
+        Incident {
+            id: IncidentId::new("inc_http_read_only_get"),
+            created_at_unix_ms: 1_781_440_123_000,
+            updated_at_unix_ms: 1_781_440_124_000,
+            status: IncidentStatus::Open,
+            severity: Severity::High,
+            title: "Fake HTTP read-only incident".to_owned(),
+            summary: "Clearly fake incident; no secrets.".to_owned(),
+            source: event.source.clone(),
+            events: vec![event],
+            redaction: no_redaction(),
+        }
+    }
+
+    fn sample_source() -> EventSource {
+        EventSource {
+            kind: SourceKind::Sensor,
+            sensor: "daemon-read-only-test".to_owned(),
+            integration: Some("fake-test".to_owned()),
+        }
+    }
+
+    fn no_redaction() -> RedactionMetadata {
+        RedactionMetadata {
+            contains_sensitive_data: false,
+            redacted_fields: Vec::new(),
+        }
     }
 }

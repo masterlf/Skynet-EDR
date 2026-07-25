@@ -139,12 +139,12 @@ pub fn status_summary() -> String {
 ///
 /// # Errors
 ///
-/// Returns [`McpReadError::Storage`] if local event or incident listing fails.
+/// Returns [`McpReadError::Storage`] if local event or incident count queries fail.
 pub fn status(store: &LocalStore) -> Result<Value, McpReadError> {
     let product = ProductInfo::default();
     let server = McpServerInfo::default();
-    let incidents = store.list_incidents()?;
-    let events = store.list_events()?;
+    let incident_count = store.count_incidents()?;
+    let event_count = store.count_events()?;
 
     Ok(json!({
         "product": product.name,
@@ -153,8 +153,8 @@ pub fn status(store: &LocalStore) -> Result<Value, McpReadError> {
         "server": server.name,
         "read_only": server.read_only,
         "tool_count": server.tools.len(),
-        "incident_count": incidents.len(),
-        "event_count": events.len(),
+        "incident_count": incident_count,
+        "event_count": event_count,
     }))
 }
 

@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Operator-facing Skynet-EDR runtime mode.
@@ -3108,6 +3108,32 @@ impl LocalStore {
         Ok(store)
     }
 
+    /// Open an existing local `SQLite` store for read-only queries only.
+    ///
+    /// This constructor is the mutation boundary for HTTP/MCP visibility paths:
+    /// it uses `SQLITE_OPEN_READ_ONLY`, sets connection-local `query_only`, and
+    /// deliberately does not call [`Self::migrate`]. Missing databases, absent
+    /// schema, or attempted writes are returned as storage errors instead of
+    /// creating files, sidecars, tables, indexes, or WAL state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when `SQLite` cannot open the existing database
+    /// read-only or cannot enable/verify `query_only` on the connection.
+    pub fn open_read_only(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.pragma_update(None, "query_only", true)?;
+        let query_only =
+            connection.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))?;
+        if query_only != 1 {
+            return Err(StorageError::Sqlite(
+                rusqlite::Error::ExecuteReturnedResults,
+            ));
+        }
+        Ok(Self { path, connection })
+    }
+
     /// Return the database path backing this local store.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -3205,15 +3231,17 @@ impl LocalStore {
     /// Returns [`StorageError`] when the `SQLite` count query fails or the count
     /// cannot be represented as `usize`.
     pub fn count_incidents(&self) -> StorageResult<usize> {
-        let count = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM incidents", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-        usize::try_from(count).map_err(|_| StorageError::IntegerOutOfRange {
-            field: "incident.count",
-            value: u64::MAX,
-        })
+        self.count_rows("incident.count", "SELECT COUNT(*) FROM incidents")
+    }
+
+    /// Count all stored events without loading event payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the `SQLite` count query fails or the count
+    /// cannot be represented as `usize`.
+    pub fn count_events(&self) -> StorageResult<usize> {
+        self.count_rows("event.count", "SELECT COUNT(*) FROM events")
     }
 
     /// List one `SQLite`-bounded incident page ordered newest update first.
@@ -3263,6 +3291,16 @@ impl LocalStore {
                 ON incidents(updated_at_unix_ms);",
         )?;
         Ok(())
+    }
+
+    fn count_rows(&self, field: &'static str, sql: &str) -> StorageResult<usize> {
+        let count = self
+            .connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))?;
+        usize::try_from(count).map_err(|_| StorageError::IntegerOutOfRange {
+            field,
+            value: u64::MAX,
+        })
     }
 }
 
