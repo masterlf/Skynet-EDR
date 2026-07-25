@@ -932,6 +932,7 @@ const runtimePolicyEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'
 const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[runtimePolicyEvidence]};
 if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('runtime_policy/authenticated_user and safe unknown event type must be accepted');
 for (const bad of [
+  {...canonicalDetail, evidence:[{...runtimePolicyEvidence, event_id:'../../private/instruction text'}]},
   {...canonicalDetail, evidence:[{...runtimePolicyEvidence, event_type:'bad space'}]},
   {...canonicalDetail, evidence:[{...runtimePolicyEvidence, title:'agent session started'}]},
   {...canonicalDetail, evidence:[runtimePolicyEvidence, {...runtimePolicyEvidence, event_id:'evt-2'}], event_count:1},

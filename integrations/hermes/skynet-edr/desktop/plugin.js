@@ -294,7 +294,7 @@ function validateRedaction(value) {
 function validateEvidence(value, seenEvents) {
   if (!isPlainObject(value)) failContract();
   for (const key of ['event_id', 'timestamp_unix_ms', 'severity', 'event_type', 'title', 'sensor', 'artifact', 'trust_level', 'rule_id', 'redaction', 'indicators']) if (!hasKey(value, key)) failContract();
-  if (!boundedId(value.event_id) || seenEvents.has(value.event_id)) failContract();
+  if (!safeIdentifier(value.event_id) || seenEvents.has(value.event_id)) failContract();
   seenEvents.add(value.event_id);
   if (!boundedSafeInteger(value.timestamp_unix_ms)) failContract();
   if (!enumValue(value.severity, SEVERITIES)) failContract();
