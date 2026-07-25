@@ -110,6 +110,10 @@ fn run_command(args: &[String]) -> Result<(), DaemonCliError> {
 }
 
 fn initialize_active_store(config: &DaemonConfig) -> Result<(), DaemonCliError> {
+    if !config.http_api_enabled && config.spool.is_none() {
+        return Ok(());
+    }
+
     let store_path = config.http_store_path();
     drop(LocalStore::open(&store_path)?);
     Ok(())
@@ -543,6 +547,28 @@ mod tests {
         assert!(!db_path.with_extension("sqlite-wal").exists());
         assert!(!db_path.with_extension("sqlite-shm").exists());
         cleanup_sqlite_files(&db_path);
+    }
+
+    #[test]
+    fn inactive_daemon_storage_initialization_does_not_create_sqlite_files() {
+        let data_dir = temp_path("inactive-startup-init");
+        let db_path = data_dir.join("skynet.sqlite");
+        let _ = fs::remove_dir_all(&data_dir);
+        fs::create_dir_all(&data_dir).expect("temporary data dir is created");
+        let config = DaemonConfig {
+            mode: "passive".to_owned(),
+            data_dir: data_dir.clone(),
+            http_api_enabled: false,
+            http_api_bind: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            http_api_read_only: true,
+            linux_privileged_sensors: false,
+            spool: None,
+        };
+
+        initialize_active_store(&config).expect("inactive startup initialization is a no-op");
+
+        assert_no_sqlite_files(&db_path);
+        let _ = fs::remove_dir_all(&data_dir);
     }
 
     #[test]
