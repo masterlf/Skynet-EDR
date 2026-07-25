@@ -222,6 +222,23 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
 
         self.assertNotEqual(first["artifact"]["locator_hash"], second["artifact"]["locator_hash"])
 
+    def test_url_locator_hash_preserves_repeated_path_slashes_and_omits_raw_url_parts(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        for url in [
+            "https://user:pass@example.invalid/a//b?secret=FAKE_QUERY#frag",
+            "https://example.invalid/a/b?other=FAKE_OTHER#other",
+            "https://example.invalid/a//./b?x=FAKE_X#x",
+        ]:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        repeated, collapsed, dot_segment = self.read_events()[-3:]
+        serialized = "\n".join(json.dumps(event) for event in (repeated, collapsed, dot_segment))
+
+        self.assertNotEqual(repeated["artifact"]["locator_hash"], collapsed["artifact"]["locator_hash"])
+        self.assertEqual(repeated["artifact"]["locator_hash"], dot_segment["artifact"]["locator_hash"])
+        for forbidden in ["user:pass", "FAKE_QUERY", "FAKE_OTHER", "FAKE_X", "#frag", "?secret"]:
+            self.assertNotIn(forbidden, serialized)
+
     def test_url_locator_hash_canonicalizes_only_safe_equivalences(self):
         ctx = FakeContext()
         self.plugin.register(ctx)
@@ -774,7 +791,7 @@ if (projected.some(item => item.label === 'hostile' || item.value === '<script>'
 
     def test_desktop_pagination_contracts_and_backend_state_are_fail_closed(self):
         check = run_desktop_plugin_script("""
-const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 1 redacted evidence event.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:1, trace_ids:['trace-1'], contains_sensitive_data:false};
+const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 1 redacted evidence event. Review sensor and artifact provenance plus allowlisted indicators.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:1, trace_ids:['trace-1'], contains_sensitive_data:false};
 const canonicalEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'high', event_type:'agent.mcp.tool.requested', title:'MCP tool request evidence', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, trust_level:'agent_action', rule_id:'EDR-MCP-001', redaction:{contains_sensitive_data:false, redacted_count:0}, indicators:{network_indicator:true, direct_ip:false, command_class:'network_egress'}};
 const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[canonicalItem], page:{limit:50, offset:0, returned:1, total:10001, has_more:true}};
 const emptyBeyondTotal = {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:100, returned:0, total:51, has_more:false}};
@@ -783,8 +800,60 @@ if (page !== canonicalPage) throw new Error('valid risk page should be returned 
 if (validateRiskPage(emptyBeyondTotal, 100) !== emptyBeyondTotal) throw new Error('valid empty page beyond total should be preserved');
 const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[canonicalEvidence]};
 if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
+const nullHeavyItem = {...canonicalItem, rule_id:null, confidence:null, sensor:{...canonicalItem.sensor, integration:null}, artifact:{...canonicalItem.artifact, provider:null, locator_hash:null, trust_level:null}, title:'Security risk detected'};
+const nullHeavyEvidence = {...canonicalEvidence, event_type:null, trust_level:null, rule_id:null, title:'Security event evidence'};
+const nullHeavyDetail = {...nullHeavyItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[nullHeavyEvidence]};
+if (validateRiskDetail(nullHeavyDetail, 'risk-1') !== nullHeavyDetail) throw new Error('explicit backend nulls should pass');
 const canonicalStatus = {product:'Skynet-EDR', binary:'skynet-edr', run_mode:'passive', server:'skynet-edr-mcp', read_only:true, tool_count:6, incident_count:1, event_count:1};
 if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('valid status should be returned unchanged');
+for (const key of ['confidence', 'rule_id', 'sensor', 'artifact', 'trace_ids']) {
+  const badItem = {...canonicalItem, sensor:{...canonicalItem.sensor}, artifact:{...canonicalItem.artifact}, trace_ids:[...canonicalItem.trace_ids]};
+  if (key === 'sensor') delete badItem.sensor.integration;
+  else if (key === 'artifact') delete badItem.artifact.provider;
+  else delete badItem[key];
+  let failed = false;
+  try { validateRiskPage({...canonicalPage, items:[badItem]}, 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('missing nullable risk key must fail closed: ' + key);
+}
+for (const key of ['event_type', 'trust_level', 'rule_id']) {
+  const badEvidence = {...canonicalEvidence};
+  delete badEvidence[key];
+  let failed = false;
+  try { validateRiskDetail({...canonicalDetail, evidence:[badEvidence]}, 'risk-1'); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('missing nullable evidence key must fail closed: ' + key);
+}
+for (const bad of [
+  {...canonicalItem, rule_id:'unsafe rule'},
+  {...canonicalItem, trace_ids:['bad trace']},
+  {...canonicalItem, title:'Spoofed risk title'},
+  {...canonicalItem, summary:'Spoofed risk summary'},
+]) {
+  let failed = false;
+  try { validateRiskPage({...canonicalPage, items:[bad]}, 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('unsafe or spoofed risk projection must fail closed');
+}
+const unknownSafeRule = {...canonicalItem, rule_id:'EDR-UNKNOWN-999', title:'Security risk detected'};
+if (validateRiskPage({...canonicalPage, items:[unknownSafeRule]}, 0).items[0] !== unknownSafeRule) throw new Error('unknown safe rule with fallback title should pass');
+const knownMappings = {
+  'EDR-MCP-001': 'MCP network activity after untrusted content',
+  'EDR-CONFIG-001': 'Agent configuration drift detected',
+  'EDR-CRON-001': 'Risky unattended automation detected',
+  'EDR-PI-001': 'Privileged tool request after untrusted content',
+  'EDR-MSG-001': 'Suspicious message delivery activity',
+  'EDR-NET-001': 'Direct-IP egress activity',
+  'EDR-SCOPE-001': 'Privilege or scope expansion activity',
+  'EDR-PERSIST-001': 'Agent persistence change activity',
+  'EDR-EXFIL-001': 'Sensitive access followed by outbound delivery',
+  'EDR-MALWARE-001': 'Malware-like content supplied to AI runtime',
+};
+for (const [ruleId, title] of Object.entries(knownMappings)) {
+  const mapped = {...canonicalItem, rule_id:ruleId, title};
+  if (validateRiskPage({...canonicalPage, items:[mapped]}, 0).items[0] !== mapped) throw new Error('known risk title mapping should pass: ' + ruleId);
+}
+const singularSummary = {...canonicalItem, event_count:1, summary:'Read-only projection of 1 redacted evidence event. Review sensor and artifact provenance plus allowlisted indicators.'};
+const pluralSummary = {...canonicalItem, event_count:2, summary:'Read-only projection of 2 redacted evidence events. Review sensor and artifact provenance plus allowlisted indicators.'};
+if (validateRiskPage({...canonicalPage, items:[singularSummary]}, 0).items[0] !== singularSummary) throw new Error('singular risk summary should pass');
+if (validateRiskPage({...canonicalPage, items:[pluralSummary]}, 0).items[0] !== pluralSummary) throw new Error('plural risk summary should pass');
 for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[null], page:{...canonicalPage.page, total:1}}, {...canonicalPage, items:[{...canonicalItem, id:''}]}, {...canonicalPage, items:[canonicalItem, {...canonicalItem}], page:{...canonicalPage.page, returned:2, total:2, has_more:false}}, {...canonicalPage, items:[{...canonicalItem, sensor:null}]}, {...canonicalPage, items:[{...canonicalItem, artifact:{...canonicalItem.artifact, kind:'<script>'}}]}, {...canonicalPage, page:{...canonicalPage.page, limit:49}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:2}}, {...canonicalPage, page:{...canonicalPage.page, returned:0}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, total:1, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:2, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
   let failed = false;
   try { validateRiskPage(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
@@ -841,7 +910,7 @@ if (JSON.stringify(requested) !== JSON.stringify(['/risks?limit=50&offset=50']))
 
     def test_desktop_exact_backend_contracts_and_searchfield_structure(self):
         check = run_desktop_plugin_script("""
-const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 2 redacted evidence events.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:'sha256:' + 'a'.repeat(64), trust_level:'runtime_policy'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:2, trace_ids:['trace-1'], contains_sensitive_data:false};
+const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 2 redacted evidence events. Review sensor and artifact provenance plus allowlisted indicators.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:'sha256:' + 'a'.repeat(64), trust_level:'runtime_policy'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:2, trace_ids:['trace-1'], contains_sensitive_data:false};
 const runtimePolicyEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'high', event_type:'agent.session.started', title:'Security event evidence', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'authenticated_user'}, trust_level:'runtime_policy', rule_id:'EDR-MCP-001', redaction:{contains_sensitive_data:false, redacted_count:0}, indicators:{network_indicator:true, direct_ip:false, command_class:'network_egress'}};
 const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[runtimePolicyEvidence]};
 if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('runtime_policy/authenticated_user and safe unknown event type must be accepted');

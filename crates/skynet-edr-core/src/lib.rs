@@ -3043,8 +3043,8 @@ pub enum StorageError {
     Json(serde_json::Error),
     /// Filesystem I/O failed for a database or JSONL export path.
     Io(std::io::Error),
-    /// Existing database header indicates WAL mode, which read-only visibility paths reject.
-    UnsupportedWalJournalMode,
+    /// Existing database header indicates a non-rollback journal mode read-only paths reject.
+    UnsupportedReadOnlyJournalMode,
     /// A timestamp does not fit `SQLite`'s signed integer representation.
     IntegerOutOfRange {
         /// Name of the timestamp field being persisted.
@@ -3060,9 +3060,9 @@ impl std::fmt::Display for StorageError {
             Self::Sqlite(error) => write!(formatter, "sqlite storage error: {error}"),
             Self::Json(error) => write!(formatter, "json storage error: {error}"),
             Self::Io(error) => write!(formatter, "local storage I/O error: {error}"),
-            Self::UnsupportedWalJournalMode => write!(
+            Self::UnsupportedReadOnlyJournalMode => write!(
                 formatter,
-                "unsupported WAL journal mode for read-only local store"
+                "unsupported SQLite journal mode for read-only local store"
             ),
             Self::IntegerOutOfRange { field, value } => {
                 write!(
@@ -3105,7 +3105,7 @@ pub fn sqlite_sidecar_path(path: impl AsRef<Path>, suffix: &str) -> PathBuf {
     path.with_file_name(file_name)
 }
 
-fn reject_wal_header_for_read_only(path: &Path) -> StorageResult<()> {
+fn reject_unsupported_header_for_read_only(path: &Path) -> StorageResult<()> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -3114,8 +3114,8 @@ fn reject_wal_header_for_read_only(path: &Path) -> StorageResult<()> {
     let mut header = [0_u8; 20];
     match file.read_exact(&mut header) {
         Ok(()) => {
-            if &header[..16] == b"SQLite format 3 " && header[18] == 2 && header[19] == 2 {
-                return Err(StorageError::UnsupportedWalJournalMode);
+            if &header[..16] == b"SQLite format 3\0" && (header[18] != 1 || header[19] != 1) {
+                return Err(StorageError::UnsupportedReadOnlyJournalMode);
             }
             Ok(())
         }
@@ -3159,7 +3159,7 @@ impl LocalStore {
     /// read-only or cannot enable/verify `query_only` on the connection.
     pub fn open_read_only(path: impl AsRef<Path>) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
-        reject_wal_header_for_read_only(&path)?;
+        reject_unsupported_header_for_read_only(&path)?;
         let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.pragma_update(None, "query_only", true)?;
         let query_only =
@@ -3726,7 +3726,9 @@ mod storage_hardening_tests {
         };
 
         assert!(
-            error.to_string().contains("unsupported WAL journal mode"),
+            error
+                .to_string()
+                .contains("unsupported SQLite journal mode"),
             "unexpected error: {error}"
         );
         for sidecar in sidecars(&path) {

@@ -594,24 +594,60 @@ def _decode_unreserved_and_uppercase_escapes(value: str) -> str:
 
 
 def _remove_dot_segments(path: str) -> str:
-    output: list[str] = []
-    trailing_dot = path.endswith("/.") or path.endswith("/..")
-    for segment in path.split("/"):
-        if segment in ("", "."):
-            if segment == "" and not output:
-                output.append("")
+    input_buffer = path
+    output = ""
+    while input_buffer:
+        if input_buffer.startswith("../"):
+            input_buffer = input_buffer[3:]
             continue
-        if segment == "..":
-            if len(output) > 1:
-                output.pop()
+        if input_buffer.startswith("./"):
+            input_buffer = input_buffer[2:]
             continue
-        output.append(segment)
-    normalized = "/".join(output)
-    if not normalized.startswith("/"):
-        normalized = "/" + normalized
-    if (path.endswith("/") or trailing_dot) and normalized != "/" and not normalized.endswith("/"):
-        normalized += "/"
-    return normalized or "/"
+        if input_buffer.startswith("/./"):
+            input_buffer = "/" + input_buffer[3:]
+            continue
+        if input_buffer == "/.":
+            input_buffer = "/"
+            continue
+        if input_buffer.startswith("/../"):
+            input_buffer = "/" + input_buffer[4:]
+            output = _remove_last_path_segment(output)
+            continue
+        if input_buffer == "/..":
+            input_buffer = "/"
+            output = _remove_last_path_segment(output)
+            continue
+        if input_buffer in (".", ".."):
+            input_buffer = ""
+            continue
+        if input_buffer.startswith("/"):
+            next_slash = input_buffer.find("/", 1)
+            if next_slash < 0:
+                output += input_buffer
+                input_buffer = ""
+            else:
+                output += input_buffer[:next_slash]
+                input_buffer = input_buffer[next_slash:]
+            continue
+        next_slash = input_buffer.find("/")
+        if next_slash < 0:
+            output += input_buffer
+            input_buffer = ""
+        else:
+            output += input_buffer[:next_slash]
+            input_buffer = input_buffer[next_slash:]
+    if not output.startswith("/"):
+        output = "/" + output
+    return output or "/"
+
+
+def _remove_last_path_segment(path: str) -> str:
+    if not path:
+        return ""
+    slash = path.rfind("/")
+    if slash <= 0:
+        return ""
+    return path[:slash]
 
 
 def _safe_git_locator(params: Any, params_text: str) -> str | None:

@@ -127,6 +127,41 @@ fn read_only_store_reads_counts_pages_and_rejects_mutations_without_changes() {
 }
 
 #[test]
+fn open_read_only_rejects_non_rollback_header_versions_before_sidecars() {
+    let db_path = temp_path("unsupported-read-only-journal-header.sqlite");
+    cleanup_sqlite_files(&db_path);
+
+    {
+        let writable = LocalStore::open(&db_path).expect("writable store opens and migrates");
+        writable
+            .insert_event(&sample_event("evt_read_only_header_seed"))
+            .expect("event persists");
+    }
+
+    let mut bytes = fs::read(&db_path).expect("fixture DB can be read");
+    assert_eq!(&bytes[..16], b"SQLite format 3\0");
+    bytes[18] = 2;
+    bytes[19] = 1;
+    fs::write(&db_path, bytes).expect("fixture DB header can be modified deterministically");
+
+    let Err(error) = LocalStore::open_read_only(&db_path) else {
+        panic!("unsupported mixed header versions must fail before SQLite open");
+    };
+
+    assert!(error.to_string().contains("unsupported"));
+    assert!(
+        !sqlite_sidecar_path(&db_path, "-wal").exists(),
+        "read-only rejection must not create a WAL sidecar"
+    );
+    assert!(
+        !sqlite_sidecar_path(&db_path, "-shm").exists(),
+        "read-only rejection must not create a SHM sidecar"
+    );
+
+    cleanup_sqlite_files(&db_path);
+}
+
+#[test]
 fn count_events_and_count_incidents_return_exact_counts() {
     let db_path = temp_path("exact-counts.sqlite");
     cleanup_sqlite_files(&db_path);

@@ -33,6 +33,7 @@ const ARTIFACT_KINDS = new Set(['email', 'url', 'git_repository', 'code', 'file'
 const TRUST_LEVELS = new Set(['authenticated_user', 'runtime_policy', 'untrusted_content', 'tool_output', 'agent_action', 'sensor_observation']);
 const ARTIFACT_LABELS = { email: 'Email content', url: 'URL content', git_repository: 'Git repository', code: 'Code content', file: 'File content', message: 'Message content', mcp: 'MCP content', terminal: 'Terminal output', unknown: 'Unclassified artifact' };
 const EVENT_TITLES = { 'agent.tool.requested': 'Tool request evidence', 'agent.tool.completed': 'Tool completion evidence', 'agent.content.ingested': 'Content ingestion evidence', 'agent.network.egress': 'Network egress evidence', 'agent.file.accessed': 'File access evidence', 'agent.mcp.tool.requested': 'MCP tool request evidence', 'agent.config.changed': 'Configuration change evidence', 'agent.automation.scheduled': 'Automation schedule evidence', 'agent.approval.granted': 'Approval or scope change evidence', 'agent.llm.call.requested': 'Model call request evidence', 'agent.llm.call.completed': 'Model call completion evidence' };
+const RISK_TITLES = { 'EDR-MCP-001': 'MCP network activity after untrusted content', 'EDR-CONFIG-001': 'Agent configuration drift detected', 'EDR-CRON-001': 'Risky unattended automation detected', 'EDR-PI-001': 'Privileged tool request after untrusted content', 'EDR-MSG-001': 'Suspicious message delivery activity', 'EDR-NET-001': 'Direct-IP egress activity', 'EDR-SCOPE-001': 'Privilege or scope expansion activity', 'EDR-PERSIST-001': 'Agent persistence change activity', 'EDR-EXFIL-001': 'Sensitive access followed by outbound delivery', 'EDR-MALWARE-001': 'Malware-like content supplied to AI runtime' };
 const INDICATOR_BOOL_KEYS = new Set(['network_indicator', 'direct_ip', 'delivery_indicator', 'sensitive_access', 'prompt_injection_indicator', 'malware_indicator', 'content_omitted', 'result_omitted', 'instruction_authority']);
 const INDICATOR_STRING_VALUES = {
   command_class: new Set(['network_egress', 'file_read', 'code_execution', 'other']),
@@ -161,6 +162,10 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function hasKey(value, key) {
+  return isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function boundedPageNumber(value, max = MAX_OFFSET) {
   return Number.isInteger(value) && value >= 0 && value <= max;
 }
@@ -178,7 +183,7 @@ function boundedString(value, max = MAX_TEXT_LENGTH) {
 }
 
 function nullableBoundedString(value, max = MAX_TEXT_LENGTH) {
-  return value === null || value === undefined || boundedString(value, max);
+  return value === null || boundedString(value, max);
 }
 
 function boundedId(value) {
@@ -194,19 +199,29 @@ function safeIdentifier(value) {
 }
 
 function nullableSafeIdentifier(value) {
-  return value === null || value === undefined || safeIdentifier(value);
+  return value === null || safeIdentifier(value);
 }
 
 function validLocatorHash(value) {
-  return value === null || value === undefined || /^sha256:[0-9a-f]{64}$/.test(value);
+  return value === null || /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function evidenceTitleFor(eventType) {
   return EVENT_TITLES[eventType] || 'Security event evidence';
 }
 
+function riskTitleFor(ruleId) {
+  return RISK_TITLES[ruleId] || 'Security risk detected';
+}
+
+function riskSummaryFor(eventCount) {
+  const noun = eventCount === 1 ? 'event' : 'events';
+  return 'Read-only projection of ' + eventCount + ' redacted evidence ' + noun + '. Review sensor and artifact provenance plus allowlisted indicators.';
+}
+
 function validateSensor(value) {
   if (!isPlainObject(value)) failContract();
+  for (const key of ['kind', 'sensor', 'integration']) if (!hasKey(value, key)) failContract();
   if (!enumValue(value.kind, SOURCE_KINDS)) failContract();
   if (!safeIdentifier(value.sensor)) failContract();
   if (!nullableSafeIdentifier(value.integration)) failContract();
@@ -214,29 +229,32 @@ function validateSensor(value) {
 
 function validateArtifact(value) {
   if (!isPlainObject(value)) failContract();
+  for (const key of ['kind', 'provider', 'display_label', 'locator_hash', 'trust_level']) if (!hasKey(value, key)) failContract();
   if (!enumValue(value.kind, ARTIFACT_KINDS)) failContract();
   if (!nullableSafeIdentifier(value.provider)) failContract();
   if (value.display_label !== ARTIFACT_LABELS[value.kind]) failContract();
   if (!validLocatorHash(value.locator_hash)) failContract();
-  if (!(value.trust_level === null || value.trust_level === undefined || enumValue(value.trust_level, TRUST_LEVELS))) failContract();
+  if (!(value.trust_level === null || enumValue(value.trust_level, TRUST_LEVELS))) failContract();
 }
 
 function validateTraceIds(value) {
   if (!Array.isArray(value) || value.length > MAX_TRACE_IDS) failContract();
   const seen = new Set();
   value.forEach((trace) => {
-    if (!boundedId(trace) || seen.has(trace)) failContract();
+    if (!safeIdentifier(trace) || seen.has(trace)) failContract();
     seen.add(trace);
   });
 }
 
 function validateRiskBase(data) {
+  for (const key of ['id', 'severity', 'confidence', 'status', 'rule_id', 'title', 'summary', 'sensor', 'artifact', 'first_observed_at_unix_ms', 'last_observed_at_unix_ms', 'event_count', 'trace_ids', 'contains_sensitive_data']) if (!hasKey(data, key)) failContract();
   if (!boundedId(data.id)) failContract();
   if (!enumValue(data.severity, SEVERITIES)) failContract();
-  if (!(data.confidence === null || data.confidence === undefined || Number.isFinite(data.confidence))) failContract();
+  if (!(data.confidence === null || Number.isFinite(data.confidence))) failContract();
   if (!enumValue(data.status, STATUSES)) failContract();
-  if (!nullableBoundedString(data.rule_id, MAX_ID_LENGTH)) failContract();
+  if (!nullableSafeIdentifier(data.rule_id)) failContract();
   if (!boundedString(data.title)) failContract();
+  if (data.title !== riskTitleFor(data.rule_id)) failContract();
   if (!boundedString(data.summary)) failContract();
   validateSensor(data.sensor);
   validateArtifact(data.artifact);
@@ -244,6 +262,7 @@ function validateRiskBase(data) {
   if (!boundedSafeInteger(data.last_observed_at_unix_ms)) failContract();
   if (data.last_observed_at_unix_ms < data.first_observed_at_unix_ms) failContract();
   if (!boundedSafeInteger(data.event_count)) failContract();
+  if (data.summary !== riskSummaryFor(data.event_count)) failContract();
   validateTraceIds(data.trace_ids);
   if (typeof data.contains_sensitive_data !== 'boolean') failContract();
 }
@@ -268,6 +287,7 @@ function validateRedaction(value) {
 
 function validateEvidence(value, seenEvents) {
   if (!isPlainObject(value)) failContract();
+  for (const key of ['event_id', 'timestamp_unix_ms', 'severity', 'event_type', 'title', 'sensor', 'artifact', 'trust_level', 'rule_id', 'redaction', 'indicators']) if (!hasKey(value, key)) failContract();
   if (!boundedId(value.event_id) || seenEvents.has(value.event_id)) failContract();
   seenEvents.add(value.event_id);
   if (!boundedSafeInteger(value.timestamp_unix_ms)) failContract();
@@ -276,7 +296,7 @@ function validateEvidence(value, seenEvents) {
   if (value.title !== evidenceTitleFor(value.event_type)) failContract();
   validateSensor(value.sensor);
   validateArtifact(value.artifact);
-  if (!(value.trust_level === null || value.trust_level === undefined || enumValue(value.trust_level, TRUST_LEVELS))) failContract();
+  if (!(value.trust_level === null || enumValue(value.trust_level, TRUST_LEVELS))) failContract();
   if (!nullableSafeIdentifier(value.rule_id)) failContract();
   validateRedaction(value.redaction);
   validateIndicators(value.indicators);
