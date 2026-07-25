@@ -28,6 +28,9 @@ Packages place the plugin template and installer here:
 ```text
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/__init__.py
+/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json
+/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py
+/usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md
 /usr/bin/skynet-edr-install-hermes-plugin
 ```
@@ -42,9 +45,10 @@ This copies the plugin into:
 
 ```text
 ~/.hermes/plugins/skynet-edr/
+~/.hermes/desktop-plugins/skynet-edr/plugin.js
 ```
 
-If Hermes uses opt-in plugins, enable it and restart Hermes:
+If Hermes uses opt-in plugins, enable it and restart Hermes/gateway so the Python backend is mounted. The Desktop renderer can hot-reload the disk plugin, but the backend allow-list and gateway process still need their normal Hermes reload/restart path:
 
 ```bash
 hermes plugins enable skynet-edr
@@ -61,6 +65,14 @@ The v0.4 plugin registers:
 | `pre_llm_call` | Emits a content-omitted LLM-call telemetry event. |
 | `pre_tool_call` | Emits tool intent metadata, including network/sensitive indicators. |
 | `post_tool_call` | Emits tool-result metadata and prompt-injection/malware-test indicators. |
+
+## Risk Explorer boundaries
+
+The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, and optional `GET /status` under Hermes' plugin API mount. It proxies to the fixed loopback Skynet-EDR listener at `127.0.0.1:8787` unless `SKYNET_EDR_API_PORT` is set to a valid numeric port. It has no SQLite access, shell/subprocess use, caller-controlled upstream URL, or mutation route.
+
+The Desktop plugin is a read-only UI client for `/skynet-edr/risks`. It uses the backend `ctx.rest('/risks?...')` and `ctx.rest('/risks/<encoded-id>')`, polls no faster than every 10 seconds, renders text only, and does not auto-link URLs or render HTML.
+
+Telemetry events now include optional safe artifact metadata when derivable. Labels are fixed/coarse (`URL content`, `File content`, `Terminal output`), provider values are allowlisted, and locator hashes are computed only from isolated safe locators such as URLs without credentials/query/fragment. Command text, prompts, message bodies, full URLs, repository names, local paths, and secrets are not stored as artifact labels.
 
 ## Default user-local outputs
 

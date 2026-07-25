@@ -105,6 +105,8 @@ pub enum HttpMethod {
 pub enum HttpStatus {
     /// Request succeeded.
     Ok,
+    /// Request path or query parameters are invalid.
+    BadRequest,
     /// Route does not exist.
     NotFound,
     /// Method is not allowed for this API.
@@ -119,6 +121,7 @@ impl HttpStatus {
     pub const fn as_u16(self) -> u16 {
         match self {
             Self::Ok => 200,
+            Self::BadRequest => 400,
             Self::NotFound => 404,
             Self::MethodNotAllowed => 405,
             Self::InternalServerError => 500,
@@ -177,20 +180,27 @@ pub fn handle_http_request(
     method: HttpMethod,
     path: &str,
 ) -> Result<HttpApiResponse, HttpApiError> {
+    let (route_path, query) = split_path_query(path);
     let response = match path {
         "/api/status" => route_get(method, || skynet_edr_mcp::status(store)),
         "/api/incidents" => route_get(method, || skynet_edr_mcp::list_incidents(store)),
         "/api/rules" => route_static_get(method, skynet_edr_mcp::list_rules()),
         "/api/sensors" => route_static_get(method, skynet_edr_mcp::list_sensors()),
         "/api/config-drift" => route_get(method, || skynet_edr_mcp::get_config_drift(store)),
-        _ => match path.strip_prefix("/api/incidents/") {
-            Some(incident_id) if !incident_id.is_empty() => {
-                route_get(method, || skynet_edr_mcp::get_incident(store, incident_id))
+        _ if route_path == "/api/v1/risks" => route_risk_list(store, method, query),
+        _ => match route_path.strip_prefix("/api/v1/risks/") {
+            Some(risk_id) if !risk_id.is_empty() => {
+                route_get(method, || skynet_edr_mcp::get_risk(store, risk_id))
             }
-            _ => json_response(
-                HttpStatus::NotFound,
-                json!({"error": "not_found", "read_only": true}),
-            ),
+            _ => match path.strip_prefix("/api/incidents/") {
+                Some(incident_id) if !incident_id.is_empty() => {
+                    route_get(method, || skynet_edr_mcp::get_incident(store, incident_id))
+                }
+                _ => json_response(
+                    HttpStatus::NotFound,
+                    json!({"error": "not_found", "read_only": true}),
+                ),
+            },
         },
     };
 
@@ -397,6 +407,62 @@ fn escape_html(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn split_path_query(path: &str) -> (&str, Option<&str>) {
+    match path.split_once('?') {
+        Some((route, query)) => (route, Some(query)),
+        None => (path, None),
+    }
+}
+
+fn route_risk_list(store: &LocalStore, method: HttpMethod, query: Option<&str>) -> HttpApiResponse {
+    if method != HttpMethod::Get {
+        return method_not_allowed_response();
+    }
+    match parse_risk_page(query) {
+        Ok((limit, offset)) => read_response(skynet_edr_mcp::list_risks(store, limit, offset)),
+        Err(message) => json_response(
+            HttpStatus::BadRequest,
+            json!({"error": "bad_request", "message": message, "read_only": true}),
+        ),
+    }
+}
+
+fn parse_risk_page(query: Option<&str>) -> Result<(usize, usize), &'static str> {
+    let mut limit = 50usize;
+    let mut offset = 0usize;
+    let mut seen_limit = false;
+    let mut seen_offset = false;
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').ok_or("malformed query parameter")?;
+            match key {
+                "limit" => {
+                    if seen_limit {
+                        return Err("duplicate limit query parameter");
+                    }
+                    seen_limit = true;
+                    limit = value.parse::<usize>().map_err(|_| "invalid limit")?;
+                }
+                "offset" => {
+                    if seen_offset {
+                        return Err("duplicate offset query parameter");
+                    }
+                    seen_offset = true;
+                    offset = value.parse::<usize>().map_err(|_| "invalid offset")?;
+                }
+                _ => return Err("unknown query parameter"),
+            }
+        }
+    }
+    if !(1..=100).contains(&limit) {
+        return Err("limit out of range");
+    }
+    if offset > 10_000 {
+        return Err("offset out of range");
+    }
+    Ok((limit, offset))
 }
 
 fn route_get(

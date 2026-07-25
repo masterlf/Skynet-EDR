@@ -1,5 +1,13 @@
 # Canonical Event Schema v0
 
+## Canonical artifact provenance
+
+Canonical `skynet.event.v0` envelopes may include an optional `artifact` object. This metadata is separate from `source` and `provenance`: `source` describes the sensor mechanism, while `artifact` describes the risky content origin when it can be represented safely.
+
+Allowed artifact kinds are `email`, `url`, `git_repository`, `code`, `file`, `message`, `mcp`, `terminal`, and `unknown`. The object contains `kind`, optional bounded `provider`, fixed coarse `display_label`, optional `locator_hash`, and `trust_level`. `locator_hash` must be `sha256:` plus 64 lowercase hexadecimal characters. Labels/providers are bounded and nonblank; unknown artifact fields are rejected.
+
+Artifact labels must be coarse values such as `URL content`, `File content`, or `Terminal output`. They must not contain subjects, message bodies, command text, full URLs, repository names, local paths, credentials, prompts, or hostile tool output. Legacy v0 events without `artifact` remain valid.
+
 Skynet-EDR uses a canonical event envelope so Hermes Agent, OpenClaw, host sensors, and future collectors can feed the same correlation engine without runtime-specific detection logic.
 
 The v0 contract is intentionally conservative: every event must carry identity, source metadata, provenance, trust classification, severity, and redaction metadata. If a collector cannot provide those fields, Skynet should reject the event rather than silently ingest ambiguous security data.

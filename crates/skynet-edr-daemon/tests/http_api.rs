@@ -112,6 +112,82 @@ fn status_endpoint_returns_read_only_json() {
 }
 
 #[test]
+fn risk_api_v1_empty_page_is_bounded_read_only_schema() {
+    let store = temp_store();
+
+    let response = handle_http_request(&store, HttpMethod::Get, "/api/v1/risks?limit=10&offset=0")
+        .expect("risks endpoint responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["schema_version"], "skynet.risk.v1");
+    assert_eq!(response.body["read_only"], true);
+    assert_eq!(
+        response.body["items"]
+            .as_array()
+            .expect("items array")
+            .len(),
+        0
+    );
+    assert_eq!(response.body["page"]["limit"], 10);
+    assert_eq!(response.body["page"]["offset"], 0);
+    assert_eq!(response.body["page"]["has_more"], false);
+}
+
+#[test]
+fn risk_api_v1_rejects_bad_queries_and_mutations() {
+    let store = temp_store();
+
+    for path in [
+        "/api/v1/risks?limit=0",
+        "/api/v1/risks?limit=101",
+        "/api/v1/risks?offset=10001",
+        "/api/v1/risks?limit=10&limit=20",
+        "/api/v1/risks?unexpected=1",
+        "/api/v1/risks?limit=wat",
+    ] {
+        let response = handle_http_request(&store, HttpMethod::Get, path)
+            .unwrap_or_else(|error| panic!("{path} should return a structured error: {error}"));
+        assert_eq!(response.status, HttpStatus::BadRequest);
+        assert_eq!(response.body["error"], "bad_request");
+        assert_eq!(response.body["read_only"], true);
+    }
+
+    let mutation = handle_http_request(&store, HttpMethod::Post, "/api/v1/risks")
+        .expect("known risk route rejects mutation");
+    assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
+}
+
+#[test]
+fn risk_api_v1_projects_detail_without_hostile_attribute_leakage() {
+    let store = temp_store();
+    store
+        .insert_incident(&stored_incident_with_sensitive_event())
+        .expect("incident persists");
+
+    let list =
+        handle_http_request(&store, HttpMethod::Get, "/api/v1/risks").expect("risk list responds");
+    let detail = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks/inc_http_api_redaction",
+    )
+    .expect("risk detail responds");
+
+    assert_eq!(list.status, HttpStatus::Ok);
+    assert_eq!(detail.status, HttpStatus::Ok);
+    assert_eq!(list.body["items"][0]["artifact"]["kind"], "unknown");
+    assert_eq!(detail.body["schema_version"], "skynet.risk.v1");
+    assert!(detail.body["evidence"].is_array());
+
+    for body in [list.body.to_string(), detail.body.to_string()] {
+        assert!(!body.contains("FAKE_TOKEN_NEVER_EXPOSE"));
+        assert!(!body.contains("/root/.hermes/auth.json"));
+        assert!(!body.contains("secret_token"));
+        assert!(!body.contains("details"));
+    }
+}
+
+#[test]
 fn rules_sensors_and_config_drift_are_read_only_get_endpoints() {
     let store = temp_store();
 

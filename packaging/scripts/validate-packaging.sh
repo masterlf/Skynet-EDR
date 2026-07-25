@@ -24,6 +24,9 @@ packaging/scripts/skynet-edr-install-hermes-plugin.sh
 packaging/scripts/vm-smoke.sh
 integrations/hermes/skynet-edr/plugin.yaml
 integrations/hermes/skynet-edr/__init__.py
+integrations/hermes/skynet-edr/dashboard/manifest.json
+integrations/hermes/skynet-edr/dashboard/plugin_api.py
+integrations/hermes/skynet-edr/desktop/plugin.js
 integrations/hermes/skynet-edr/README.md
 .github/workflows/packaging-release.yml
 "
@@ -68,6 +71,10 @@ grep -q 'packaging/scripts/package-postinstall.sh' packaging/nfpm.yaml
 grep -q 'packaging/scripts/package-postremove.sh' packaging/nfpm.yaml
 grep -q '/usr/share/skynet-edr/hermes-plugin/skynet-edr' packaging/nfpm.yaml
 grep -q '/usr/bin/skynet-edr-install-hermes-plugin' packaging/nfpm.yaml
+grep -q 'desktop-plugins/skynet-edr' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'dashboard/plugin_api.py' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'dashboard/plugin_api.py' packaging/tarball/install.sh
+grep -q 'desktop/plugin.js' packaging/tarball/install.sh
 grep -q 'pre_tool_call' integrations/hermes/skynet-edr/__init__.py
 grep -q 'post_tool_call' integrations/hermes/skynet-edr/__init__.py
 grep -q 'skynet.event.v0' integrations/hermes/skynet-edr/__init__.py

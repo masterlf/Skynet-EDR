@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "__init__.py"
+DASHBOARD_API_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "plugin_api.py"
+DESKTOP_PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "desktop" / "plugin.js"
 
 
 def load_plugin():
@@ -96,6 +98,42 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertNotIn("fake-token-value", serialized)
         self.assertNotIn("/root/.hermes/auth.json", serialized)
         self.assertTrue(event["redaction"]["contains_sensitive_data"])
+
+    def test_pre_tool_call_adds_safe_url_artifact_without_query_or_secret_leakage(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"](
+            "web_extract",
+            {"url": "https://user:pass@example.invalid/repo?token=fake-secret#frag"},
+        )
+        event = self.read_events()[-1]
+        serialized = json.dumps(event)
+
+        self.assertEqual(event["source"]["sensor"], "skynet-edr-hermes-plugin")
+        self.assertEqual(event["artifact"]["kind"], "url")
+        self.assertEqual(event["artifact"]["provider"], "browser")
+        self.assertEqual(event["artifact"]["display_label"], "URL content")
+        self.assertEqual(event["artifact"]["trust_level"], "agent_action")
+        self.assertRegex(event["artifact"]["locator_hash"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("user:pass", serialized)
+        self.assertNotIn("fake-secret", serialized)
+        self.assertNotIn("/repo?", serialized)
+
+    def test_terminal_and_file_artifacts_use_fixed_labels_without_paths_or_commands(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("terminal", {"command": "cat /tmp/private-name.env"})
+        ctx.hooks["post_tool_call"]("read_file", {"path": "/tmp/private-name.env"}, "safe")
+        events = self.read_events()
+        serialized = "\n".join(json.dumps(event) for event in events)
+
+        self.assertEqual(events[-2]["artifact"]["kind"], "terminal")
+        self.assertEqual(events[-2]["artifact"]["display_label"], "Terminal output")
+        self.assertEqual(events[-2]["artifact"]["locator_hash"], None)
+        self.assertEqual(events[-1]["artifact"]["kind"], "file")
+        self.assertEqual(events[-1]["artifact"]["display_label"], "File content")
+        self.assertNotIn("cat /tmp/private-name.env", serialized)
+        self.assertNotIn("/tmp/private-name.env", serialized)
 
     def test_mcp_network_tool_emits_event_consumed_by_mcp_sequence_rule(self):
         ctx = FakeContext()
@@ -219,6 +257,32 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.plugin.register(ctx)
         ctx.hooks["pre_tool_call"]("terminal", {"command": "curl https://example.invalid"})
         self.assertFalse((self.state_dir / "events.jsonl").exists())
+
+
+class SkynetEdrHermesDashboardTests(unittest.TestCase):
+    def test_dashboard_backend_source_is_read_only_loopback_proxy(self):
+        text = DASHBOARD_API_PATH.read_text()
+
+        self.assertIn("router = APIRouter()", text)
+        self.assertIn("http://127.0.0.1", text)
+        self.assertIn("/api/v1/risks", text)
+        self.assertIn("urllib.request", text)
+        self.assertNotIn("sqlite3", text)
+        self.assertNotIn("subprocess", text)
+        self.assertNotIn("os.system", text)
+        self.assertNotIn("requests", text)
+
+    def test_desktop_plugin_is_parseable_read_only_disk_plugin(self):
+        text = DESKTOP_PLUGIN_PATH.read_text()
+
+        self.assertIn("id: 'skynet-edr'", text)
+        self.assertIn("/skynet-edr/risks", text)
+        self.assertIn("ctx.rest('/risks", text)
+        self.assertIn("refetchInterval: 10000", text)
+        self.assertNotIn("dangerouslySetInnerHTML", text)
+        self.assertNotIn("<", text)
+        for forbidden in ["POST", "PUT", "PATCH", "DELETE", "sqlite", "child_process"]:
+            self.assertNotIn(forbidden, text)
 
 
 if __name__ == "__main__":

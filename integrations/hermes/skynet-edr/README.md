@@ -48,6 +48,14 @@ Both the spool and log are created with user-only permissions where supported.
   `[REDACTED:secret]` or `[REDACTED:local_context]`.
 - Hook failures are logged and swallowed so Hermes remains usable.
 
+## Risk Explorer
+
+This package also includes a read-only Hermes dashboard backend (`dashboard/plugin_api.py`) and Desktop disk plugin (`desktop/plugin.js`). The backend only proxies `GET /risks`, `GET /risks/{risk_id}`, and `GET /status` to the fixed loopback Skynet-EDR API. It does not use SQLite, shell/subprocess, response actions, or caller-controlled upstream URLs.
+
+Install with `skynet-edr-install-hermes-plugin`; it copies telemetry/backend files to `~/.hermes/plugins/skynet-edr/` and the Desktop page to `~/.hermes/desktop-plugins/skynet-edr/plugin.js`. Enable the Hermes plugin allow-list entry and restart the Hermes gateway/backend process so `plugin_api.py` is mounted. The Desktop renderer can hot reload the disk plugin.
+
+The Risk Explorer displays only `skynet.risk.v1` redacted projections from Skynet-EDR. It does not render raw prompts, command text, full URLs, repository locators, local paths, message bodies, arbitrary attributes, or hostile content.
+
 ## Ingesting into Skynet-EDR
 
 Manual ingestion:

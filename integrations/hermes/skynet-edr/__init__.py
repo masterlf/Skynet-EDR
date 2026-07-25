@@ -49,6 +49,19 @@ _PROMPT_INJECTION_RE = re.compile(
 _MALWARE_TEST_RE = re.compile(
     r"(?i)(skynet_fake_malware_test_string_do_not_execute|eicar-standard-antivirus-test-file)"
 )
+_BROWSER_TOOLS = {"browser_navigate", "browser_snapshot", "browser_click", "web_search", "web_extract"}
+_CODE_TOOLS = {"execute_code", "codex", "claude_code"}
+_MESSAGE_TOOLS = {"send_message", "telegram", "discord", "slack", "sms", "whatsapp", "signal"}
+_ARTIFACT_PROVIDER_BY_KIND = {
+    "email": "email",
+    "url": "browser",
+    "git_repository": "github",
+    "code": "code",
+    "file": "file",
+    "message": "messaging",
+    "mcp": "mcp",
+    "terminal": "terminal",
+}
 
 _lock = threading.Lock()
 _logger_lock = threading.Lock()
@@ -124,6 +137,7 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
     tool_name, params = _extract_tool_call(args, kwargs)
     params_text = _safe_json(params)
     indicators = _classify_tool(tool_name, params_text)
+    artifact = _artifact_for_tool(tool_name, params, params_text, "agent_action")
     attrs: dict[str, Any] = {
         "hook": "pre_tool_call",
         "tool_name": tool_name,
@@ -138,6 +152,8 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
     if replacement:
         attrs["params_preview"] = replacement
         redacted.append(_redacted_field("attributes.params_preview", replacement))
+    elif artifact and artifact["kind"] in {"file", "terminal", "code", "git_repository", "message"}:
+        attrs["params_preview"] = "[OMITTED:tool_params]"
     else:
         attrs["params_preview"] = _truncate(params_text)
     if indicators["command_class"]:
@@ -157,6 +173,7 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         else "low",
         title=f"Hermes tool requested: {tool_name}",
         attributes=attrs,
+        artifact=artifact,
         redacted_fields=redacted,
     )
 
@@ -166,6 +183,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
     result_text = _stringify(result)
     params_text = _safe_json(params)
     indicators = _classify_tool(tool_name, params_text)
+    artifact = _artifact_for_tool(tool_name, params, params_text, "tool_output")
     malware_signature = _malware_signature(result_text)
     injection = bool(_PROMPT_INJECTION_RE.search(result_text))
     attrs: dict[str, Any] = {
@@ -190,6 +208,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
         severity="high" if malware_signature or injection else "informational",
         title=f"Hermes tool completed: {tool_name}",
         attributes=attrs,
+        artifact=artifact,
     )
     if injection:
         _write_event(
@@ -198,6 +217,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
             trust_level="untrusted_content",
             severity="medium",
             title="Untrusted Hermes tool output contains prompt-injection instructions",
+            artifact=artifact,
             attributes={
                 "hook": "post_tool_call",
                 "tool_name": tool_name,
@@ -219,6 +239,7 @@ def _write_event(
     severity: str,
     title: str,
     attributes: dict[str, Any],
+    artifact: dict[str, Any] | None = None,
     redacted_fields: list[dict[str, str]] | None = None,
 ) -> None:
     if not _enabled():
@@ -252,6 +273,8 @@ def _write_event(
             "redacted_fields": redacted_fields,
         },
     }
+    if artifact is not None:
+        event["artifact"] = artifact
     line = json.dumps(event, separators=(",", ":"), sort_keys=True)
     spool = _spool_path()
     _ensure_private_dir(spool.parent)
@@ -421,6 +444,94 @@ def _classify_tool(tool_name: str, params_text: str) -> dict[str, Any]:
         "sensitive_access": sensitive,
         "command_class": "network_egress" if network else None,
     }
+
+
+def _artifact_for_tool(tool_name: str, params: Any, params_text: str, trust_level: str) -> dict[str, Any]:
+    kind = _artifact_kind(tool_name, params_text)
+    label = {
+        "email": "Email content",
+        "url": "URL content",
+        "git_repository": "Git repository",
+        "code": "Code content",
+        "file": "File content",
+        "message": "Message content",
+        "mcp": "MCP content",
+        "terminal": "Terminal output",
+        "unknown": "Unclassified artifact",
+    }[kind]
+    return {
+        "kind": kind,
+        "provider": _ARTIFACT_PROVIDER_BY_KIND.get(kind),
+        "display_label": label,
+        "locator_hash": _locator_hash(kind, params, params_text),
+        "trust_level": trust_level,
+    }
+
+
+def _artifact_kind(tool_name: str, params_text: str) -> str:
+    lower = tool_name.lower()
+    segments = [segment for segment in re.split(r"[.:/]+", lower) if segment]
+    leaf = segments[-1] if segments else lower
+    if leaf in {"gmail", "himalaya", "email"}:
+        return "email"
+    if leaf in _BROWSER_TOOLS or lower.startswith("browser") or leaf in {"web_search", "web_extract"}:
+        return "url"
+    if "github" in lower or leaf in {"git", "gh"} or "git_repository" in params_text.lower():
+        return "git_repository"
+    if leaf in _CODE_TOOLS:
+        return "code"
+    if leaf in _FILE_TOOLS:
+        return "file"
+    if leaf in _MESSAGE_TOOLS:
+        return "message"
+    if leaf in _PROCESS_TOOLS:
+        return "terminal"
+    if "." in tool_name or ":" in tool_name:
+        return "mcp"
+    return "unknown"
+
+
+def _locator_hash(kind: str, params: Any, params_text: str) -> str | None:
+    locator: str | None = None
+    if kind == "url":
+        locator = _safe_url_locator(params, params_text)
+    elif kind == "git_repository":
+        locator = _safe_git_locator(params, params_text)
+    if locator is None:
+        return None
+    return "sha256:" + hashlib.sha256(locator.encode("utf-8")).hexdigest()
+
+
+def _safe_url_locator(params: Any, params_text: str) -> str | None:
+    candidates: list[str] = []
+    if isinstance(params, dict):
+        for key in ("url", "uri"):
+            value = params.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    candidates.extend(_URL_RE.findall(params_text))
+    for candidate in candidates:
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            continue
+        host = parsed.hostname.lower()
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return f"{parsed.scheme}://{host}{port}{parsed.path or '/'}"
+    return None
+
+
+def _safe_git_locator(params: Any, params_text: str) -> str | None:
+    if isinstance(params, dict):
+        for key in ("repository", "repo", "remote", "url"):
+            value = params.get(key)
+            if isinstance(value, str) and "github.com" in value.lower():
+                return "github.com/repository"
+    if "github.com" in params_text.lower():
+        return "github.com/repository"
+    return None
 
 
 def _contains_direct_ipv4_destination(text: str) -> bool:

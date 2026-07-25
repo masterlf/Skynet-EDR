@@ -198,7 +198,7 @@ fn write_http_connection_response(
             &response.body,
         )
     } else {
-        let response = handle_http_request(&store, method, path)
+        let response = handle_http_request(&store, method, raw_path)
             .map_err(|error| DaemonCliError::new(format!("HTTP API request failed: {error}")))?;
         write_raw_http_response(
             stream,

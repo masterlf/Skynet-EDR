@@ -168,6 +168,46 @@ pub struct EventProvenance {
     pub parent_span_id: Option<String>,
 }
 
+/// Risky artifact class associated with a canonical event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    /// Email or mailbox content.
+    Email,
+    /// URL/web content.
+    Url,
+    /// Git repository or hosting content.
+    GitRepository,
+    /// Source code or generated code content.
+    Code,
+    /// File content or metadata.
+    File,
+    /// Chat/message content.
+    Message,
+    /// MCP tool or server content.
+    Mcp,
+    /// Terminal or shell content.
+    Terminal,
+    /// Unknown or intentionally unclassified artifact.
+    Unknown,
+}
+
+/// Explicit metadata about the risky artifact, separate from sensor provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactProvenance {
+    /// Coarse artifact type.
+    pub kind: ArtifactKind,
+    /// Bounded integration/provider label when safely known.
+    pub provider: Option<String>,
+    /// Fixed coarse operator-facing label; never raw subject/body/URL/path/command text.
+    pub display_label: String,
+    /// Optional safe locator digest as `sha256:` plus lowercase hex.
+    pub locator_hash: Option<String>,
+    /// Trust class of the artifact content/origin.
+    pub trust_level: TrustLevel,
+}
+
 /// Canonical event envelope exchanged between agent adapters and Skynet-EDR.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -189,6 +229,9 @@ pub struct CanonicalEventEnvelope {
     pub source: EventSource,
     /// Provenance and correlation identity.
     pub provenance: EventProvenance,
+    /// Optional explicit artifact origin metadata kept separate from sensor provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ArtifactProvenance>,
     /// Trust class assigned to the event source/content.
     pub trust_level: TrustLevel,
     /// Short operator-facing event title.
@@ -325,6 +368,9 @@ impl CanonicalEventEnvelope {
                 "title must not be empty".to_owned(),
             ));
         }
+        if let Some(artifact) = &self.artifact {
+            validate_artifact_provenance(artifact)?;
+        }
         if self.redaction.contains_sensitive_data == self.redaction.redacted_fields.is_empty() {
             return Err(CanonicalEventError::Validation(
                 "redaction metadata is inconsistent with redacted_fields".to_owned(),
@@ -371,6 +417,52 @@ impl CanonicalEventEnvelope {
             ))),
         }
     }
+}
+
+fn validate_artifact_provenance(artifact: &ArtifactProvenance) -> Result<(), CanonicalEventError> {
+    const MAX_DISPLAY_LABEL_CHARS: usize = 128;
+    const MAX_PROVIDER_CHARS: usize = 64;
+
+    if artifact.display_label.trim().is_empty() {
+        return Err(CanonicalEventError::Validation(
+            "artifact.display_label must not be empty".to_owned(),
+        ));
+    }
+    if artifact.display_label.chars().count() > MAX_DISPLAY_LABEL_CHARS {
+        return Err(CanonicalEventError::Validation(
+            "artifact.display_label exceeds maximum length".to_owned(),
+        ));
+    }
+    if let Some(provider) = &artifact.provider {
+        if provider.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "artifact.provider must not be empty".to_owned(),
+            ));
+        }
+        if provider.chars().count() > MAX_PROVIDER_CHARS {
+            return Err(CanonicalEventError::Validation(
+                "artifact.provider exceeds maximum length".to_owned(),
+            ));
+        }
+    }
+    if let Some(locator_hash) = &artifact.locator_hash {
+        if !valid_locator_hash(locator_hash) {
+            return Err(CanonicalEventError::Validation(
+                "artifact.locator_hash must be sha256: plus 64 lowercase hex characters".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_locator_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// Parse, deny unknown top-level fields, and validate one canonical event JSON document.
@@ -515,6 +607,12 @@ fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {
         "provenance".to_owned(),
         serde_json::to_value(event.provenance).expect("provenance serializes"),
     );
+    if let Some(artifact) = event.artifact {
+        attributes.insert(
+            "artifact".to_owned(),
+            serde_json::to_value(artifact).expect("artifact serializes"),
+        );
+    }
     if let Some(received_at_unix_ms) = event.received_at_unix_ms {
         attributes.insert(
             "received_at_unix_ms".to_owned(),
@@ -545,6 +643,10 @@ fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvel
     let provenance =
         serde_json::from_value::<EventProvenance>(event.attributes.get("provenance")?.clone())
             .ok()?;
+    let artifact = event
+        .attributes
+        .get("artifact")
+        .and_then(|value| serde_json::from_value::<ArtifactProvenance>(value.clone()).ok());
     let received_at_unix_ms = event
         .attributes
         .get("received_at_unix_ms")
@@ -555,6 +657,7 @@ fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvel
         "event_type",
         "trust_level",
         "provenance",
+        "artifact",
         "received_at_unix_ms",
     ] {
         attributes.remove(synthetic_key);
@@ -569,6 +672,7 @@ fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvel
         severity: event.severity,
         source: event.source.clone(),
         provenance,
+        artifact,
         trust_level,
         title: event.title.clone(),
         details: event.details.clone(),
