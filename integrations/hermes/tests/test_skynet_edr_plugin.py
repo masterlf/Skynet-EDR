@@ -14,6 +14,8 @@ from pathlib import Path
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "__init__.py"
 DASHBOARD_API_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "plugin_api.py"
+DASHBOARD_MANIFEST_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "manifest.json"
+DASHBOARD_BUNDLE_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "plugin.js"
 DESKTOP_PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "desktop" / "plugin.js"
 
 
@@ -96,6 +98,27 @@ class FakeContext:
 
 
 class SkynetEdrHermesPluginTests(unittest.TestCase):
+    def test_dashboard_backend_companion_is_hidden_and_has_loadable_bundle(self):
+        manifest = json.loads(DASHBOARD_MANIFEST_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "skynet-edr")
+        self.assertEqual(manifest["api"], "plugin_api.py")
+        self.assertEqual(manifest["entry"], "plugin.js")
+        self.assertTrue(manifest["tab"]["hidden"])
+        self.assertTrue(DASHBOARD_BUNDLE_PATH.is_file())
+
+        bundle = DASHBOARD_BUNDLE_PATH.read_text(encoding="utf-8")
+        self.assertIn('registry.register("skynet-edr"', bundle)
+        for forbidden in ("fetch(", "XMLHttpRequest", ".innerHTML", "WebSocket("):
+            self.assertNotIn(forbidden, bundle)
+
+        syntax = subprocess.run(
+            ["node", "--check", str(DASHBOARD_BUNDLE_PATH)],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.state_dir = Path(self.tmp.name)

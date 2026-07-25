@@ -47,6 +47,7 @@ install -m 0644 LICENSE "$ROOT/LICENSE"
     integrations/hermes/skynet-edr/__init__.py \
     integrations/hermes/skynet-edr/README.md \
     integrations/hermes/skynet-edr/dashboard/manifest.json \
+    integrations/hermes/skynet-edr/dashboard/plugin.js \
     integrations/hermes/skynet-edr/dashboard/plugin_api.py \
     integrations/hermes/skynet-edr/desktop/plugin.js \
     > SHA256SUMS

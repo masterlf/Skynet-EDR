@@ -118,6 +118,7 @@ if [ -d "$ROOT/integrations/hermes/skynet-edr" ]; then
   if [ -d "$ROOT/integrations/hermes/skynet-edr/dashboard" ]; then
     install -d -m 0755 -o root -g root /usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard
     install_file "$ROOT/integrations/hermes/skynet-edr/dashboard/manifest.json" /usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json 0644 root:root
+    install_file "$ROOT/integrations/hermes/skynet-edr/dashboard/plugin.js" /usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js 0644 root:root
     install_file "$ROOT/integrations/hermes/skynet-edr/dashboard/plugin_api.py" /usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py 0644 root:root
   fi
   if [ -d "$ROOT/integrations/hermes/skynet-edr/desktop" ]; then

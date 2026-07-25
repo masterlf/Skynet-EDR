@@ -29,6 +29,7 @@ Packages place the plugin template and installer here:
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/__init__.py
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json
+/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js
 /usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md

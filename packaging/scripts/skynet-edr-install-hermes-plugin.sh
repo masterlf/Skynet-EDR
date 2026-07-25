@@ -39,6 +39,7 @@ install -m 0644 "$PLUGIN_SOURCE/README.md" "$TARGET/README.md"
 if [ -d "$PLUGIN_SOURCE/dashboard" ]; then
   install -d -m 0700 "$TARGET/dashboard"
   install -m 0644 "$PLUGIN_SOURCE/dashboard/manifest.json" "$TARGET/dashboard/manifest.json"
+  install -m 0644 "$PLUGIN_SOURCE/dashboard/plugin.js" "$TARGET/dashboard/plugin.js"
   install -m 0644 "$PLUGIN_SOURCE/dashboard/plugin_api.py" "$TARGET/dashboard/plugin_api.py"
 fi
 if [ -f "$PLUGIN_SOURCE/desktop/plugin.js" ]; then

@@ -26,6 +26,7 @@ packaging/scripts/vm-smoke.sh
 integrations/hermes/skynet-edr/plugin.yaml
 integrations/hermes/skynet-edr/__init__.py
 integrations/hermes/skynet-edr/dashboard/manifest.json
+integrations/hermes/skynet-edr/dashboard/plugin.js
 integrations/hermes/skynet-edr/dashboard/plugin_api.py
 integrations/hermes/skynet-edr/desktop/plugin.js
 integrations/hermes/skynet-edr/README.md
@@ -75,12 +76,46 @@ grep -q 'dist/staging/nfpm/hermes-plugin/skynet-edr' packaging/nfpm.yaml
 grep -q '/usr/bin/skynet-edr-install-hermes-plugin' packaging/nfpm.yaml
 grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-tarball.sh
 grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-packages.sh
+python3 - <<'PY'
+import re
+from pathlib import Path
+
+staging = Path("packaging/scripts/stage-hermes-plugin-payload.sh").read_text(encoding="utf-8")
+build = Path("packaging/scripts/build-tarball.sh").read_text(encoding="utf-8")
+allowed = re.findall(r"^copy_allowed_file '([^']+)'$", staging, flags=re.MULTILINE)
+checksum_block = re.search(
+    r"^\s*sha256sum \\\n(?P<body>.*?)^\s*> SHA256SUMS$",
+    build,
+    flags=re.MULTILINE | re.DOTALL,
+)
+if checksum_block is None:
+    raise SystemExit("tarball SHA256SUMS command is missing or malformed")
+covered = set(
+    re.findall(
+        r"^\s*(integrations/hermes/skynet-edr/\S+)\s*\\$",
+        checksum_block.group("body"),
+        flags=re.MULTILINE,
+    )
+)
+missing = [
+    path
+    for path in allowed
+    if f"integrations/hermes/skynet-edr/{path}" not in covered
+]
+if missing:
+    raise SystemExit(
+        "Hermes plugin payload files missing from tarball SHA256SUMS: "
+        + ", ".join(missing)
+    )
+PY
 if grep -q 'cp -R integrations/hermes/skynet-edr' packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/nfpm.yaml; then
   echo "Hermes plugin payload must be staged from an explicit allowlist, not copied recursively" >&2
   exit 1
 fi
 grep -q 'desktop-plugins/skynet-edr' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'dashboard/plugin.js' packaging/scripts/skynet-edr-install-hermes-plugin.sh
 grep -q 'dashboard/plugin_api.py' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'dashboard/plugin.js' packaging/tarball/install.sh
 grep -q 'dashboard/plugin_api.py' packaging/tarball/install.sh
 grep -q 'desktop/plugin.js' packaging/tarball/install.sh
 grep -q 'pre_tool_call' integrations/hermes/skynet-edr/__init__.py
@@ -201,6 +236,7 @@ for path in \
   __init__.py \
   README.md \
   dashboard/manifest.json \
+  dashboard/plugin.js \
   dashboard/plugin_api.py \
   desktop/plugin.js; do
   mkdir -p "$src_dir/$(dirname "$path")"
@@ -221,6 +257,7 @@ cat > "$expected_payload" <<'EOF'
 README.md
 __init__.py
 dashboard/manifest.json
+dashboard/plugin.js
 dashboard/plugin_api.py
 desktop/plugin.js
 plugin.yaml
@@ -256,6 +293,7 @@ for path in plugin.yaml __init__.py README.md desktop/plugin.js; do
   printf 'allowed payload fixture: %s\n' "$path" > "$dashboard_symlink_src/$path"
 done
 printf 'allowed payload fixture: dashboard/manifest.json\n' > "$dashboard_real/manifest.json"
+printf 'allowed payload fixture: dashboard/plugin.js\n' > "$dashboard_real/plugin.js"
 printf 'allowed payload fixture: dashboard/plugin_api.py\n' > "$dashboard_real/plugin_api.py"
 ln -s "$dashboard_real" "$dashboard_symlink_src/dashboard"
 if packaging/scripts/stage-hermes-plugin-payload.sh "$dashboard_symlink_src" "$dashboard_symlink_dst" >/dev/null 2>&1; then

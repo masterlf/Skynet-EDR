@@ -1,4 +1,12 @@
 {
   "name": "skynet-edr",
+  "label": "Skynet-EDR backend companion",
+  "description": "Hidden backend companion for the native Desktop Risk Explorer.",
+  "version": "0.4.0",
+  "tab": {
+    "path": "/skynet-edr-backend",
+    "hidden": true
+  },
+  "entry": "plugin.js",
   "api": "plugin_api.py"
 }

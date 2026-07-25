@@ -59,6 +59,7 @@ grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/plugin.yaml$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/README.md$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/dashboard/plugin.js$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/dashboard/plugin_api.py$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/desktop/plugin.js$'
 
@@ -79,6 +80,7 @@ grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugi
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js$'
 
@@ -94,6 +96,7 @@ grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugi
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js$'
 
@@ -109,6 +112,7 @@ grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js$'
 
