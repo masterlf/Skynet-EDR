@@ -9,6 +9,7 @@ network egress, and never stores raw tool output.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 PLUGIN_NAME = "skynet-edr"
 PLUGIN_VERSION = "0.4.0"
@@ -33,6 +35,11 @@ _LOCAL_CONTEXT_RE = re.compile(
     r"(?i)(/home/[\w_.-]+/\.hermes/\S*|/root/\.hermes/\S*|/home/[\w_.-]+/\.ssh/\S*|/root/\.ssh/\S*|/home/[\w_.-]+/[^\s'\"]*\.env|/root/[^\s'\"]*\.env)"
 )
 _NETWORK_RE = re.compile(r"(?i)(\bcurl\b|\bwget\b|https?://|/dev/tcp|\bnc\b|\bncat\b)")
+_URL_RE = re.compile(r"(?i)https?://[^\s\"'\\]+")
+_DEV_TCP_DESTINATION_RE = re.compile(r"(?i)/dev/tcp/([^/\s\"'\\]+)/\d+")
+_SIMPLE_DIRECT_IPV4_DESTINATION_RE = re.compile(
+    r"(?i)\b(?:curl|wget|nc|ncat)\b\s+(?:https?://)?((?:\d{1,3}\.){3}\d{1,3})(?=$|[\s/:\"'\\])"
+)
 _DELIVERY_TOOLS = {"send_message", "himalaya", "gmail", "telegram", "discord", "slack", "email"}
 _PROCESS_TOOLS = {"terminal", "execute_code", "shell", "bash", "python"}
 _FILE_TOOLS = {"read_file", "write_file", "patch", "search_files"}
@@ -121,6 +128,7 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         "hook": "pre_tool_call",
         "tool_name": tool_name,
         "network_indicator": indicators["network_indicator"],
+        "direct_ip": indicators["direct_ip"],
         "delivery_indicator": indicators["delivery_indicator"],
         "sensitive_access": indicators["sensitive_access"],
         "params_length": len(params_text),
@@ -134,8 +142,14 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         attrs["params_preview"] = _truncate(params_text)
     if indicators["command_class"]:
         attrs["command_class"] = indicators["command_class"]
+    if indicators["source_kind"] == "mcp_tool":
+        event_type = "agent.mcp.tool.requested"
+    elif indicators["direct_ip"]:
+        event_type = "agent.network.egress"
+    else:
+        event_type = "agent.tool.requested"
     _write_event(
-        event_type="agent.tool.requested",
+        event_type=event_type,
         source_kind=indicators["source_kind"],
         trust_level="agent_action",
         severity="high"
@@ -160,6 +174,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
         "result_omitted": True,
         "result_length": len(result_text),
         "network_indicator": indicators["network_indicator"],
+        "direct_ip": indicators["direct_ip"],
         "delivery_indicator": indicators["delivery_indicator"],
         "sensitive_access": indicators["sensitive_access"],
         "prompt_injection_indicator": injection,
@@ -401,10 +416,34 @@ def _classify_tool(tool_name: str, params_text: str) -> dict[str, Any]:
     return {
         "source_kind": source,
         "network_indicator": network,
+        "direct_ip": network and _contains_direct_ipv4_destination(params_text),
         "delivery_indicator": delivery,
         "sensitive_access": sensitive,
         "command_class": "network_egress" if network else None,
     }
+
+
+def _contains_direct_ipv4_destination(text: str) -> bool:
+    for url in _URL_RE.findall(text):
+        try:
+            hostname = urlsplit(url).hostname
+        except ValueError:
+            continue
+        if _is_ipv4_literal(hostname):
+            return True
+    for pattern in (_DEV_TCP_DESTINATION_RE, _SIMPLE_DIRECT_IPV4_DESTINATION_RE):
+        if any(_is_ipv4_literal(candidate) for candidate in pattern.findall(text)):
+            return True
+    return False
+
+
+def _is_ipv4_literal(candidate: str | None) -> bool:
+    if candidate is None:
+        return False
+    try:
+        return isinstance(ipaddress.ip_address(candidate), ipaddress.IPv4Address)
+    except ValueError:
+        return False
 
 
 def _malware_signature(text: str) -> str | None:

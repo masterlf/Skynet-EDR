@@ -110,7 +110,7 @@ fn cli_help_lists_doctor() {
 fn doctor_accepts_packaged_config_store_and_loopback_api_without_rules_or_agents_dirs() {
     let root = temp_path("ready");
     let config_path = root.join("etc/skynet-edr/config.toml");
-    let db_path = root.join("var/lib/skynet-edr/skynet-edr.sqlite");
+    let db_path = root.join("var/lib/skynet-edr/skynet.sqlite");
     let spool_path = root.join("var/lib/skynet-edr/events.jsonl");
     fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
     fs::create_dir_all(db_path.parent().expect("db parent")).expect("data dir");
@@ -165,7 +165,7 @@ fn doctor_accepts_packaged_config_store_and_loopback_api_without_rules_or_agents
 fn doctor_fails_closed_for_non_loopback_api_without_connecting_or_leaking_config_values() {
     let root = temp_path("non-loopback");
     let config_path = root.join("etc/skynet-edr/config.toml");
-    let db_path = root.join("var/lib/skynet-edr/skynet-edr.sqlite");
+    let db_path = root.join("var/lib/skynet-edr/skynet.sqlite");
     fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
     fs::create_dir_all(db_path.parent().expect("db parent")).expect("data dir");
     fs::write(
@@ -207,7 +207,7 @@ fn doctor_fails_closed_for_non_loopback_api_without_connecting_or_leaking_config
 fn doctor_rejects_guard_mode_and_mutable_posture_without_leaking_config_excerpt() {
     let root = temp_path("unsafe-posture");
     let config_path = root.join("etc/skynet-edr/config.toml");
-    let db_path = root.join("var/lib/skynet-edr/skynet-edr.sqlite");
+    let db_path = root.join("var/lib/skynet-edr/skynet.sqlite");
     fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
     fs::create_dir_all(db_path.parent().expect("db parent")).expect("data dir");
     fs::write(
@@ -249,7 +249,7 @@ fn doctor_rejects_guard_mode_and_mutable_posture_without_leaking_config_excerpt(
 fn doctor_uses_configured_loopback_api_and_configured_spool_for_readiness() {
     let root = temp_path("configured-readiness");
     let config_path = root.join("etc/skynet-edr/config.toml");
-    let db_path = root.join("var/lib/skynet-edr/skynet-edr.sqlite");
+    let db_path = root.join("var/lib/skynet-edr/skynet.sqlite");
     let spool_path = root.join("var/lib/skynet-edr/configured-events.jsonl");
     fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
     fs::create_dir_all(db_path.parent().expect("db parent")).expect("data dir");

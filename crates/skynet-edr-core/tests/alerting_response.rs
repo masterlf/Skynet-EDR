@@ -66,11 +66,13 @@ fn alert_schema_serializes_destinations_response_action_and_approval_boundary() 
 }
 
 #[test]
-fn destructive_response_actions_are_inside_approval_boundary() {
-    assert!(ApprovalBoundary::OperatorRequired.allows(ResponseAction::RequireApproval));
-    assert!(ApprovalBoundary::OperatorRequired.allows(ResponseAction::PauseAutomation));
+fn response_actions_respect_approval_boundary() {
+    assert!(ApprovalBoundary::PassiveOnly.allows(ResponseAction::EmitAlert));
+    assert!(!ApprovalBoundary::PassiveOnly.allows(ResponseAction::RequireApproval));
     assert!(!ApprovalBoundary::PassiveOnly.allows(ResponseAction::PauseAutomation));
     assert!(!ApprovalBoundary::PassiveOnly.allows(ResponseAction::BlockNetworkEgress));
+    assert!(ApprovalBoundary::OperatorRequired.allows(ResponseAction::RequireApproval));
+    assert!(ApprovalBoundary::OperatorRequired.allows(ResponseAction::PauseAutomation));
     assert!(ApprovalBoundary::PreApprovedContainment.allows(ResponseAction::BlockNetworkEgress));
 }
 

@@ -30,7 +30,7 @@ Detection rules may use:
 
 | Family | Example | Detailed doc |
 |---|---|---|
-| MCP/tool abuse | shell interpreter plus egress tooling in MCP config | [EDR-MCP-001](DETECTION_RULES.md#edr-mcp-001-mcp-shell-plus-egress) |
+| MCP/tool abuse | instructional-attack content followed by a network-capable MCP request in the same trace | [EDR-MCP-001](DETECTION_RULES.md#edr-mcp-001-mcp-network-tool-request-after-instructional-attack) |
 | Sensitive access | reads of `.env`, OAuth stores, SSH keys, cloud credentials, or agent config | [EDR-SECRET-001](DETECTION_RULES.md#edr-secret-001-sensitive-file-access) |
 | Exfiltration chain | secret read followed by network egress | [EDR-EXFIL-001](DETECTION_RULES.md#edr-exfil-001-secret-read-followed-by-network-egress) |
 | Malware-to-AI content | known safe malware-test indicators supplied to the AI runtime | [EDR-MALWARE-001](DETECTION_RULES.md#edr-malware-001-malware-like-content-sent-to-ai-runtime) |

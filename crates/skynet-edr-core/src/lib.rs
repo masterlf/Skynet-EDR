@@ -1146,13 +1146,16 @@ impl ApprovalBoundary {
     pub const fn allows(self, action: ResponseAction) -> bool {
         matches!(
             (self, action),
-            (
-                _,
-                ResponseAction::EmitAlert | ResponseAction::RequireApproval
-            ) | (Self::OperatorRequired, ResponseAction::PauseAutomation)
+            (_, ResponseAction::EmitAlert)
+                | (
+                    Self::OperatorRequired,
+                    ResponseAction::RequireApproval | ResponseAction::PauseAutomation,
+                )
                 | (
                     Self::PreApprovedContainment,
-                    ResponseAction::PauseAutomation | ResponseAction::BlockNetworkEgress,
+                    ResponseAction::RequireApproval
+                        | ResponseAction::PauseAutomation
+                        | ResponseAction::BlockNetworkEgress,
                 )
         )
     }
@@ -1748,6 +1751,10 @@ fn match_remaining_sequence(
     let mut search_from = start_index + 1;
 
     for step in rule.steps.iter().skip(1) {
+        // The earliest candidate is complete for this model: step predicates are
+        // local to each event, while the join key and time window stay anchored
+        // to the first event. Any successor available after a later candidate is
+        // therefore also available after the earlier one.
         let (candidate_index, candidate) = ordered_events
             .iter()
             .enumerate()
@@ -1856,10 +1863,10 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
     vec![
         sequence_rule(
             "EDR-MCP-001",
-            "MCP shell plus egress after untrusted content",
+            "MCP network tool request after untrusted content",
             Severity::High,
             "agent.mcp.tool.requested",
-            "MCP shell/network tool request",
+            "MCP network tool request",
             vec![SequenceAttributePredicate::equals_bool(
                 "attributes.network_indicator",
                 true,
@@ -1964,10 +1971,16 @@ fn sequence_rule(
                 name: "untrusted prompt-injection content".to_owned(),
                 event_type: "agent.content.ingested".to_owned(),
                 trust_level: TrustLevel::UntrustedContent,
-                attributes: vec![SequenceAttributePredicate::equals_bool(
-                    "attributes.instruction_authority",
-                    false,
-                )],
+                attributes: vec![
+                    SequenceAttributePredicate::equals_bool(
+                        "attributes.instruction_authority",
+                        false,
+                    ),
+                    SequenceAttributePredicate::equals_bool(
+                        "attributes.contains_instructional_attack",
+                        true,
+                    ),
+                ],
             },
             SequenceStep {
                 name: action_step_name.to_owned(),

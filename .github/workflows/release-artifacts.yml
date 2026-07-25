@@ -15,6 +15,9 @@ jobs:
   linux-packages:
     name: Build Linux package artifacts
     runs-on: ubuntu-latest
+    env:
+      NFPM_VERSION: v2.46.3
+      NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -29,15 +32,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends rpm zstd
-      - name: Install nfpm
-        env:
-          NFPM_VERSION: 2.46.3
+      - name: Install nFPM
         run: |
-          curl -L --fail --proto '=https' --tlsv1.2 \
-            -o /tmp/nfpm.tar.gz \
-            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
-          tar -C /tmp -xzf /tmp/nfpm.tar.gz nfpm
-          sudo install -m 0755 /tmp/nfpm /usr/local/bin/nfpm
+          archive="nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/${archive}"
+          printf '%s  %s\n' "${NFPM_SHA256}" "${archive}" | sha256sum -c -
+          tar -xzf "${archive}" nfpm
+          sudo install -m 0755 nfpm /usr/local/bin/nfpm
           nfpm --version
       - name: Validate packaging baseline
         run: packaging/scripts/validate-packaging.sh

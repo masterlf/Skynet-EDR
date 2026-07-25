@@ -1,12 +1,12 @@
 # Hermes Plugin Telemetry
 
-Skynet-EDR v0.3 ships a passive Hermes Agent plugin. The plugin is the preferred
+Skynet-EDR v0.4 ships a passive Hermes Agent plugin. The plugin is the preferred
 non-invasive live telemetry path for Hermes hosts.
 
 ## Positioning
 
 The plugin is a sensor, not an inline control point. It does not block, approve,
-rewrite, or delay Hermes actions in v0.3. Blocking/policy enforcement remains a
+rewrite, or delay Hermes actions in v0.4. Blocking/policy enforcement remains a
 future guard-mode feature.
 
 ```text
@@ -52,7 +52,7 @@ hermes plugins enable skynet-edr
 
 ## Hooks
 
-The v0.3 plugin registers:
+The v0.4 plugin registers:
 
 | Hook | Purpose |
 |---|---|
@@ -95,11 +95,16 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 
 ## Detection limits
 
-The v0.3 plugin records indicators, not verdicts. `network_indicator` catches
+The v0.4 plugin records indicators, not verdicts. `network_indicator` catches
 common egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and `ncat`.
-The canonical direct-IP sequence rule requires a separate explicit boolean
-`direct_ip=true`; generic network egress is not enough. The plugin does not yet
-fully classify indirect egress inside arbitrary Python, SDK, cloud-client,
+For those recognized network operations, the plugin sets `direct_ip=true` when
+it validates an explicit IPv4 destination host in an HTTP(S) URL, `/dev/tcp`, or
+a simple `curl`, `wget`, `nc`, or `ncat` invocation, then emits
+`agent.network.egress`; an IPv4 literal elsewhere in a URL path or payload does
+not qualify. Generic network egress is not enough for `EDR-NET-001`. Unknown tool names are classified
+as MCP tools and emit `agent.mcp.tool.requested`, allowing `EDR-MCP-001` to consume
+the packaged telemetry. The plugin does not yet fully classify IPv6 literals or
+indirect egress inside arbitrary Python, SDK, cloud-client,
 `scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed network indicators
 as a coverage limitation, not proof of safety.
 

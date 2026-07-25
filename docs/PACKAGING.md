@@ -101,21 +101,17 @@ Do not grant broad read access to AI-agent secrets as a packaging shortcut. Use 
 For each release tag:
 
 ```text
-skynet-edr_VERSION_linux_amd64.deb
-skynet-edr_VERSION_linux_x86_64.rpm
-skynet-edr_VERSION_linux_x86_64.pkg.tar.zst
-skynet-edr_VERSION_linux_x86_64.tar.gz
+skynet-edr_VERSION_amd64.deb
+skynet-edr-VERSION-1.x86_64.rpm
+skynet-edr-VERSION-1-x86_64.pkg.tar.zst
+skynet-edr-VERSION-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
-checksums.txt.sig
-SBOM.spdx.json
-SBOM.cyclonedx.json
-release-notes.md
-upgrade-notes.md
-rollback-notes.md
 ```
 
 Later production releases should add:
 
+- signed checksum manifests,
+- SPDX and CycloneDX SBOMs,
 - cosign signatures,
 - SLSA/in-toto provenance,
 - signed APT repository metadata,

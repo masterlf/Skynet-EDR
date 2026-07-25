@@ -19,7 +19,7 @@ use skynet_edr_core::{
 };
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/skynet-edr/config.toml";
-const DEFAULT_DB_PATH: &str = "/var/lib/skynet-edr/skynet-edr.sqlite";
+const DEFAULT_DB_PATH: &str = "/var/lib/skynet-edr/skynet.sqlite";
 const DEFAULT_PLUGIN_SPOOL_PATH: &str = "/var/lib/skynet-edr/events.jsonl";
 const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
 const MAX_EVIDENCE_LINES: usize = 200;

@@ -1,6 +1,6 @@
 # Operations
 
-This page is the v0.2 operator index for running and validating Skynet-EDR after installation.
+This page is the v0.4 operator index for running and validating Skynet-EDR after installation.
 
 Use [Install](INSTALL.md) for package installation and rollback commands. Use [Quickstart](QUICKSTART.md) for the shortest first-run path.
 
@@ -24,7 +24,7 @@ After installing or building, run:
 
 ```bash
 skynet-edr status
-sudo -u skynet-edr skynet-edr store init --db /var/lib/skynet-edr/skynet-edr.sqlite
+sudo -u skynet-edr skynet-edr store init --db /var/lib/skynet-edr/skynet.sqlite
 skynet-edr doctor
 skynet-edr diagnostics collect --output ./skynet-edr-diagnostics
 ```
@@ -32,7 +32,7 @@ skynet-edr diagnostics collect --output ./skynet-edr-diagnostics
 `skynet-edr doctor` checks the packaged operator layout by default:
 
 - `/etc/skynet-edr/config.toml` exists and is readable;
-- the local store exists at `/var/lib/skynet-edr/skynet-edr.sqlite` and opens successfully;
+- the local store exists at `/var/lib/skynet-edr/skynet.sqlite` and opens successfully;
 - readiness is available through either a loopback-only local API endpoint or a plugin spool file;
 - config/API readiness fails closed when the API bind or supplied API target is not loopback.
 

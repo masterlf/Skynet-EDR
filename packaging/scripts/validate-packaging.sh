@@ -80,6 +80,7 @@ grep -q 'systemctl daemon-reload' packaging/scripts/package-postinstall.sh
 grep -q 'systemctl daemon-reload' packaging/scripts/package-postremove.sh
 
 grep -q '^PREFIX=/usr$' packaging/tarball/install.sh
+grep -q '^PREFIX=/usr$' packaging/tarball/uninstall.sh
 
 grep -q 'Hermes Agent' docs/INSTALL.md
 grep -q 'OpenClaw' docs/INSTALL.md

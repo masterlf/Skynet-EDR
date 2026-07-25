@@ -32,7 +32,7 @@ The value is not a magical prompt-injection score. The value is evidence that ex
 
 The schema-level source of truth for provenance and trust values is [Canonical event schema](EVENT_SCHEMA.md#trust-levels).
 
-## Current v0.2 scope
+## Current v0.4 scope
 
 The current Linux-first MVP is passive. It focuses on:
 

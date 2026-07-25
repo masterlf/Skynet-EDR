@@ -4,6 +4,8 @@
 
 - Added fail-closed operator doctor and private redaction-safe diagnostics bundles.
 - Added deterministic canonical sequence correlation and eight AI-agent rule families.
+- Aligned Hermes MCP/direct-IPv4 event emission with attack-gated sequence predicates.
+- Restricted the passive-only response boundary to alert emission without approval, pause, or blocking.
 - Persisted built-in sequence incidents from Hermes/OpenClaw spool ingestion before checkpoint advancement.
 - Added clean-container package smoke checks and strict public release verification.
 - Hardened security workflows, reviewed release notes, and immutable single-workflow publication.

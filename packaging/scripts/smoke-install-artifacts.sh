@@ -107,7 +107,7 @@ sha256sum -c SHA256SUMS
 ./bin/skynet-edr --version
 ./bin/skynet-edr-daemon --version
 ./bin/skynet-edr-daemon status
-./install.sh --prefix /usr
+./install.sh
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-daemon status
@@ -116,18 +116,26 @@ test -x /usr/bin/skynet-edr-daemon
 test -r /etc/skynet-edr/config.toml
 systemd-analyze verify /usr/lib/systemd/system/skynet-edr.service
 printf 'state preserved across tarball uninstall\n' > /var/lib/skynet-edr/smoke-state.txt
-./uninstall.sh --prefix /usr
+./uninstall.sh
 test ! -e /usr/bin/skynet-edr
 test ! -e /usr/bin/skynet-edr-daemon
+test ! -e /usr/share/doc/skynet-edr
+test ! -e /usr/share/skynet-edr/hermes-plugin
 test -f /etc/skynet-edr/config.toml
 test -f /var/lib/skynet-edr/smoke-state.txt
-./install.sh --prefix /usr
-./uninstall.sh --prefix /usr --purge
+./install.sh
+./uninstall.sh --purge
 test ! -e /etc/skynet-edr
 test ! -e /var/lib/skynet-edr
 test ! -e /var/log/skynet-edr
 test ! -e /var/cache/skynet-edr
 test ! -e /run/skynet-edr
+./install.sh --prefix /opt/skynet-edr --no-systemd
+test -x /opt/skynet-edr/bin/skynet-edr
+test -x /opt/skynet-edr/bin/skynet-edr-daemon
+./uninstall.sh --prefix /opt/skynet-edr --purge
+test ! -e /opt/skynet-edr/bin/skynet-edr
+test ! -e /opt/skynet-edr/bin/skynet-edr-daemon
 SH
 }
 

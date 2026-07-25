@@ -317,6 +317,50 @@ fn text_only_prompt_injection_is_low_signal_and_never_critical() {
         .all(|event| event.severity != Severity::Critical));
 }
 
+#[test]
+fn non_attack_untrusted_content_does_not_open_mcp_or_network_sequence() {
+    let events = vec![
+        plugin_canonical_event(
+            "evt_benign_untrusted",
+            "agent.content.ingested",
+            1_781_560_000_000,
+            TrustLevel::UntrustedContent,
+            Severity::Low,
+            "trace_benign_untrusted",
+            &[
+                bool_attr("instruction_authority", false),
+                bool_attr("contains_instructional_attack", false),
+            ],
+        ),
+        plugin_canonical_event(
+            "evt_benign_mcp",
+            "agent.mcp.tool.requested",
+            1_781_560_001_000,
+            TrustLevel::AgentAction,
+            Severity::High,
+            "trace_benign_untrusted",
+            &[bool_attr("network_indicator", true)],
+        ),
+        plugin_canonical_event(
+            "evt_benign_network",
+            "agent.network.egress",
+            1_781_560_002_000,
+            TrustLevel::AgentAction,
+            Severity::High,
+            "trace_benign_untrusted",
+            &[
+                bool_attr("network_indicator", true),
+                bool_attr("direct_ip", true),
+            ],
+        ),
+    ];
+
+    let matches = correlate_sequence_rules(&built_in_ai_agent_sequence_rules(), &events)
+        .expect("rule pack evaluates benign untrusted content");
+
+    assert!(matches.is_empty());
+}
+
 fn parse_jsonl_fixture(input: &str) -> Vec<CanonicalEventEnvelope> {
     input
         .lines()
@@ -405,6 +449,63 @@ fn built_in_rules_match_realistic_plugin_shaped_trace_without_session_attribute(
         matches[0].join_key.as_deref(),
         Some("trace:trace_plugin_real")
     );
+}
+
+#[test]
+fn mcp_and_network_rules_match_current_hermes_plugin_event_shapes() {
+    let content = plugin_canonical_event(
+        "evt_plugin_pi",
+        "agent.content.ingested",
+        1_781_560_000_000,
+        TrustLevel::UntrustedContent,
+        Severity::Medium,
+        "trace_plugin_specialized",
+        &[
+            bool_attr("instruction_authority", false),
+            bool_attr("contains_instructional_attack", true),
+        ],
+    );
+    let mut mcp = plugin_canonical_event(
+        "evt_plugin_mcp",
+        "agent.mcp.tool.requested",
+        1_781_560_001_000,
+        TrustLevel::AgentAction,
+        Severity::High,
+        "trace_plugin_specialized",
+        &[
+            str_attr("tool_name", "remote.fetch"),
+            bool_attr("network_indicator", true),
+            bool_attr("direct_ip", false),
+        ],
+    );
+    mcp.source.kind = SourceKind::McpTool;
+    let mut network = plugin_canonical_event(
+        "evt_plugin_network",
+        "agent.network.egress",
+        1_781_560_002_000,
+        TrustLevel::AgentAction,
+        Severity::High,
+        "trace_plugin_specialized",
+        &[
+            str_attr("tool_name", "terminal"),
+            bool_attr("network_indicator", true),
+            bool_attr("direct_ip", true),
+        ],
+    );
+    network.source.kind = SourceKind::Process;
+
+    let matches = correlate_sequence_rules(
+        &built_in_ai_agent_sequence_rules(),
+        &[content, mcp, network],
+    )
+    .expect("rule pack evaluates current plugin event shapes");
+    let ids = matches
+        .iter()
+        .map(|matched| matched.rule_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(ids.contains(&"EDR-MCP-001"));
+    assert!(ids.contains(&"EDR-NET-001"));
 }
 
 #[allow(clippy::too_many_lines)]
@@ -576,6 +677,10 @@ fn sequence(rule_id: &str, steps: &[TestStep]) -> Vec<CanonicalEventEnvelope> {
                 event
                     .attributes
                     .insert("instruction_authority".to_owned(), serde_json::json!(false));
+                event.attributes.insert(
+                    "contains_instructional_attack".to_owned(),
+                    serde_json::json!(true),
+                );
             }
             event
         })
