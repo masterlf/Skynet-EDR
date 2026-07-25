@@ -9,6 +9,10 @@ fi
 SOURCE_DIR=${1%/}
 DEST_DIR=${2%/}
 
+if [ -L "$SOURCE_DIR" ]; then
+  echo "refusing symlink source plugin directory: $SOURCE_DIR" >&2
+  exit 1
+fi
 if [ ! -d "$SOURCE_DIR" ]; then
   echo "source plugin directory is missing: $SOURCE_DIR" >&2
   exit 1
@@ -20,6 +24,35 @@ case "$DEST_DIR" in
     exit 1
     ;;
 esac
+
+if [ -e "$DEST_DIR" ] || [ -L "$DEST_DIR" ]; then
+  echo "refusing existing destination plugin directory: $DEST_DIR" >&2
+  exit 1
+fi
+
+check_source_parent_dirs() {
+  rel_dir=$(dirname "$1")
+  if [ "$rel_dir" = "." ]; then
+    return 0
+  fi
+
+  current_dir="$SOURCE_DIR"
+  old_ifs=$IFS
+  IFS='/'
+  set -- $rel_dir
+  IFS=$old_ifs
+  for component do
+    current_dir="$current_dir/$component"
+    if [ -L "$current_dir" ]; then
+      echo "refusing symlink source directory: $current_dir" >&2
+      exit 1
+    fi
+    if [ ! -d "$current_dir" ]; then
+      echo "missing source directory: $current_dir" >&2
+      exit 1
+    fi
+  done
+}
 
 copy_allowed_file() {
   rel_path="$1"
@@ -37,6 +70,7 @@ copy_allowed_file() {
     echo "refusing symlink source file: $src_path" >&2
     exit 1
   fi
+  check_source_parent_dirs "$rel_path"
   if [ ! -f "$src_path" ]; then
     echo "missing or non-regular source file: $src_path" >&2
     exit 1
@@ -54,8 +88,8 @@ copy_allowed_file() {
   install -m 0644 "$src_path" "$dst_path"
 }
 
-rm -rf "$DEST_DIR"
-install -d "$DEST_DIR"
+install -d "$(dirname "$DEST_DIR")"
+mkdir "$DEST_DIR"
 
 copy_allowed_file 'plugin.yaml'
 copy_allowed_file '__init__.py'

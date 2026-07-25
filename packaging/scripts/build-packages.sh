@@ -17,6 +17,7 @@ if ! command -v nfpm >/dev/null 2>&1; then
   exit 1
 fi
 
+rm -rf dist/staging/nfpm/hermes-plugin/skynet-edr
 packaging/scripts/stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr "$STAGED_HERMES_PLUGIN"
 
 python3 - "$VERSION" "$CARGO_RELEASE_DIR" <<'PY'

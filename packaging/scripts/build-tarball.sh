@@ -9,6 +9,7 @@ TARGET="${SKYNET_EDR_TARGET:-$(rustc -vV | awk '/host:/ {print $2}')}"
 NAME="skynet-edr-${VERSION}-${TARGET}"
 ROOT="dist/${NAME}"
 CARGO_RELEASE_DIR="${CARGO_TARGET_DIR:-target}/release"
+STAGED_HERMES_PLUGIN="$ROOT/integrations/hermes/skynet-edr"
 
 rm -rf "$ROOT"
 install -d "$ROOT/bin" "$ROOT/packaging/config" "$ROOT/packaging/systemd" "$ROOT/packaging/sysusers" "$ROOT/packaging/tmpfiles" "$ROOT/packaging/tarball" "$ROOT/docs" "$ROOT/integrations/hermes"
@@ -23,7 +24,11 @@ install -m 0755 packaging/tarball/uninstall.sh "$ROOT/uninstall.sh"
 install -m 0755 packaging/tarball/install.sh "$ROOT/packaging/tarball/install.sh"
 install -m 0755 packaging/tarball/uninstall.sh "$ROOT/packaging/tarball/uninstall.sh"
 install -m 0755 packaging/scripts/skynet-edr-install-hermes-plugin.sh "$ROOT/skynet-edr-install-hermes-plugin.sh"
-packaging/scripts/stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr "$ROOT/integrations/hermes/skynet-edr"
+if [ -e "$STAGED_HERMES_PLUGIN" ] || [ -L "$STAGED_HERMES_PLUGIN" ]; then
+  echo "Hermes plugin destination must be absent before staging: $STAGED_HERMES_PLUGIN" >&2
+  exit 1
+fi
+packaging/scripts/stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr "$STAGED_HERMES_PLUGIN"
 install -m 0644 README.md "$ROOT/README.md"
 install -m 0644 docs/INSTALL.md "$ROOT/docs/INSTALL.md"
 install -m 0644 docs/PACKAGING.md "$ROOT/docs/PACKAGING.md"

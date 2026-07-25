@@ -228,4 +228,43 @@ if find "$dst_dir" -type f ! -perm 0644 | grep . >/dev/null 2>&1; then
   exit 1
 fi
 
+symlink_root="$tmp_dir/src-link"
+symlink_root_dst="$tmp_dir/dst/symlink-root"
+ln -s "$src_dir" "$symlink_root"
+if packaging/scripts/stage-hermes-plugin-payload.sh "$symlink_root" "$symlink_root_dst" >/dev/null 2>&1; then
+  echo "Hermes plugin staging must reject a symlink source plugin directory" >&2
+  exit 1
+fi
+
+dashboard_real="$tmp_dir/dashboard-real"
+dashboard_symlink_src="$tmp_dir/src-dashboard-symlink"
+dashboard_symlink_dst="$tmp_dir/dst/dashboard-symlink"
+mkdir -p "$dashboard_real" "$dashboard_symlink_src/desktop"
+for path in plugin.yaml __init__.py README.md desktop/plugin.js; do
+  mkdir -p "$dashboard_symlink_src/$(dirname "$path")"
+  printf 'allowed payload fixture: %s\n' "$path" > "$dashboard_symlink_src/$path"
+done
+printf 'allowed payload fixture: dashboard/manifest.json\n' > "$dashboard_real/manifest.json"
+printf 'allowed payload fixture: dashboard/plugin_api.py\n' > "$dashboard_real/plugin_api.py"
+ln -s "$dashboard_real" "$dashboard_symlink_src/dashboard"
+if packaging/scripts/stage-hermes-plugin-payload.sh "$dashboard_symlink_src" "$dashboard_symlink_dst" >/dev/null 2>&1; then
+  echo "Hermes plugin staging must reject a symlink intermediate source directory" >&2
+  exit 1
+fi
+
+existing_dst="$tmp_dir/dst/existing"
+sentinel="$existing_dst/sentinel.txt"
+sentinel_expected="$tmp_dir/sentinel.expected"
+mkdir -p "$existing_dst"
+printf 'preserve these sentinel bytes\n' > "$sentinel"
+cp "$sentinel" "$sentinel_expected"
+if packaging/scripts/stage-hermes-plugin-payload.sh "$src_dir" "$existing_dst" >/dev/null 2>&1; then
+  echo "Hermes plugin staging must reject an existing destination directory" >&2
+  exit 1
+fi
+if ! cmp -s "$sentinel_expected" "$sentinel"; then
+  echo "Hermes plugin staging must preserve an existing destination unchanged" >&2
+  exit 1
+fi
+
 echo "packaging baseline validation passed"
