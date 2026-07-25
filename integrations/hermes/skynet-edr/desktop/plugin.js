@@ -366,14 +366,10 @@ function initialPageNavigationState() {
   return { offset: 0, history: [] };
 }
 
-function boundedHistory(history) {
-  return history.slice(-64);
-}
-
 function recordNextPage(state, page) {
   const offset = Number.isFinite(page?.offset) ? Math.max(0, Math.min(MAX_OFFSET, Math.floor(page.offset))) : state.offset;
   const next = nextOffset(page);
-  return { offset: next, history: boundedHistory([...(Array.isArray(state.history) ? state.history : []), offset]) };
+  return { offset: next, history: [...(Array.isArray(state.history) ? state.history : []), offset] };
 }
 
 function recordPreviousPage(state) {

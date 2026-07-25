@@ -63,6 +63,15 @@ test('page history returns to exact pre-next offset after partial page and handl
   assert.equal(state.offset, 50);
   state = api.recordPreviousPage(state);
   assert.equal(state.offset, 0);
+
+  state = api.initialPageNavigationState();
+  for (let offset = 0; offset < 70; offset += 1) {
+    state = api.recordNextPage(state, { offset, returned: 1, has_more: true });
+  }
+  for (let expected = 69; expected >= 0; expected -= 1) {
+    state = api.recordPreviousPage(state);
+    assert.equal(state.offset, expected);
+  }
 });
 
 test('filter reset clears page history and dot ids are encoded as explicit path segments', () => {

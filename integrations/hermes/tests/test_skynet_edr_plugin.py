@@ -632,13 +632,24 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         module = load_dashboard_api()
         setattr(module, "_opener", Mock())
 
-        for path in ["/metrics", "/api/../status", "/api/v1/risks/%2e%2e/internal", "/api/v1/risks/inc%2F..%2Fsecret"]:
+        for path in ["/metrics", "/api/../status", "/api/v1/risks/%2e%2e/internal", "/api/v1/risks/.."]:
             with self.subTest(path=path):
                 with self.assertRaises(FakeHTTPException) as raised:
                     module._upstream(path)
                 self.assertEqual(raised.exception.status_code, 400)
                 self.assertEqual(raised.exception.detail, "bad_request")
         module._opener.open.assert_not_called()
+
+    def test_dashboard_upstream_preserves_encoded_slash_and_dotdot_as_opaque_id_data(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        module._opener.open.return_value = FakeResponse(b'{"id": "inc/../secret"}', "application/json")
+
+        path = "/api/v1/risks/inc%2F..%2Fsecret"
+        self.assertEqual(module._upstream(path), {"id": "inc/../secret"})
+        request = module._opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787" + path)
+        self.assertEqual(request.get_method(), "GET")
 
     def test_desktop_plugin_is_parseable_read_only_disk_plugin(self):
         text = DESKTOP_PLUGIN_PATH.read_text()
