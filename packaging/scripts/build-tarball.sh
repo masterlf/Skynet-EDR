@@ -23,8 +23,7 @@ install -m 0755 packaging/tarball/uninstall.sh "$ROOT/uninstall.sh"
 install -m 0755 packaging/tarball/install.sh "$ROOT/packaging/tarball/install.sh"
 install -m 0755 packaging/tarball/uninstall.sh "$ROOT/packaging/tarball/uninstall.sh"
 install -m 0755 packaging/scripts/skynet-edr-install-hermes-plugin.sh "$ROOT/skynet-edr-install-hermes-plugin.sh"
-cp -R integrations/hermes/skynet-edr "$ROOT/integrations/hermes/skynet-edr"
-chmod 0644 "$ROOT/integrations/hermes/skynet-edr"/*
+packaging/scripts/stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr "$ROOT/integrations/hermes/skynet-edr"
 install -m 0644 README.md "$ROOT/README.md"
 install -m 0644 docs/INSTALL.md "$ROOT/docs/INSTALL.md"
 install -m 0644 docs/PACKAGING.md "$ROOT/docs/PACKAGING.md"
@@ -33,7 +32,19 @@ install -m 0644 LICENSE "$ROOT/LICENSE"
 
 (
   cd "$ROOT"
-  sha256sum bin/skynet-edr bin/skynet-edr-daemon install.sh uninstall.sh skynet-edr-install-hermes-plugin.sh integrations/hermes/skynet-edr/plugin.yaml integrations/hermes/skynet-edr/__init__.py > SHA256SUMS
+  sha256sum \
+    bin/skynet-edr \
+    bin/skynet-edr-daemon \
+    install.sh \
+    uninstall.sh \
+    skynet-edr-install-hermes-plugin.sh \
+    integrations/hermes/skynet-edr/plugin.yaml \
+    integrations/hermes/skynet-edr/__init__.py \
+    integrations/hermes/skynet-edr/README.md \
+    integrations/hermes/skynet-edr/dashboard/manifest.json \
+    integrations/hermes/skynet-edr/dashboard/plugin_api.py \
+    integrations/hermes/skynet-edr/desktop/plugin.js \
+    > SHA256SUMS
 )
 
 tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"

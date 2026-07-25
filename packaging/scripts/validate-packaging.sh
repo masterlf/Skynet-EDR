@@ -15,6 +15,7 @@ packaging/tarball/install.sh
 packaging/tarball/uninstall.sh
 packaging/scripts/build-tarball.sh
 packaging/scripts/build-packages.sh
+packaging/scripts/stage-hermes-plugin-payload.sh
 packaging/scripts/inspect-artifacts.sh
 packaging/scripts/smoke-install-artifacts.sh
 packaging/scripts/verify-public-release.sh
@@ -38,7 +39,7 @@ for file in $required_files; do
   fi
 done
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1
@@ -70,7 +71,14 @@ grep -q 'postremove:' packaging/nfpm.yaml
 grep -q 'packaging/scripts/package-postinstall.sh' packaging/nfpm.yaml
 grep -q 'packaging/scripts/package-postremove.sh' packaging/nfpm.yaml
 grep -q '/usr/share/skynet-edr/hermes-plugin/skynet-edr' packaging/nfpm.yaml
+grep -q 'dist/staging/nfpm/hermes-plugin/skynet-edr' packaging/nfpm.yaml
 grep -q '/usr/bin/skynet-edr-install-hermes-plugin' packaging/nfpm.yaml
+grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-tarball.sh
+grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-packages.sh
+if grep -q 'cp -R integrations/hermes/skynet-edr' packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/nfpm.yaml; then
+  echo "Hermes plugin payload must be staged from an explicit allowlist, not copied recursively" >&2
+  exit 1
+fi
 grep -q 'desktop-plugins/skynet-edr' packaging/scripts/skynet-edr-install-hermes-plugin.sh
 grep -q 'dashboard/plugin_api.py' packaging/scripts/skynet-edr-install-hermes-plugin.sh
 grep -q 'dashboard/plugin_api.py' packaging/tarball/install.sh
@@ -152,6 +160,7 @@ sh -n packaging/tarball/install.sh
 sh -n packaging/tarball/uninstall.sh
 sh -n packaging/scripts/build-tarball.sh
 sh -n packaging/scripts/build-packages.sh
+sh -n packaging/scripts/stage-hermes-plugin-payload.sh
 sh -n packaging/scripts/inspect-artifacts.sh
 sh -n packaging/scripts/smoke-install-artifacts.sh
 sh -n packaging/scripts/verify-public-release.sh
@@ -170,5 +179,53 @@ for path in ['/usr/bin/skynet-edr', '/usr/bin/skynet-edr-daemon', '/etc/skynet-e
     if f'dst: {path}' not in text:
         raise SystemExit(f'nfpm config missing destination: {path}')
 PY
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/skynet-edr-hermes-stage.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+src_dir="$tmp_dir/src"
+dst_dir="$tmp_dir/dst/skynet-edr"
+mkdir -p "$src_dir/dashboard/__pycache__" "$src_dir/desktop" "$src_dir/__pycache__"
+for path in \
+  plugin.yaml \
+  __init__.py \
+  README.md \
+  dashboard/manifest.json \
+  dashboard/plugin_api.py \
+  desktop/plugin.js; do
+  mkdir -p "$src_dir/$(dirname "$path")"
+  printf 'allowed payload fixture: %s\n' "$path" > "$src_dir/$path"
+done
+printf 'generated cache fixture\n' > "$src_dir/__pycache__/__init__.cpython-312.pyc"
+printf 'generated cache fixture\n' > "$src_dir/dashboard/__pycache__/plugin_api.cpython-312.pyc"
+printf 'generated cache fixture\n' > "$src_dir/dashboard/plugin_api.pyc"
+
+packaging/scripts/stage-hermes-plugin-payload.sh "$src_dir" "$dst_dir"
+actual_payload="$tmp_dir/actual.txt"
+expected_payload="$tmp_dir/expected.txt"
+(
+  cd "$dst_dir"
+  find . -type f | sed 's#^./##' | sort
+) > "$actual_payload"
+cat > "$expected_payload" <<'EOF'
+README.md
+__init__.py
+dashboard/manifest.json
+dashboard/plugin_api.py
+desktop/plugin.js
+plugin.yaml
+EOF
+if ! cmp -s "$expected_payload" "$actual_payload"; then
+  echo "staged Hermes plugin payload does not match the exact allowlist" >&2
+  diff -u "$expected_payload" "$actual_payload" >&2 || true
+  exit 1
+fi
+if find "$dst_dir" \( -path '*/__pycache__/*' -o -name '*.pyc' \) | grep . >/dev/null 2>&1; then
+  echo "staged Hermes plugin payload contains generated Python cache files" >&2
+  exit 1
+fi
+if find "$dst_dir" -type f ! -perm 0644 | grep . >/dev/null 2>&1; then
+  echo "staged Hermes plugin payload contains files without mode 0644" >&2
+  exit 1
+fi
 
 echo "packaging baseline validation passed"

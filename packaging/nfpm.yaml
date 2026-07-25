@@ -65,7 +65,7 @@ contents:
       group: root
   - src: ./README.md
     dst: /usr/share/doc/skynet-edr/README.md
-  - src: ./integrations/hermes/skynet-edr
+  - src: ./dist/staging/nfpm/hermes-plugin/skynet-edr
     dst: /usr/share/skynet-edr/hermes-plugin/skynet-edr
     file_info:
       mode: 0644
