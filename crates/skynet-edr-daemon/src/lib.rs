@@ -15,15 +15,14 @@ use std::{
 
 use serde_json::{json, Value};
 use skynet_edr_core::{
-    redact_attributes, Event, EventId, EventSource, LocalStore, RedactionMetadata, Severity,
-    SourceKind,
+    is_routable_incident_identifier, redact_attributes, Event, EventId, EventSource, LocalStore,
+    RedactionMetadata, Severity, SourceKind,
 };
 
 const SENSOR_NAME: &str = "linux-passive-fixture";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_RISK_OFFSET: usize = 9_007_199_254_740_991;
 const MAX_RISK_ID_ENCODED_BYTES: usize = 3_072;
-const MAX_RISK_ID_DECODED_CHARS: usize = 256;
 
 /// Local read-only HTTP API configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,8 +503,8 @@ fn decode_risk_id_segment(encoded: &str) -> Result<String, &'static str> {
         }
     }
     let id = String::from_utf8(decoded).map_err(|_| "risk id is not valid UTF-8")?;
-    if id.chars().count() > MAX_RISK_ID_DECODED_CHARS {
-        return Err("risk id is too long");
+    if !is_routable_incident_identifier(&id) {
+        return Err("risk id violates routable contract");
     }
     Ok(id)
 }

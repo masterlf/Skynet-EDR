@@ -609,15 +609,17 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         self.assertEqual(module.risk_detail("inc/opaque with space"), {"ok": True})
         self.assertEqual(captured, [("/api/v1/risks/inc%2Fopaque%20with%20space", None)])
 
-    def test_dashboard_risk_detail_rejects_overlong_opaque_ids_before_upstream(self):
+    def test_dashboard_risk_detail_rejects_dot_and_overlong_opaque_ids_before_upstream(self):
         module = load_dashboard_api()
         setattr(module, "_upstream", Mock())
         self.assertEqual(len("😀" * 256), 256)
         module.risk_detail("😀" * 256)
-        with self.assertRaises(FakeHTTPException):
-            module.risk_detail("😀" * 257)
-        with self.assertRaises(FakeHTTPException):
-            module.risk_detail("a" * 3073)
+        for bad_id in [".", "..", "😀" * 257, "a" * 3073]:
+            with self.subTest(bad_id=bad_id):
+                with self.assertRaises(FakeHTTPException) as raised:
+                    module.risk_detail(bad_id)
+                self.assertEqual(raised.exception.status_code, 400)
+                self.assertEqual(raised.exception.detail, "bad_request")
 
     def test_dashboard_upstream_accepts_listed_opaque_id_with_dotdot_literal(self):
         module = load_dashboard_api()
@@ -632,7 +634,7 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         module = load_dashboard_api()
         setattr(module, "_opener", Mock())
 
-        for path in ["/metrics", "/api/../status", "/api/v1/risks/%2e%2e/internal", "/api/v1/risks/.."]:
+        for path in ["/metrics", "/api/../status", "/api/v1/risks/%2e%2e/internal", "/api/v1/risks/..", "/api/v1/risks/.", "/api/v1/risks/%2E", "/api/v1/risks/%2E%2E"]:
             with self.subTest(path=path):
                 with self.assertRaises(FakeHTTPException) as raised:
                     module._upstream(path)

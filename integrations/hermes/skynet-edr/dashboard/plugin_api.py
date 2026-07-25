@@ -61,13 +61,13 @@ def _valid_upstream_path(path: str) -> bool:
     if not opaque_id or "/" in opaque_id:
         return False
     decoded = urllib.parse.unquote(opaque_id)
-    if decoded in {".", ".."} and opaque_id == decoded:
+    if decoded in {".", ".."}:
         return False
     return True
 
 
 def _valid_risk_id(risk_id: str) -> bool:
-    if not risk_id or len(risk_id) > _MAX_RISK_ID_CODEPOINTS:
+    if not risk_id or risk_id in {".", ".."} or len(risk_id) > _MAX_RISK_ID_CODEPOINTS:
         return False
     try:
         quoted = urllib.parse.quote(risk_id, safe="")
@@ -104,10 +104,6 @@ def _upstream(path: str, query: dict[str, int] | None = None) -> Any:
 
 
 def _quote_risk_id(risk_id: str) -> str:
-    if risk_id == ".":
-        return "%2E"
-    if risk_id == "..":
-        return "%2E%2E"
     return urllib.parse.quote(risk_id, safe="")
 
 

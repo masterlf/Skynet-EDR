@@ -393,6 +393,39 @@ fn risk_api_v1_accepts_percent_encoded_slash_as_opaque_id_data() {
 }
 
 #[test]
+fn risk_api_v1_rejects_exact_decoded_dot_segments_before_lookup() {
+    let store = temp_store();
+
+    for path in [
+        "/api/v1/risks/.",
+        "/api/v1/risks/..",
+        "/api/v1/risks/%2E",
+        "/api/v1/risks/%2E%2E",
+    ] {
+        let response = handle_http_request(&store, HttpMethod::Get, path)
+            .expect("dot segment risk id returns structured response");
+        assert_eq!(response.status, HttpStatus::BadRequest);
+        assert_eq!(response.body["error"], "bad_request");
+        assert_eq!(response.body["read_only"], true);
+    }
+}
+
+#[test]
+fn risk_api_v1_keeps_encoded_dotdot_inside_opaque_id_data() {
+    let store = temp_store();
+    let incident_id = "inc/../secret";
+    store
+        .insert_incident(&stored_incident(incident_id, Vec::new()))
+        .expect("incident persists");
+
+    let response = handle_http_request(&store, HttpMethod::Get, "/api/v1/risks/inc%2F..%2Fsecret")
+        .expect("encoded internal dotdot risk detail responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["id"], incident_id);
+}
+
+#[test]
 fn risk_api_v1_projects_detail_without_hostile_attribute_leakage() {
     let store = temp_store();
     store

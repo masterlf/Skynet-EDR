@@ -189,6 +189,7 @@ function nullableBoundedString(value, max = MAX_TEXT_LENGTH) {
 
 function boundedId(value) {
   if (!boundedString(value, MAX_ID_LENGTH)) return false;
+  if (value === '.' || value === '..') return false;
   try {
     return encodeURIComponent(value).length <= MAX_ENCODED_ID_LENGTH;
   } catch (_error) {
@@ -386,12 +387,11 @@ function resetPageNavigation(_state) {
 }
 
 function encodeRiskPathSegment(id) {
-  if (id === '.') return '%2E';
-  if (id === '..') return '%2E%2E';
   return encodeURIComponent(id);
 }
 
 function riskDetailPath(id) {
+  if (!boundedId(id)) failContract();
   return '/risks/' + encodeRiskPathSegment(id);
 }
 

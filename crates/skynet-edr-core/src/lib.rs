@@ -2162,7 +2162,7 @@ impl IncidentId {
 /// Return whether a raw incident identifier matches the routable opaque contract.
 #[must_use]
 pub fn is_routable_incident_identifier(value: &str) -> bool {
-    !value.is_empty() && value.chars().count() <= 256
+    !value.is_empty() && value != "." && value != ".." && value.chars().count() <= 256
 }
 
 /// Return a routable incident identifier, pseudonymizing invalid legacy raw values.
@@ -3412,16 +3412,18 @@ impl LocalStore {
     fn normalize_legacy_incident_ids(&self) -> StorageResult<()> {
         let transaction = self.connection.unchecked_transaction()?;
         let rows = {
-            let mut statement = transaction.prepare(
-                "SELECT id, payload_json FROM incidents WHERE id = '' OR length(id) > 256 ORDER BY id ASC",
-            )?;
+            let mut statement =
+                transaction.prepare("SELECT id, payload_json FROM incidents ORDER BY id ASC")?;
             let mapped = statement.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             mapped.collect::<Result<Vec<_>, _>>()?
         };
 
-        for (raw_id, payload_json) in rows {
+        for (raw_id, payload_json) in rows
+            .into_iter()
+            .filter(|(raw_id, _)| !is_routable_incident_identifier(raw_id))
+        {
             let mut incident: Incident = serde_json::from_str(&payload_json)?;
             let safe_id = safe_incident_identifier(&raw_id);
             incident.id = IncidentId::new(safe_id);

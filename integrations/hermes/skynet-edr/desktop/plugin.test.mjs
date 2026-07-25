@@ -74,12 +74,20 @@ test('page history returns to exact pre-next offset after partial page and handl
   }
 });
 
-test('filter reset clears page history and dot ids are encoded as explicit path segments', () => {
+test('filter reset clears page history and risk detail path only accepts routable ids', () => {
   const api = loadDesktopTestApi();
   let state = api.recordNextPage(api.initialPageNavigationState(), { offset: 50, returned: 1, has_more: true });
   state = api.resetPageNavigation(state);
   assert.deepEqual(state, api.initialPageNavigationState());
-  assert.equal(api.riskDetailPath('.'), '/risks/%2E');
-  assert.equal(api.riskDetailPath('..'), '/risks/%2E%2E');
+  assert.throws(() => api.riskDetailPath('.'), /Invalid read-only risk projection/);
+  assert.throws(() => api.riskDetailPath('..'), /Invalid read-only risk projection/);
   assert.equal(api.riskDetailPath('a/b c'), '/risks/a%2Fb%20c');
+});
+
+test('validateRiskPage fails closed on raw dot ids but preserves WHATWG-routable opaque ids', () => {
+  const api = loadDesktopTestApi();
+  assert.throws(() => api.validateRiskPage({ ...page(), items: [risk('.')] }, 0), /Invalid read-only risk projection/);
+  assert.throws(() => api.validateRiskPage({ ...page(), items: [risk('..')] }, 0), /Invalid read-only risk projection/);
+  assert.equal(api.validateRiskPage({ ...page(), items: [risk('inc/../secret')] }, 0).items[0].id, 'inc/../secret');
+  assert.notEqual(new URL('/risks/%2E', 'https://example.invalid/base').pathname, '/risks/%2E');
 });
