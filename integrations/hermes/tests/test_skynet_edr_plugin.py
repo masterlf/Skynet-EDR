@@ -474,6 +474,66 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         self.assertIn("PALETTE_AREA", text)
         self.assertIn("host.navigate('/skynet-edr/risks')", text)
         self.assertIn("refetchInterval: POLL_MS", text)
+        self.assertIn("const POLL_MS = 10000", text)
+        self.assertIn("fmtDateTime.format(new Date(", text)
+        self.assertNotRegex(text, r"(?<!\.)\bfmtDateTime\s*\(")
+
+        for missing_var in ["--ui-text", "--ui-surface", "--ui-accent-soft"]:
+            self.assertNotRegex(text, rf"var\({re.escape(missing_var)}\)")
+        for theme_var in [
+            "--ui-text-primary",
+            "--ui-text-secondary",
+            "--ui-text-tertiary",
+            "--ui-bg-editor",
+            "--ui-bg-card",
+            "--ui-bg-elevated",
+            "--ui-bg-input",
+            "--ui-stroke-primary",
+            "--ui-stroke-secondary",
+            "--ui-control-hover-background",
+            "--ui-control-active-background",
+            "--ui-surface-background",
+            "--ui-base",
+        ]:
+            self.assertIn(theme_var, text)
+
+        for status in ["open", "investigating", "contained", "resolved", "dismissed"]:
+            self.assertRegex(text, rf"option\('{status}'")
+        for artifact_kind in [
+            "email",
+            "url",
+            "git_repository",
+            "code",
+            "file",
+            "message",
+            "mcp",
+            "terminal",
+            "unknown",
+        ]:
+            self.assertRegex(text, rf"option\('{artifact_kind}'")
+        for severity in ["critical", "high", "medium", "low", "informational"]:
+            self.assertRegex(text, rf"option\('{severity}'")
+
+        for forbidden_sink in [
+            "dangerouslySetInnerHTML",
+            "innerHTML",
+            "JSON.stringify",
+            "href:",
+            "src:",
+            "url(",
+            "markdown",
+        ]:
+            self.assertNotIn(forbidden_sink, text)
+        for safe_label in [
+            "Passive · Read only",
+            "current page",
+            "Not assessed",
+            "No current-page matches",
+            "No risks recorded",
+            "Page metadata",
+            "read-only context",
+        ]:
+            self.assertIn(safe_label, text)
         for forbidden in [
             "definePlugin",
             "activate(",
@@ -493,6 +553,38 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
 
         check = subprocess.run(["node", "--check", str(DESKTOP_PLUGIN_PATH)], capture_output=True, text=True, check=False)
         self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_plugin_pure_helpers_project_safe_operator_text(self):
+        text = DESKTOP_PLUGIN_PATH.read_text()
+        transformed = re.sub(r"import\s+React\s+from\s+['\"]react['\"];\n", "const React = {useState() { return [null, () => {}]; }};\n", text)
+        transformed = re.sub(r"import\s+\{\s*jsx,\s*jsxs\s*\}\s+from\s+['\"]react/jsx-runtime['\"];\n", "const jsx = (type, props) => ({type, props}); const jsxs = jsx;\n", transformed)
+        transformed = re.sub(
+            r"import\s+\{.*?\}\s+from\s+['\"]@hermes/plugin-sdk['\"];\n",
+            "const Badge = 'Badge'; const Button = 'Button'; const EmptyState = 'EmptyState'; const ErrorState = 'ErrorState'; const ScrollArea = 'ScrollArea'; const SearchField = 'SearchField'; const Skeleton = 'Skeleton'; const PALETTE_AREA = 'palette'; const ROUTES_AREA = 'routes'; const SIDEBAR_NAV_AREA = 'sidebar'; const host = {navigate() {}}; const useQuery = () => ({}); const fmtDateTime = {format(value) { return Number.isNaN(value.getTime()) ? 'bad' : `fmt:${value.getTime()}`; }};\n",
+            transformed,
+            flags=re.S,
+        )
+        transformed = transformed.replace("export default", "const pluginDefault =")
+        transformed += """
+if (formatTime(1234) !== 'fmt:1234') throw new Error('finite timestamp must use fmtDateTime.format(new Date(...))');
+for (const value of [null, undefined, '', 'not-a-number', Number.NaN, Infinity, -Infinity]) {
+  if (formatTime(value) !== 'unknown') throw new Error('invalid timestamp must be unknown');
+}
+const filtered = filterRisks([{id:'1', severity:'high', status:'open', artifact:{kind:'file'}, title:'Secret access', rule_id:'EDR-EXFIL-001', sensor:{sensor:'hermes', integration:'hermes'}}], {search:'secret', severity:'high', status:'open', artifactKind:'file'});
+if (filtered.length !== 1) throw new Error('current-page filters should match canonical fields');
+if (filterRisks(filtered, {search:'nomatch', severity:'all', status:'all', artifactKind:'all'}).length !== 0) throw new Error('search filter should narrow current page');
+const projected = indicatorBadges({network_indicator: true, direct_ip: false, command_class: 'network_egress', hostile: '<script>'});
+if (!projected.some(item => item.label === 'Network') || !projected.some(item => item.label === 'Command class' && item.value === 'network egress')) throw new Error('allowlisted indicators must project to stable labels');
+if (projected.some(item => item.label === 'hostile' || item.value === '<script>')) throw new Error('unallowlisted indicators must not render');
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as handle:
+            handle.write(transformed)
+            script_path = handle.name
+        try:
+            check = subprocess.run(["node", script_path], capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stderr)
+        finally:
+            Path(script_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
