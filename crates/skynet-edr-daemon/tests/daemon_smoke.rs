@@ -24,6 +24,10 @@ fn temp_config_dir(test_name: &str) -> PathBuf {
     path
 }
 
+fn test_port(offset: u16) -> u16 {
+    18_787 + (std::process::id() % 1_000) as u16 + offset
+}
+
 fn write_config(dir: &Path, content: &str) -> PathBuf {
     let path = dir.join("config.toml");
     fs::write(&path, content).expect("config fixture should be written");
@@ -67,7 +71,7 @@ fn terminate_child(child: &mut Child) {
 fn daemon_run_serves_loopback_http_api_when_enabled() {
     let dir = temp_config_dir("run-serves-http");
     let db_path = dir.join("events.sqlite");
-    let port = 18_787 + (std::process::id() % 1_000) as u16;
+    let port = test_port(0);
     let config = write_config(
         &dir,
         &format!(
@@ -144,21 +148,27 @@ fn daemon_prints_help_with_run_command() {
 #[test]
 fn daemon_run_starts_passive_service_path_without_privileged_sensors() {
     let dir = temp_config_dir("run-starts-passive");
+    let db_path = dir.join("skynet.sqlite");
+    let port = test_port(10);
     let config = write_config(
         &dir,
-        r#"
+        &format!(
+            r#"
 mode = "passive"
-data_dir = "/var/lib/skynet-edr"
-log_dir = "/var/log/skynet-edr"
+data_dir = "{}"
+log_dir = "{}"
 
 [http_api]
 enabled = true
-bind = "127.0.0.1:8787"
+bind = "127.0.0.1:{port}"
 read_only = true
 
 [sensors]
 linux_privileged = false
 "#,
+            dir.display(),
+            dir.display()
+        ),
     );
 
     let output = daemon()
@@ -177,17 +187,29 @@ linux_privileged = false
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
     assert!(stdout.contains("daemon run: mode=passive"));
-    assert!(stdout.contains("http_api=127.0.0.1:8787"));
+    assert!(stdout.contains(&format!("http_api=127.0.0.1:{port}")));
+    assert!(
+        db_path.exists(),
+        "startup initialization should create the active store"
+    );
     assert!(stdout.contains("sensors=not-started"));
     assert!(stdout.contains("privileged_sensors=disabled"));
 }
 
 #[test]
 fn daemon_run_accepts_packaged_baseline_config() {
-    let config = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let baseline = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packaging/config/config.toml")
         .canonicalize()
         .expect("packaged baseline config should exist");
+    let dir = temp_config_dir("packaged-baseline");
+    let port = test_port(20);
+    let content = fs::read_to_string(&baseline)
+        .expect("packaged baseline config should be readable")
+        .replace("/var/lib/skynet-edr", &dir.display().to_string())
+        .replace("/var/log/skynet-edr", &dir.display().to_string())
+        .replace("127.0.0.1:8787", &format!("127.0.0.1:{port}"));
+    let config = write_config(&dir, &content);
 
     let output = daemon()
         .arg("run")
@@ -211,6 +233,7 @@ fn daemon_run_ingests_configured_canonical_spool_once_on_startup() {
     let db_path = dir.join("events.sqlite");
     let spool_path = dir.join("events.jsonl");
     let checkpoint_path = dir.join("events.offset");
+    let port = test_port(30);
     let mut value: serde_json::Value = serde_json::from_str(include_str!(
         "../../skynet-edr-core/tests/fixtures/canonical_event_v0.json"
     ))
@@ -227,7 +250,7 @@ mode = "passive"
 
 [http_api]
 enabled = true
-bind = "127.0.0.1:8787"
+bind = "127.0.0.1:{port}"
 read_only = true
 
 [sensors]

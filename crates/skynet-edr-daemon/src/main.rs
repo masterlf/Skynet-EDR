@@ -94,6 +94,7 @@ fn run_command(args: &[String]) -> Result<(), DaemonCliError> {
             .map_or_else(|| "disabled".to_owned(), |bind| bind.to_string())
     );
 
+    initialize_active_store(&config)?;
     run_spool_ingestion_once(&config)?;
     let http_server = start_http_api_if_enabled(&config)?;
 
@@ -106,6 +107,12 @@ fn run_command(args: &[String]) -> Result<(), DaemonCliError> {
         thread::sleep(Duration::from_secs(5));
         run_spool_ingestion_once(&config)?;
     }
+}
+
+fn initialize_active_store(config: &DaemonConfig) -> Result<(), DaemonCliError> {
+    let store_path = config.http_store_path();
+    drop(LocalStore::open(&store_path)?);
+    Ok(())
 }
 
 fn run_spool_ingestion_once(config: &DaemonConfig) -> Result<(), DaemonCliError> {
@@ -136,7 +143,10 @@ fn start_http_api_if_enabled(
         DaemonCliError::new("HTTP API is enabled but no bind address is configured")
     })?;
     let store_path = config.http_store_path();
-    LocalStore::open(&store_path)?;
+    let read_only_store = LocalStore::open_read_only(&store_path)?;
+    read_only_store.count_incidents()?;
+    read_only_store.count_events()?;
+    drop(read_only_store);
     let listener = TcpListener::bind(bind).map_err(|error| {
         DaemonCliError::new(format!(
             "failed to bind read-only HTTP API on {bind}: {error}"
@@ -503,37 +513,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http_listener_initializes_fresh_configured_database_before_serving_read_only_requests() {
-        let db_path = temp_path("fresh-http-listener.sqlite");
+    fn http_listener_fails_closed_for_missing_database_without_creating_files() {
+        let db_path = temp_path("missing-http-listener.sqlite");
         cleanup_sqlite_files(&db_path);
-        let config = DaemonConfig {
-            mode: "passive".to_owned(),
-            data_dir: db_path
-                .parent()
-                .expect("temporary DB has parent")
-                .to_path_buf(),
-            http_api_enabled: true,
-            http_api_bind: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
-            http_api_read_only: true,
-            linux_privileged_sensors: false,
-            spool: Some(SpoolConfig {
-                db: db_path.clone(),
-                path: temp_path("unused-spool.jsonl"),
-                checkpoint: temp_path("unused-checkpoint"),
-            }),
-        };
+        let config = daemon_config_for_db(&db_path);
 
-        let _server = start_http_api_if_enabled(&config).expect("HTTP API starts");
-        let read_only = LocalStore::open_read_only(&db_path).expect("fresh DB is initialized");
+        let error = start_http_api_if_enabled(&config)
+            .expect_err("HTTP API startup must fail closed for missing DB");
 
+        assert!(error.to_string().contains("sqlite"));
+        assert_no_sqlite_files(&db_path);
+    }
+
+    #[test]
+    fn explicit_daemon_storage_initialization_creates_database_before_read_only_http_preflight() {
+        let db_path = temp_path("explicit-startup-init.sqlite");
+        cleanup_sqlite_files(&db_path);
+        let config = daemon_config_for_db(&db_path);
+
+        initialize_active_store(&config).expect("startup initialization creates and migrates DB");
+        let read_only =
+            LocalStore::open_read_only(&db_path).expect("DB opens read-only after init");
         assert_eq!(read_only.count_events().expect("event count succeeds"), 0);
-        assert_eq!(
-            read_only
-                .count_incidents()
-                .expect("incident count succeeds"),
-            0
-        );
+        drop(read_only);
+
+        let _server = start_http_api_if_enabled(&config)
+            .expect("HTTP API preflight succeeds after explicit init");
+        assert!(db_path.exists());
+        assert!(!db_path.with_extension("sqlite-wal").exists());
+        assert!(!db_path.with_extension("sqlite-shm").exists());
         cleanup_sqlite_files(&db_path);
+    }
+
+    #[test]
+    fn http_listener_fails_closed_for_empty_existing_database_without_migrating_or_sidecars() {
+        let db_path = temp_path("empty-http-listener.sqlite");
+        cleanup_sqlite_files(&db_path);
+        fs::write(&db_path, b"").expect("empty DB placeholder is created");
+        let config = daemon_config_for_db(&db_path);
+
+        let error = start_http_api_if_enabled(&config)
+            .expect_err("HTTP API startup must reject missing schema");
+
+        assert!(error.to_string().contains("no such table: incidents"));
+        assert!(db_path.exists(), "existing DB file remains present");
+        assert!(!db_path.with_extension("sqlite-wal").exists());
+        assert!(!db_path.with_extension("sqlite-shm").exists());
+        let read_only =
+            LocalStore::open_read_only(&db_path).expect("empty DB still opens read-only");
+        let schema_error = read_only
+            .count_incidents()
+            .expect_err("HTTP preflight must not migrate schema");
+        assert!(schema_error
+            .to_string()
+            .contains("no such table: incidents"));
+        cleanup_sqlite_files(&db_path);
+    }
+
+    #[test]
+    fn run_source_initializes_active_store_before_spool_ingestion_and_http_startup() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split("fn run_command(")
+            .nth(1)
+            .expect("run_command exists")
+            .split(
+                "
+}",
+            )
+            .next()
+            .expect("run_command body exists");
+
+        let init = body
+            .find("initialize_active_store(&config)?")
+            .expect("run initializes active store explicitly");
+        let spool = body
+            .find("run_spool_ingestion_once(&config)?")
+            .expect("run ingests configured spool");
+        let http = body
+            .find("start_http_api_if_enabled(&config)?")
+            .expect("run starts HTTP API");
+        assert!(
+            init < spool,
+            "startup init must happen before spool ingestion"
+        );
+        assert!(
+            init < http,
+            "startup init must happen before HTTP listener startup"
+        );
     }
 
     #[test]
@@ -559,18 +626,58 @@ mod tests {
     }
 
     #[test]
-    fn http_connection_response_source_uses_read_only_store_per_request() {
+    fn http_startup_and_request_sources_use_read_only_store_only() {
         let source = include_str!("main.rs");
-        let body = source
+        let startup_body = source
+            .split("fn start_http_api_if_enabled(")
+            .nth(1)
+            .expect("HTTP startup function exists")
+            .split("fn handle_http_connection(")
+            .next()
+            .expect("HTTP startup body exists");
+        let request_body = source
             .split("fn write_http_connection_response(")
             .nth(1)
             .expect("connection response function exists")
-            .split("\n}")
+            .split("fn parse_http_method(")
             .next()
             .expect("connection response body exists");
 
-        assert!(body.contains("LocalStore::open_read_only(store_path)?"));
-        assert!(!body.contains("LocalStore::open(store_path)?"));
+        assert!(startup_body.contains("LocalStore::open_read_only(&store_path)?"));
+        assert!(!startup_body.contains("LocalStore::open(&store_path)?"));
+        assert!(request_body.contains("LocalStore::open_read_only(store_path)?"));
+        assert!(!request_body.contains("LocalStore::open(store_path)?"));
+    }
+
+    fn daemon_config_for_db(db_path: &Path) -> DaemonConfig {
+        DaemonConfig {
+            mode: "passive".to_owned(),
+            data_dir: db_path
+                .parent()
+                .expect("temporary DB has parent")
+                .to_path_buf(),
+            http_api_enabled: true,
+            http_api_bind: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            http_api_read_only: true,
+            linux_privileged_sensors: false,
+            spool: Some(SpoolConfig {
+                db: db_path.to_path_buf(),
+                path: temp_path("unused-spool.jsonl"),
+                checkpoint: temp_path("unused-checkpoint"),
+            }),
+        }
+    }
+
+    fn assert_no_sqlite_files(path: &Path) {
+        assert!(!path.exists(), "HTTP preflight must not create DB file");
+        assert!(
+            !path.with_extension("sqlite-wal").exists(),
+            "HTTP preflight must not create WAL sidecar"
+        );
+        assert!(
+            !path.with_extension("sqlite-shm").exists(),
+            "HTTP preflight must not create SHM sidecar"
+        );
     }
 
     fn http_get_response(db_path: &Path, path: &str) -> String {
