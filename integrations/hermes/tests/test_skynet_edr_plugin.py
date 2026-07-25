@@ -712,13 +712,15 @@ if (projected.some(item => item.label === 'hostile' || item.value === '<script>'
     def test_desktop_pagination_contracts_and_backend_state_are_fail_closed(self):
         check = run_desktop_plugin_script("""
 const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[{id:'risk-1'}], page:{limit:50, offset:0, returned:1, total:51, has_more:true}};
+const emptyBeyondTotal = {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:100, returned:0, total:51, has_more:false}};
 const page = validateRiskPage(canonicalPage);
 if (page !== canonicalPage) throw new Error('valid risk page should be returned unchanged');
+if (validateRiskPage(emptyBeyondTotal) !== emptyBeyondTotal) throw new Error('valid empty page beyond total should be preserved');
 const canonicalDetail = {schema_version:'skynet.risk.v1', read_only:true, id:'risk-1'};
 if (validateRiskDetail(canonicalDetail) !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
 const canonicalStatus = {read_only:true, ok:true};
 if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('valid status should be returned unchanged');
-for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, page:{...canonicalPage.page, limit:101}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
+for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[{id:'risk-1'}, {id:'risk-2'}]}, {...canonicalPage, page:{...canonicalPage.page, limit:101}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:10001}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:2}}, {...canonicalPage, page:{...canonicalPage.page, returned:0}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:1, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:2, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
   let failed = false;
   try { validateRiskPage(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
   if (!failed) throw new Error('invalid risk page contract must fail closed');
@@ -734,14 +736,21 @@ for (const bad of [null, [], {}, {read_only:false}]) {
   if (!failed) throw new Error('invalid status contract must fail closed');
 }
 if (backendState({data: canonicalStatus}, {data: canonicalPage}) !== 'Backend health: passive read-only projection online') throw new Error('both valid contracts should be online');
-if (backendState({data: canonicalStatus}, {data: undefined}) === 'Backend health: passive read-only projection online') throw new Error('status alone must not be online');
+for (const malformedPage of [undefined, {schema_version:'skynet.risk.v1', read_only:true}, {...canonicalPage, items:[], page:{...canonicalPage.page, returned:1}}, {...canonicalPage, page:{...canonicalPage.page, has_more:false}}]) {
+  if (backendState({data: canonicalStatus}, {data: malformedPage}) === 'Backend health: passive read-only projection online') throw new Error('malformed risk page must not be online');
+}
 if (backendState({data: undefined}, {data: canonicalPage}) === 'Backend health: passive read-only projection online') throw new Error('risk page alone must not be online');
+if (backendState({data: {read_only:false}}, {data: canonicalPage}) === 'Backend health: passive read-only projection online') throw new Error('malformed status must not be online');
 """)
         self.assertEqual(check.returncode, 0, check.stderr)
 
     def test_desktop_pagination_url_query_key_and_offset_helpers(self):
+        source = DESKTOP_PLUGIN_PATH.read_text()
+        self.assertIn("ctx.rest(riskPagePath(offset))", source)
         check = run_desktop_plugin_script("""
 if (PAGE_LIMIT !== 50) throw new Error('page limit must stay 50');
+if (riskPagePath(0) !== '/risks?limit=50&offset=0') throw new Error('risk page path must encode offset 0');
+if (riskPagePath(50) !== '/risks?limit=50&offset=50') throw new Error('risk page path must encode offset 50');
 if (nextOffset({offset:0, has_more:true}) !== 50) throw new Error('next page should advance by 50');
 if (nextOffset({offset:10000, has_more:true}) !== 10000) throw new Error('next page must clamp to 10000');
 if (nextOffset({offset:50, has_more:false}) !== 50) throw new Error('next page must not advance without has_more');
@@ -751,10 +760,18 @@ RiskExplorer({ctx:{rest(path) { requested.push(path); return {schema_version:'sk
 const riskQuery = queryCalls.find(call => JSON.stringify(call.queryKey) === JSON.stringify(['skynet-edr','risks',0]));
 if (!riskQuery) throw new Error('risk queryKey must include offset 0');
 riskQuery.queryFn();
-if (!requested.includes('/risks?limit=50&offset=0')) throw new Error('risk query must request offset 0');
-queryCalls = [];
-const React50 = {calls: 0, useState(initial) { this.calls += 1; return [this.calls === 2 ? 50 : initial, () => {}]; }};
+if (JSON.stringify(requested) !== JSON.stringify(['/risks?limit=50&offset=0'])) throw new Error('risk query must request exact offset 0 path');
 """)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+        check = run_desktop_plugin_script("""
+const requested = [];
+RiskExplorer({ctx:{rest(path) { requested.push(path); return {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:50, returned:0, total:0, has_more:false}}; }}});
+const riskQuery = queryCalls.find(call => JSON.stringify(call.queryKey) === JSON.stringify(['skynet-edr','risks',50]));
+if (!riskQuery) throw new Error('risk queryKey must include offset 50');
+riskQuery.queryFn();
+if (JSON.stringify(requested) !== JSON.stringify(['/risks?limit=50&offset=50'])) throw new Error('risk query must request exact offset 50 path');
+""", react_stub="const React = {calls: 0, useState(initial) { this.calls += 1; return [this.calls === 2 ? 50 : initial, () => {}]; }};\n")
         self.assertEqual(check.returncode, 0, check.stderr)
 
     def test_desktop_ui_remediation_source_semantics_and_stale_data(self):

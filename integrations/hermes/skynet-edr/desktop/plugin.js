@@ -162,6 +162,9 @@ function validateRiskPage(data) {
   if (!boundedPageNumber(page.returned, page.limit)) failContract();
   if (!boundedPageNumber(page.total)) failContract();
   if (typeof page.has_more !== 'boolean') failContract();
+  if (page.returned !== data.items.length) failContract();
+  if (page.has_more !== (page.offset + page.returned < page.total)) failContract();
+  if (page.returned > 0 && page.offset + page.returned > page.total) failContract();
   return data;
 }
 
@@ -201,8 +204,18 @@ function pageRangeText(meta) {
 function backendState(status, risks) {
   if (status.isLoading || risks.isLoading) return 'Backend health: checking read-only loopback';
   if (status.error || risks.error) return 'Backend health: unavailable or invalid response';
-  if (status.data?.read_only === true && risks.data?.read_only === true && risks.data?.schema_version === 'skynet.risk.v1') return 'Backend health: passive read-only projection online';
-  return 'Backend health: response received, read-only flag not asserted';
+  try {
+    validateStatus(status.data);
+    validateRiskPage(risks.data);
+    return 'Backend health: passive read-only projection online';
+  } catch (_error) {
+    return 'Backend health: response received, read-only flag not asserted';
+  }
+}
+
+function riskPagePath(offset) {
+  const boundedOffset = Number.isFinite(offset) ? Math.max(0, Math.min(MAX_OFFSET, Math.floor(offset))) : 0;
+  return '/risks?limit=' + PAGE_LIMIT + '&offset=' + boundedOffset;
 }
 
 function RiskExplorer({ ctx }) {
@@ -214,7 +227,7 @@ function RiskExplorer({ ctx }) {
   const [artifactKind, setArtifactKind] = React.useState('all');
   const risks = useQuery({
     queryKey: ['skynet-edr', 'risks', offset],
-    queryFn: () => Promise.resolve(ctx.rest('/risks?limit=' + PAGE_LIMIT + '&offset=' + offset)).then(validateRiskPage),
+    queryFn: () => Promise.resolve(ctx.rest(riskPagePath(offset))).then(validateRiskPage),
     refetchInterval: POLL_MS,
   });
   const health = useQuery({
