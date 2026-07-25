@@ -161,6 +161,17 @@ sh -n packaging/tarball/uninstall.sh
 sh -n packaging/scripts/build-tarball.sh
 sh -n packaging/scripts/build-packages.sh
 sh -n packaging/scripts/stage-hermes-plugin-payload.sh
+python3 - <<'PY'
+import pathlib
+
+script = pathlib.Path('packaging/scripts/stage-hermes-plugin-payload.sh').read_text()
+for unsafe_fragment in ["old_ifs=$IFS", "IFS='/'", 'IFS=$old_ifs', 'set -- $rel_dir']:
+    if unsafe_fragment in script:
+        raise SystemExit(
+            'Hermes plugin staging must iterate path components with quoted '
+            f'parameter expansion, not {unsafe_fragment!r}'
+        )
+PY
 sh -n packaging/scripts/inspect-artifacts.sh
 sh -n packaging/scripts/smoke-install-artifacts.sh
 sh -n packaging/scripts/verify-public-release.sh

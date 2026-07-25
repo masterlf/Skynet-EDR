@@ -37,11 +37,26 @@ check_source_parent_dirs() {
   fi
 
   current_dir="$SOURCE_DIR"
-  old_ifs=$IFS
-  IFS='/'
-  set -- $rel_dir
-  IFS=$old_ifs
-  for component do
+  remaining_dir="$rel_dir"
+  while [ -n "$remaining_dir" ]; do
+    case "$remaining_dir" in
+      */*)
+        component=${remaining_dir%%/*}
+        remaining_dir=${remaining_dir#*/}
+        ;;
+      *)
+        component=$remaining_dir
+        remaining_dir=''
+        ;;
+    esac
+
+    case "$component" in
+      ''|'.'|'..')
+        echo "refusing unsafe source directory component: $component" >&2
+        exit 1
+        ;;
+    esac
+
     current_dir="$current_dir/$component"
     if [ -L "$current_dir" ]; then
       echo "refusing symlink source directory: $current_dir" >&2
