@@ -325,6 +325,52 @@ fn live_listener_without_a_producer_report_does_not_claim_end_to_end_health() {
 }
 
 #[test]
+fn transient_degradation_recovers_after_health_window_without_resetting_counters() {
+    let db_path = temp_path("health-recovery.sqlite");
+    let config = config(temp_path("health-recovery.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    health.record_listener_started();
+    let report = serde_json::json!({
+        "version": 1,
+        "message_type": "producer_health",
+        "checkpoint_bytes": 128,
+        "backlog_bytes": 0,
+        "backlog_age_ms": null,
+        "events_dropped_total": 0,
+        "events_malformed_total": 0,
+        "transport_state": "available"
+    });
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&report).expect("report serializes")),
+        &health,
+    );
+    assert_eq!(
+        health.status_json(Duration::from_secs(30))["state"],
+        "healthy"
+    );
+
+    health.record_capacity_rejection();
+    assert_eq!(
+        health.status_json(Duration::from_secs(30))["state"],
+        "degraded"
+    );
+    thread::sleep(Duration::from_millis(40));
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&report).expect("report serializes")),
+        &health,
+    );
+    let recovered = health.status_json(Duration::from_millis(30));
+    assert_eq!(recovered["state"], "healthy");
+    assert_eq!(recovered["connections_capacity_rejected_total"], 1);
+}
+
+#[test]
 fn hostile_health_report_is_rejected_without_label_or_payload_leakage() {
     let db_path = temp_path("hostile-health.sqlite");
     let config = config(temp_path("hostile-health.sock"), vec![1_234]);

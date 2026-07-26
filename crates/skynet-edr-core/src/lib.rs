@@ -3768,12 +3768,10 @@ fn insert_collision_evidence_on_connection(
     let existing_event_fingerprint =
         format!("sha256:{:x}", Sha256::digest(existing_payload.as_bytes()));
     let source_fingerprint = format!("sha256:{:x}", Sha256::digest(source_id.as_bytes()));
-    let collision_material = format!(
-        "{}\0{}\0{}",
-        event.id.as_str(),
-        source_fingerprint,
-        event_fingerprint
-    );
+    // Bound evidence to one row per colliding event identifier and authenticated
+    // source. Payload variants retain the first committed fingerprints rather than
+    // allowing an authorized producer to grow this table without bound per ID.
+    let collision_material = format!("{}\0{}", event.id.as_str(), source_fingerprint);
     let collision_id = format!("sha256:{:x}", Sha256::digest(collision_material.as_bytes()));
     connection.execute(
         "INSERT INTO ingest_collisions (

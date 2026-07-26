@@ -347,6 +347,12 @@ fn collision_evidence_is_durable_deduplicated_and_contains_only_fingerprints() {
             .expect("collision evidence commits");
         assert_eq!(collision.status, ContinuousIngestStatus::Collision);
     }
+    let mut varied_collision = conflicting.clone();
+    varied_collision.title = "Another attacker-controlled collision variant".to_owned();
+    let varied = store
+        .commit_continuous_event("uid:2000", &varied_collision, &rules, 10_000)
+        .expect("varied collision returns terminal status");
+    assert_eq!(varied.status, ContinuousIngestStatus::Collision);
     assert_eq!(store.count_ingest_collisions().expect("collision count"), 1);
     let connection = Connection::open(&db_path).expect("inspection connection");
     let evidence: String = connection

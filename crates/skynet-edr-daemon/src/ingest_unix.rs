@@ -66,6 +66,7 @@ pub struct IngestionHealth {
     collisions: AtomicU64,
     correlation_truncated: AtomicU64,
     storage_errors: AtomicU64,
+    last_degraded_at_unix_ms: AtomicU64,
     listener_live: AtomicBool,
     sources: Mutex<BTreeMap<u32, SourceHealth>>,
 }
@@ -201,16 +202,19 @@ impl IngestionHealth {
     /// Record a connection rejected by the bounded accept-loop capacity gate.
     pub fn record_capacity_rejection(&self) {
         self.capacity_rejected.fetch_add(1, Ordering::Relaxed);
+        self.record_degradation();
     }
 
     /// Record an accept-loop failure so status cannot remain falsely healthy.
     pub fn record_listener_error(&self) {
         self.listener_errors.fetch_add(1, Ordering::Relaxed);
+        self.record_degradation();
     }
 
     /// Record a failure to read kernel-authenticated peer credentials.
     pub fn record_peer_credential_error(&self) {
         self.peer_credential_errors.fetch_add(1, Ordering::Relaxed);
+        self.record_degradation();
     }
 
     /// Mark the authenticated listener thread live after a successful bind.
@@ -245,11 +249,17 @@ impl IngestionHealth {
                 Some(ProducerTransportState::Degraded) => "degraded",
                 None => "unknown",
             };
+            let recent_degrading_error = source.last_error_category.is_some_and(|category| {
+                is_degrading_error(category)
+                    && source
+                        .last_error_at_unix_ms
+                        .is_some_and(|at| now.saturating_sub(at) <= stale_after_ms)
+            });
             source_degraded |= stale
                 || source.transport_state.is_none()
                 || source.transport_state == Some(ProducerTransportState::Degraded)
                 || source.backlog_bytes.unwrap_or(0) > 0
-                || source.last_error_category.is_some();
+                || recent_degrading_error;
             source_values.push(json!({
                 "source_id": format!("uid:{uid}"),
                 "last_event_received_at_unix_ms": source.last_event_received_at_unix_ms,
@@ -268,14 +278,10 @@ impl IngestionHealth {
             }));
         }
         let listener_live = self.listener_live.load(Ordering::Acquire);
-        let degraded = !listener_live
-            || source_degraded
-            || snapshot.storage_errors_total > 0
-            || snapshot.frames_timeout_total > 0
-            || snapshot.correlation_truncated_total > 0
-            || snapshot.connections_capacity_rejected_total > 0
-            || snapshot.listener_errors_total > 0
-            || snapshot.peer_credential_errors_total > 0;
+        let last_degraded = self.last_degraded_at_unix_ms.load(Ordering::Relaxed);
+        let recently_degraded =
+            last_degraded != 0 && now.saturating_sub(last_degraded) <= stale_after_ms;
+        let degraded = !listener_live || source_degraded || recently_degraded;
         json!({
             "state": if degraded { "degraded" } else { "healthy" },
             "listener_live": listener_live,
@@ -308,6 +314,10 @@ impl IngestionHealth {
         if category == "malformed_frame" {
             source.daemon_events_malformed_total =
                 source.daemon_events_malformed_total.saturating_add(1);
+        }
+        drop(sources);
+        if is_degrading_error(category) {
+            self.record_degradation();
         }
     }
 
@@ -353,6 +363,20 @@ impl IngestionHealth {
         source.transport_state = Some(report.transport_state);
         source.producer_reported_at_unix_ms = Some(unix_ms_now());
     }
+
+    fn record_correlation_truncated(&self) {
+        self.correlation_truncated.fetch_add(1, Ordering::Relaxed);
+        self.record_degradation();
+    }
+
+    fn record_degradation(&self) {
+        self.last_degraded_at_unix_ms
+            .store(unix_ms_now(), Ordering::Relaxed);
+    }
+}
+
+fn is_degrading_error(category: &str) -> bool {
+    matches!(category, "frame_timeout" | "storage" | "transaction")
 }
 
 fn unix_ms_now() -> u64 {
@@ -506,7 +530,7 @@ fn commit_event_and_ack(
     ) {
         health.record_result(uid, result.status);
         if result.correlation_truncated {
-            health.correlation_truncated.fetch_add(1, Ordering::Relaxed);
+            health.record_correlation_truncated();
         }
         let status = match result.status {
             ContinuousIngestStatus::Persisted => {
