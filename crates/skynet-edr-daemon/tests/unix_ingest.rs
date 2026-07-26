@@ -56,19 +56,24 @@ fn frame(payload: &[u8]) -> Vec<u8> {
 
 fn exchange(uid: u32, config: UnixIngestConfig, db_path: PathBuf, bytes: &[u8]) -> String {
     let health = IngestionHealth::default();
+    exchange_with_health(uid, config, db_path, bytes, &health)
+}
+
+fn exchange_with_health(
+    uid: u32,
+    config: UnixIngestConfig,
+    db_path: PathBuf,
+    bytes: &[u8],
+    health: &IngestionHealth,
+) -> String {
     let (mut client, server) = UnixStream::pair().expect("stream pair opens");
-    let worker =
-        thread::spawn(move || process_ingest_connection(server, uid, &config, &db_path, &health));
     client.write_all(bytes).expect("request writes");
     client
         .shutdown(std::net::Shutdown::Write)
         .expect("request completes");
+    process_ingest_connection(server, uid, &config, &db_path, health).expect("connection handled");
     let mut ack = String::new();
     client.read_to_string(&mut ack).expect("ack reads");
-    worker
-        .join()
-        .expect("worker joins")
-        .expect("connection handled");
     ack
 }
 
@@ -98,6 +103,48 @@ fn authorized_frame_is_acked_only_after_atomic_visibility_and_replay_is_duplicat
             .expect("receipt count"),
         1
     );
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn collision_ack_is_explicit_only_after_durable_evidence() {
+    let db_path = temp_path("collision.sqlite");
+    let config = config(temp_path("collision.sock"), vec![1_234, 2_345]);
+    let mut event: serde_json::Value =
+        serde_json::from_str(CANONICAL_EVENT).expect("fixture parses");
+    event["event_id"] = serde_json::json!("evt_unix_collision");
+    let first_payload = serde_json::to_vec(&event).expect("event serializes");
+    let health = IngestionHealth::default();
+    assert!(exchange_with_health(
+        1_234,
+        config.clone(),
+        db_path.clone(),
+        &frame(&first_payload),
+        &health,
+    )
+    .contains(r#""status":"persisted""#));
+    event["title"] = serde_json::json!("FAKE_COLLISION_PAYLOAD_MUST_NOT_PERSIST");
+    let collision_payload = serde_json::to_vec(&event).expect("collision serializes");
+
+    let ack = exchange_with_health(
+        2_345,
+        config,
+        db_path.clone(),
+        &frame(&collision_payload),
+        &health,
+    );
+    assert!(ack.contains(r#""status":"collision""#), "{ack}");
+    assert_eq!(
+        LocalStore::open_read_only(&db_path)
+            .expect("store opens read-only")
+            .count_ingest_collisions()
+            .expect("collision count"),
+        1
+    );
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["sources"][1]["source_id"], "uid:2345");
+    assert!(status["sources"][1]["last_event_committed_at_unix_ms"].is_null());
+    assert_eq!(status["sources"][1]["events_collision_total"], 1);
     let _ = fs::remove_file(db_path);
 }
 
@@ -212,6 +259,87 @@ fn accept_loop_drop_reasons_are_operator_visible() {
     assert_eq!(snapshot.connections_capacity_rejected_total, 1);
     assert_eq!(snapshot.peer_credential_errors_total, 1);
     assert_eq!(snapshot.listener_errors_total, 1);
+}
+
+#[test]
+fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
+    let db_path = temp_path("health.sqlite");
+    let config = config(temp_path("health.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    health.record_listener_started();
+    let report = serde_json::json!({
+        "version": 1,
+        "message_type": "producer_health",
+        "checkpoint_bytes": 128,
+        "backlog_bytes": 64,
+        "backlog_age_ms": 250,
+        "events_dropped_total": 2,
+        "events_malformed_total": 1,
+        "transport_state": "available"
+    });
+
+    let ack = exchange_with_health(
+        1_234,
+        config.clone(),
+        db_path.clone(),
+        &frame(&serde_json::to_vec(&report).expect("report serializes")),
+        &health,
+    );
+    assert!(ack.contains(r#""status":"health_recorded""#), "{ack}");
+
+    let mut event: serde_json::Value =
+        serde_json::from_str(CANONICAL_EVENT).expect("fixture parses");
+    event["event_id"] = serde_json::json!("evt_health_visibility");
+    let event_frame = frame(&serde_json::to_vec(&event).expect("event serializes"));
+    exchange_with_health(1_234, config, db_path.clone(), &event_frame, &health);
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["state"], "degraded");
+    assert_eq!(status["listener_live"], true);
+    assert_eq!(status["sources"][0]["source_id"], "uid:1234");
+    assert_eq!(status["sources"][0]["producer_checkpoint_bytes"], 128);
+    assert_eq!(status["sources"][0]["backlog_bytes"], 64);
+    assert_eq!(status["sources"][0]["backlog_age_ms"], 250);
+    assert_eq!(status["sources"][0]["events_dropped_total"], 2);
+    assert_eq!(status["sources"][0]["events_malformed_total"], 1);
+    assert!(status["sources"][0]["last_event_received_at_unix_ms"].is_u64());
+    assert!(status["sources"][0]["last_event_committed_at_unix_ms"].is_u64());
+    let serialized = status.to_string();
+    for forbidden in ["events-v1.jsonl", "FAKE_SECRET", "/root/", "command"] {
+        assert!(!serialized.contains(forbidden));
+    }
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn hostile_health_report_is_rejected_without_label_or_payload_leakage() {
+    let db_path = temp_path("hostile-health.sqlite");
+    let config = config(temp_path("hostile-health.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    let report = serde_json::json!({
+        "version": 1,
+        "message_type": "producer_health",
+        "checkpoint_bytes": 0,
+        "backlog_bytes": 0,
+        "backlog_age_ms": null,
+        "events_dropped_total": 0,
+        "events_malformed_total": 0,
+        "transport_state": "available",
+        "path": "/root/FAKE_SECRET"
+    });
+
+    let ack = exchange_with_health(
+        1_234,
+        config,
+        db_path,
+        &frame(&serde_json::to_vec(&report).expect("report serializes")),
+        &health,
+    );
+    assert!(ack.contains(r#""reason":"invalid_health""#), "{ack}");
+    assert!(!health
+        .status_json(Duration::from_secs(30))
+        .to_string()
+        .contains("FAKE_SECRET"));
 }
 
 #[test]

@@ -22,6 +22,8 @@ authenticated daemon transaction (event + correlation + receipt)
 local events, incidents, API, MCP visibility
 ```
 
+The same authenticated socket accepts a strict, bounded `producer_health` version-1 control frame. It contains only checkpoint/backlog byte metrics, backlog age, malformed/dropped counters, and a fixed transport state. The daemon combines this with listener liveness, commit outcomes, and fixed error categories for the read-only `/api/status` projection; paths, labels, event payloads, commands, and secrets are neither accepted nor exposed.
+
 ## Installed files
 
 Packages place the plugin template and installer here:

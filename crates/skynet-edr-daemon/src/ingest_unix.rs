@@ -1,6 +1,7 @@
 //! Bounded authenticated Linux `AF_UNIX` continuous ingestion.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Read, Write},
     os::unix::{
@@ -8,8 +9,11 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use nix::{
@@ -62,6 +66,81 @@ pub struct IngestionHealth {
     collisions: AtomicU64,
     correlation_truncated: AtomicU64,
     storage_errors: AtomicU64,
+    listener_live: AtomicBool,
+    sources: Mutex<BTreeMap<u32, SourceHealth>>,
+}
+
+#[derive(Debug, Default)]
+struct SourceHealth {
+    last_event_received_at_unix_ms: Option<u64>,
+    last_event_committed_at_unix_ms: Option<u64>,
+    producer_checkpoint_bytes: Option<u64>,
+    backlog_bytes: Option<u64>,
+    backlog_age_ms: Option<u64>,
+    daemon_events_malformed_total: u64,
+    producer_events_malformed_total: u64,
+    events_dropped_total: u64,
+    events_duplicate_total: u64,
+    events_collision_total: u64,
+    producer_reported_at_unix_ms: Option<u64>,
+    transport_state: Option<ProducerTransportState>,
+    last_error_category: Option<&'static str>,
+    last_error_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProducerTransportState {
+    Available,
+    Degraded,
+}
+
+#[derive(Debug)]
+struct ProducerHealthReport {
+    checkpoint_bytes: u64,
+    backlog_bytes: u64,
+    backlog_age_ms: Option<u64>,
+    events_dropped_total: u64,
+    events_malformed_total: u64,
+    transport_state: ProducerTransportState,
+}
+
+fn parse_producer_health(value: &serde_json::Value) -> Option<ProducerHealthReport> {
+    let object = value.as_object()?;
+    let allowed = [
+        "version",
+        "message_type",
+        "checkpoint_bytes",
+        "backlog_bytes",
+        "backlog_age_ms",
+        "events_dropped_total",
+        "events_malformed_total",
+        "transport_state",
+    ];
+    if object.len() != allowed.len() || object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return None;
+    }
+    if object.get("version")?.as_u64()? != 1
+        || object.get("message_type")?.as_str()? != "producer_health"
+    {
+        return None;
+    }
+    let backlog_age_ms = match object.get("backlog_age_ms")? {
+        serde_json::Value::Null => None,
+        value => Some(value.as_u64()?),
+    };
+    let transport_state = match object.get("transport_state")?.as_str()? {
+        "available" => ProducerTransportState::Available,
+        "degraded" => ProducerTransportState::Degraded,
+        _ => return None,
+    };
+    Some(ProducerHealthReport {
+        checkpoint_bytes: object.get("checkpoint_bytes")?.as_u64()?,
+        backlog_bytes: object.get("backlog_bytes")?.as_u64()?,
+        backlog_age_ms,
+        events_dropped_total: object.get("events_dropped_total")?.as_u64()?,
+        events_malformed_total: object.get("events_malformed_total")?.as_u64()?,
+        transport_state,
+    })
 }
 
 /// Point-in-time aggregate ingestion counters containing no frame content or paths.
@@ -133,6 +212,155 @@ impl IngestionHealth {
     pub fn record_peer_credential_error(&self) {
         self.peer_credential_errors.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Mark the authenticated listener thread live after a successful bind.
+    pub fn record_listener_started(&self) {
+        self.listener_live.store(true, Ordering::Release);
+    }
+
+    /// Mark the listener unavailable when its accept loop exits.
+    pub fn record_listener_stopped(&self) {
+        self.listener_live.store(false, Ordering::Release);
+    }
+
+    /// Return a bounded operator-safe status projection with one entry per authenticated UID.
+    #[must_use]
+    pub fn status_json(&self, stale_after: Duration) -> serde_json::Value {
+        let snapshot = self.snapshot();
+        let now = unix_ms_now();
+        let stale_after_ms = u64::try_from(stale_after.as_millis()).unwrap_or(u64::MAX);
+        let sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut source_values = Vec::with_capacity(sources.len());
+        let mut source_degraded = false;
+        for (uid, source) in sources.iter() {
+            let stale = source
+                .producer_reported_at_unix_ms
+                .is_some_and(|reported| now.saturating_sub(reported) > stale_after_ms);
+            let transport_state = match source.transport_state {
+                Some(ProducerTransportState::Available) if !stale => "available",
+                Some(ProducerTransportState::Available) => "stale",
+                Some(ProducerTransportState::Degraded) => "degraded",
+                None => "unknown",
+            };
+            source_degraded |= stale
+                || source.transport_state.is_none()
+                || source.transport_state == Some(ProducerTransportState::Degraded)
+                || source.backlog_bytes.unwrap_or(0) > 0
+                || source.last_error_category.is_some();
+            source_values.push(json!({
+                "source_id": format!("uid:{uid}"),
+                "last_event_received_at_unix_ms": source.last_event_received_at_unix_ms,
+                "last_event_committed_at_unix_ms": source.last_event_committed_at_unix_ms,
+                "producer_checkpoint_bytes": source.producer_checkpoint_bytes,
+                "backlog_bytes": source.backlog_bytes,
+                "backlog_age_ms": source.backlog_age_ms,
+                "events_malformed_total": source.daemon_events_malformed_total.saturating_add(source.producer_events_malformed_total),
+                "events_dropped_total": source.events_dropped_total,
+                "events_duplicate_total": source.events_duplicate_total,
+                "events_collision_total": source.events_collision_total,
+                "last_error_category": source.last_error_category,
+                "last_error_at_unix_ms": source.last_error_at_unix_ms,
+                "producer_reported_at_unix_ms": source.producer_reported_at_unix_ms,
+                "transport_state": transport_state,
+            }));
+        }
+        let listener_live = self.listener_live.load(Ordering::Acquire);
+        let degraded = !listener_live
+            || source_degraded
+            || snapshot.storage_errors_total > 0
+            || snapshot.frames_timeout_total > 0
+            || snapshot.correlation_truncated_total > 0
+            || snapshot.connections_capacity_rejected_total > 0
+            || snapshot.listener_errors_total > 0
+            || snapshot.peer_credential_errors_total > 0;
+        json!({
+            "state": if degraded { "degraded" } else { "healthy" },
+            "listener_live": listener_live,
+            "connections_accepted_total": snapshot.connections_accepted_total,
+            "connections_unauthorized_total": snapshot.connections_unauthorized_total,
+            "connections_capacity_rejected_total": snapshot.connections_capacity_rejected_total,
+            "listener_errors_total": snapshot.listener_errors_total,
+            "peer_credential_errors_total": snapshot.peer_credential_errors_total,
+            "frames_received_total": snapshot.frames_received_total,
+            "frames_oversize_total": snapshot.frames_oversize_total,
+            "frames_invalid_total": snapshot.frames_invalid_total,
+            "frames_timeout_total": snapshot.frames_timeout_total,
+            "events_persisted_total": snapshot.events_persisted_total,
+            "events_duplicate_total": snapshot.events_duplicate_total,
+            "events_collision_total": snapshot.events_collision_total,
+            "correlation_truncated_total": snapshot.correlation_truncated_total,
+            "storage_errors_total": snapshot.storage_errors_total,
+            "sources": source_values,
+        })
+    }
+
+    fn record_source_error(&self, uid: u32, category: &'static str) {
+        let mut sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let source = sources.entry(uid).or_default();
+        source.last_error_category = Some(category);
+        source.last_error_at_unix_ms = Some(unix_ms_now());
+        if category == "malformed_frame" {
+            source.daemon_events_malformed_total =
+                source.daemon_events_malformed_total.saturating_add(1);
+        }
+    }
+
+    fn record_event_received(&self, uid: u32) {
+        self.sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(uid)
+            .or_default()
+            .last_event_received_at_unix_ms = Some(unix_ms_now());
+    }
+
+    fn record_result(&self, uid: u32, status: ContinuousIngestStatus) {
+        let mut sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let source = sources.entry(uid).or_default();
+        match status {
+            ContinuousIngestStatus::Persisted => {
+                source.last_event_committed_at_unix_ms = Some(unix_ms_now());
+            }
+            ContinuousIngestStatus::Duplicate => {
+                source.events_duplicate_total = source.events_duplicate_total.saturating_add(1);
+            }
+            ContinuousIngestStatus::Collision => {
+                source.events_collision_total = source.events_collision_total.saturating_add(1);
+            }
+        }
+    }
+
+    fn record_producer_health(&self, uid: u32, report: &ProducerHealthReport) {
+        let mut sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let source = sources.entry(uid).or_default();
+        source.producer_checkpoint_bytes = Some(report.checkpoint_bytes);
+        source.backlog_bytes = Some(report.backlog_bytes);
+        source.backlog_age_ms = report.backlog_age_ms;
+        source.events_dropped_total = report.events_dropped_total;
+        source.producer_events_malformed_total = report.events_malformed_total;
+        source.transport_state = Some(report.transport_state);
+        source.producer_reported_at_unix_ms = Some(unix_ms_now());
+    }
+}
+
+fn unix_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Safely replace an owned stale socket and bind the configured listener.
@@ -257,8 +485,10 @@ pub fn process_ingest_connection(
     if let Err(error) = read_exact_until(&mut stream, &mut header, read_deadline) {
         if is_timeout(&error) {
             health.timed_out.fetch_add(1, Ordering::Relaxed);
+            health.record_source_error(uid, "frame_timeout");
         } else {
             health.invalid.fetch_add(1, Ordering::Relaxed);
+            health.record_source_error(uid, "malformed_frame");
         }
         return Ok(());
     }
@@ -266,6 +496,7 @@ pub fn process_ingest_connection(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame length is unsupported"))?;
     if declared == 0 || declared > config.max_frame_bytes {
         health.oversized.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "frame_size");
         return write_ack(
             &mut stream,
             &json!({"version":1,"status":"rejected_permanent","reason":"frame_size"}),
@@ -276,29 +507,56 @@ pub fn process_ingest_connection(
     if let Err(error) = read_exact_until(&mut stream, &mut body, read_deadline) {
         if is_timeout(&error) {
             health.timed_out.fetch_add(1, Ordering::Relaxed);
+            health.record_source_error(uid, "frame_timeout");
         } else {
             health.invalid.fetch_add(1, Ordering::Relaxed);
+            health.record_source_error(uid, "malformed_frame");
         }
         return Ok(());
     }
     health.received.fetch_add(1, Ordering::Relaxed);
     let Ok(text) = std::str::from_utf8(&body) else {
         health.invalid.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "malformed_frame");
         return write_ack(
             &mut stream,
             &json!({"version":1,"status":"rejected_permanent","reason":"invalid_event"}),
         );
     };
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        if value
+            .get("message_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("producer_health")
+        {
+            let Some(report) = parse_producer_health(&value) else {
+                health.invalid.fetch_add(1, Ordering::Relaxed);
+                health.record_source_error(uid, "invalid_health");
+                return write_ack(
+                    &mut stream,
+                    &json!({"version":1,"status":"rejected_permanent","reason":"invalid_health"}),
+                );
+            };
+            health.record_producer_health(uid, &report);
+            return write_ack(
+                &mut stream,
+                &json!({"version":1,"status":"health_recorded"}),
+            );
+        }
+    }
     let Ok(event) = parse_canonical_event_json(text) else {
         health.invalid.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "malformed_frame");
         return write_ack(
             &mut stream,
             &json!({"version":1,"status":"rejected_permanent","reason":"invalid_event"}),
         );
     };
+    health.record_event_received(uid);
 
     let Ok(store) = LocalStore::open(db_path) else {
         health.storage_errors.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "storage");
         return write_ack(
             &mut stream,
             &json!({"version":1,"status":"retry_later","reason":"storage"}),
@@ -312,6 +570,7 @@ pub fn process_ingest_connection(
         &built_in_ai_agent_sequence_rules(),
         config.candidate_limit,
     ) {
+        health.record_result(uid, result.status);
         if result.correlation_truncated {
             health.correlation_truncated.fetch_add(1, Ordering::Relaxed);
         }
@@ -326,7 +585,7 @@ pub fn process_ingest_connection(
             }
             ContinuousIngestStatus::Collision => {
                 health.collisions.fetch_add(1, Ordering::Relaxed);
-                "rejected_permanent"
+                "collision"
             }
         };
         write_ack(
@@ -335,6 +594,7 @@ pub fn process_ingest_connection(
         )
     } else {
         health.storage_errors.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "transaction");
         write_ack(
             &mut stream,
             &json!({"version":1,"event_id":event.event_id.as_str(),"status":"retry_later","reason":"transaction"}),

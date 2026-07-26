@@ -279,6 +279,52 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         with patch.object(self.plugin.socket, "socket", return_value=FakeSocket(good)):
             self.assertEqual(self.plugin._send_frame(line), "duplicate")
 
+        collision = b'{"version":1,"event_id":"evt_ack_expected","status":"collision"}\n'
+        with patch.object(self.plugin.socket, "socket", return_value=FakeSocket(collision)):
+            self.assertEqual(self.plugin._send_frame(line), "collision")
+
+    def test_producer_health_frame_is_bounded_checkpoint_aware_and_path_free(self):
+        fallback = self.state_dir / "events-v1.jsonl"
+        fallback.write_text('{"event_id":"evt_health"}\n', encoding="utf-8")
+        (self.state_dir / "events-v1.offset").write_text("4", encoding="ascii")
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = b""
+                self.ack = b'{"version":1,"status":"health_recorded"}\n'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _path):
+                pass
+
+            def sendall(self, payload):
+                self.sent = payload
+
+            def recv(self, _size):
+                ack, self.ack = self.ack, b""
+                return ack
+
+        fake = FakeSocket()
+        with patch.object(self.plugin.socket, "socket", return_value=fake):
+            self.assertTrue(self.plugin._send_health_report())
+        declared = int.from_bytes(fake.sent[:4], "big")
+        body = json.loads(fake.sent[4:])
+        self.assertEqual(declared, len(fake.sent) - 4)
+        self.assertEqual(body["message_type"], "producer_health")
+        self.assertEqual(body["checkpoint_bytes"], 4)
+        self.assertEqual(body["backlog_bytes"], fallback.stat().st_size - 4)
+        serialized = json.dumps(body)
+        self.assertNotIn(str(self.state_dir), serialized)
+        self.assertLess(len(fake.sent), 4096)
+
     def test_fallback_state_lock_serializes_processes(self):
         context = multiprocessing.get_context("spawn")
         parent, child = context.Pipe(duplex=False)

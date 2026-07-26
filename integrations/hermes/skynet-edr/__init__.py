@@ -346,6 +346,7 @@ def _transport_worker() -> None:
             if idle_ticks >= 20:
                 _replay_fallback(max_records=16)
                 _report_transport_counters()
+                _send_health_report()
                 idle_ticks = 0
             continue
         idle_ticks = 0
@@ -355,11 +356,12 @@ def _transport_worker() -> None:
                 _append_fallback(line)
             else:
                 status = _send_frame(line)
-                if status not in {"persisted", "duplicate", "rejected_permanent"}:
+                if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
                     _append_fallback(line)
         finally:
             _event_queue.task_done()
             _report_transport_counters()
+            _send_health_report()
 
 
 def _report_transport_counters() -> None:
@@ -414,7 +416,7 @@ def _send_frame(line: str) -> str:
         if (
             response.get("version") == 1
             and response.get("event_id") == event_id
-            and status in {"persisted", "duplicate", "rejected_permanent"}
+            and status in {"persisted", "duplicate", "collision", "rejected_permanent"}
         ):
             return status
     except (OSError, ValueError, json.JSONDecodeError):
@@ -422,6 +424,66 @@ def _send_frame(line: str) -> str:
     with _lock:
         _transport_counters["socket_failures"] += 1
     return "retry_later"
+
+
+def _send_health_report() -> bool:
+    path = _spool_path()
+    checkpoint_path = _checkpoint_path()
+    try:
+        with _spool_state_lock():
+            size = path.stat().st_size if path.exists() else 0
+            try:
+                checkpoint = min(_read_checkpoint(checkpoint_path), size)
+            except (OSError, UnicodeDecodeError, ValueError):
+                checkpoint = 0
+            backlog = size - checkpoint
+            backlog_age_ms = None
+            if backlog > 0:
+                backlog_age_ms = max(0, int((time.time() - path.stat().st_mtime) * 1000))
+        with _lock:
+            counters = dict(_transport_counters)
+        degraded = backlog > 0 or any(
+            counters[name] > 0 for name in ("queue_drops", "socket_failures", "fallback_full")
+        )
+        payload = json.dumps(
+            {
+                "version": 1,
+                "message_type": "producer_health",
+                "checkpoint_bytes": checkpoint,
+                "backlog_bytes": backlog,
+                "backlog_age_ms": backlog_age_ms,
+                "events_dropped_total": counters["queue_drops"] + counters["fallback_full"],
+                "events_malformed_total": 0,
+                "transport_state": "degraded" if degraded else "available",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if not payload or len(payload) > 4096:
+            return False
+        socket_path = os.environ.get("SKYNET_EDR_INGEST_SOCKET", DEFAULT_INGEST_SOCKET)
+        timeout = min(
+            2.0,
+            max(0.01, _safe_positive_int_env("SKYNET_EDR_SOCKET_TIMEOUT_MS", 250) / 1000),
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(socket_path)
+            client.sendall(len(payload).to_bytes(4, "big") + payload)
+            ack = bytearray()
+            while len(ack) <= 4096:
+                chunk = client.recv(min(1024, 4097 - len(ack)))
+                if not chunk:
+                    break
+                ack.extend(chunk)
+                if b"\n" in chunk:
+                    break
+        if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+            return False
+        response = json.loads(bytes(ack[:-1]))
+        return response.get("version") == 1 and response.get("status") == "health_recorded"
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def _append_fallback(line: str) -> bool:
@@ -478,7 +540,7 @@ def _replay_fallback(*, max_records: int) -> int:
                     if not line or not line.endswith(b"\n") or len(line) > MAX_INGEST_FRAME_BYTES + 1:
                         break
                     status = _send_frame(line[:-1].decode("utf-8"))
-                    if status not in {"persisted", "duplicate", "rejected_permanent"}:
+                    if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
                         break
                     offset = handle.tell()
                     _write_checkpoint(checkpoint, offset)

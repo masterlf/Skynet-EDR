@@ -140,6 +140,7 @@ fn start_ingestion_if_enabled(
     })?;
     let db_path = config.http_store_path();
     let health = Arc::new(IngestionHealth::default());
+    health.record_listener_started();
     let _ = ACTIVE_INGESTION_HEALTH.set(Arc::clone(&health));
     let active = Arc::new(AtomicUsize::new(0));
     println!("unix ingestion listening: {}", ingest.socket_path.display());
@@ -178,6 +179,7 @@ fn start_ingestion_if_enabled(
                 worker_active.fetch_sub(1, Ordering::AcqRel);
             });
         }
+        health.record_listener_stopped();
     })))
 }
 
@@ -280,37 +282,9 @@ fn write_http_connection_response(
         if path == "/api/status" {
             if let Some(object) = response.body.as_object_mut() {
                 let ingestion = if let Some(health) = ACTIVE_INGESTION_HEALTH.get() {
-                    let snapshot = health.snapshot();
-                    let state = if snapshot.storage_errors_total > 0
-                        || snapshot.frames_timeout_total > 0
-                        || snapshot.correlation_truncated_total > 0
-                        || snapshot.connections_capacity_rejected_total > 0
-                        || snapshot.listener_errors_total > 0
-                        || snapshot.peer_credential_errors_total > 0
-                    {
-                        "degraded"
-                    } else {
-                        "healthy"
-                    };
-                    serde_json::json!({
-                        "state": state,
-                        "connections_accepted_total": snapshot.connections_accepted_total,
-                        "connections_unauthorized_total": snapshot.connections_unauthorized_total,
-                        "connections_capacity_rejected_total": snapshot.connections_capacity_rejected_total,
-                        "listener_errors_total": snapshot.listener_errors_total,
-                        "peer_credential_errors_total": snapshot.peer_credential_errors_total,
-                        "frames_received_total": snapshot.frames_received_total,
-                        "frames_oversize_total": snapshot.frames_oversize_total,
-                        "frames_invalid_total": snapshot.frames_invalid_total,
-                        "frames_timeout_total": snapshot.frames_timeout_total,
-                        "events_persisted_total": snapshot.events_persisted_total,
-                        "events_duplicate_total": snapshot.events_duplicate_total,
-                        "events_collision_total": snapshot.events_collision_total,
-                        "correlation_truncated_total": snapshot.correlation_truncated_total,
-                        "storage_errors_total": snapshot.storage_errors_total,
-                    })
+                    health.status_json(Duration::from_secs(30))
                 } else {
-                    serde_json::json!({"state":"disabled"})
+                    serde_json::json!({"state":"disabled","listener_live":false,"sources":[]})
                 };
                 object.insert("ingestion".to_owned(), ingestion);
             }
@@ -891,7 +865,9 @@ mod tests {
 
         assert!(status.contains("HTTP/1.1 200 OK"));
         assert!(status.contains(r#""incident_count":1"#));
-        assert!(status.contains(r#""ingestion":{"state":"disabled"}"#));
+        assert!(status.contains(r#""listener_live":false"#));
+        assert!(status.contains(r#""sources":[]"#));
+        assert!(status.contains(r#""state":"disabled""#));
         assert!(risks.contains("HTTP/1.1 200 OK"));
         assert!(risks.contains(r#""schema_version":"skynet.risk.v1""#));
         assert!(risks.contains(r#""total":1"#));

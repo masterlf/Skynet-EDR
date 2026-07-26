@@ -90,19 +90,20 @@ Expected packaged ownership/modes are `skynet-edr:skynet-edr-ingest 750` for the
 
 ### Health, counters, and backlog lag
 
-When the local read-only API is enabled, `GET /api/status` includes an `ingestion` object. `state` is `disabled` when no listener was started, `healthy` when the listener has not observed a degrading condition, and `degraded` after a storage error, frame timeout, correlation truncation, capacity rejection, listener error, or peer-credential error.
+When the local read-only API is enabled, `GET /api/status` includes an `ingestion` object. `state` is `disabled` when no listener was started, `healthy` only while the listener is live and every observed producer has a fresh available transport report with no backlog or degrading condition, and `degraded` otherwise. Storage errors, frame timeouts, correlation overflow, capacity rejection, listener/peer-credential errors, stale reports, producer transport degradation, and non-zero backlog all degrade the state.
 
 ```bash
 curl --fail --silent http://127.0.0.1:8787/api/status
 ```
 
-The object exposes process-lifetime aggregate counters only:
+The object exposes bounded process-lifetime aggregates plus a source-aware `sources` array keyed only by the kernel-authenticated numeric UID:
 
 - connections: accepted, unauthorized, capacity-rejected, listener errors, and peer-credential errors;
 - frames: received, oversized, invalid, and timed out;
-- outcomes: persisted, duplicate, event-ID collision, correlation truncated, and storage errors.
+- outcomes: persisted, duplicate, event-ID collision, correlation overflow, and storage errors;
+- listener liveness and, per source, last event received/committed timestamps, producer checkpoint bytes, pending backlog bytes/age, malformed/dropped/duplicate/collision totals, fixed-category last error plus timestamp, producer-report timestamp, and transport state (`available`, `degraded`, `stale`, or `unknown`).
 
-Unauthorized, malformed, oversized, duplicate, and collision counters remain visible but do not by themselves change `state` to `degraded`. Counters reset when the daemon process restarts. The current API does not expose active-connection count, oldest-event age, fallback record count, or listener-thread liveness; a green state therefore is not an end-to-end delivery guarantee.
+The authenticated producer sends a strict version-1 control frame periodically and after delivery work. Unknown fields, labels, paths, payloads, commands, and strings outside the fixed transport enum are rejected. `/api/status` never projects socket/spool paths, event content, command text, or secrets. A report is stale 30 seconds after the daemon received it. Runtime counters, source entries, liveness, and timestamps reset on daemon restart; durable events, receipts, incidents, collision fingerprints, producer fallback, and its checkpoint do not. Until a producer reports again after restart its transport is `unknown`, so status cannot claim end-to-end health.
 
 The Hermes producer writes process-lifetime transport counter snapshots to its sanitized log only when values change:
 
@@ -112,7 +113,7 @@ transport_counters queue_drops=N socket_failures=N fallback_full=N fallback_reco
 
 `queue_drops` means the bounded in-memory queue dropped the newest event rather than block Hermes. `socket_failures` includes unavailable transport or an invalid/non-terminal ACK. `fallback_full` means the bounded fallback retained older pending records and refused the newest record. `fallback_records` counts successful durable fallback appends; it is not current backlog depth.
 
-There is no wall-clock lag metric yet. Estimate the versioned fallback backlog in bytes as the fallback size minus its producer-owned checkpoint, without opening event content:
+The source entry reports `backlog_bytes` as versioned fallback size minus its producer-owned checkpoint and reports `backlog_age_ms` from the pending fallback file age without opening event content. Operators can independently verify the same byte lag while troubleshooting:
 
 ```bash
 python3 - <<'PY'
@@ -132,7 +133,7 @@ PY
 
 ### Versioned fallback and historical backlog policy
 
-The current producer owns only `events-v1.jsonl`, `events-v1.offset`, and its process-shared lock. Appends and checkpoint replacements are flushed to the file and parent directory. Pending records are replayed in order; while any fallback remains, new events append behind it. The checkpoint advances only after a version-1 terminal ACK for the matching event ID: `persisted`, `duplicate`, or `rejected_permanent`. Timeouts, connection failures, malformed ACKs, and `retry_later` leave the record pending.
+The current producer owns only `events-v1.jsonl`, `events-v1.offset`, and its process-shared lock. Appends and checkpoint replacements are flushed to the file and parent directory. Pending records are replayed in order; while any fallback remains, new events append behind it. The checkpoint advances only after a version-1 terminal ACK for the matching event ID: `persisted`, `duplicate`, `collision`, or `rejected_permanent`. A `collision` ACK is emitted only after bounded fingerprint-only collision evidence commits. Timeouts, connection failures, malformed ACKs, and `retry_later` leave the record pending.
 
 The default pending-byte cap is 64 MiB and the hard configurable ceiling is 256 MiB. Acknowledged prefixes may be compacted before enforcing the cap. If pending data alone reaches the cap, the oldest pending records are retained and newer records are dropped and counted as `fallback_full`.
 
@@ -143,8 +144,8 @@ The daemon never scans producer home directories and continuous ingestion never 
 - If the daemon is unavailable or returns a retryable outcome, the producer attempts a durable versioned fallback append. An abrupt producer-process exit can still lose records that existed only in the in-memory queue.
 - The producer worker replays small bounded batches before new delivery and during idle periods. Duplicate event IDs from an uncertain ACK are idempotent only when source identity and payload match; a mismatch is a permanent collision.
 - A storage or correlation transaction failure rolls back event, incident, and receipt together and returns `retry_later` when an ACK can be written.
-- Candidate overflow persists the event but deliberately skips correlation for that event, increments `correlation_truncated_total`, and degrades status. Increase limits only after investigating event volume and memory/storage impact.
-- The systemd unit restarts a failed daemon after five seconds. Its in-memory counters reset; the SQLite store and producer-owned fallback remain. The current main loop does not supervise the ingestion accept thread independently, so verify both socket operation and counter movement after a restart.
+- Candidate overflow persists the triggering redacted event and receipt atomically with one deterministic, event-deduplicated `Continuous correlation degraded` incident, increments `correlation_truncated_total`, and degrades status. Replaying the same trigger does not duplicate the alert, while a distinct later overflow remains visible. It never treats the skipped evaluation as a clean no-match. Increase limits only after investigating event volume and memory/storage impact.
+- The systemd unit restarts a failed daemon after five seconds. Its in-memory counters and source health reset; the SQLite store and producer-owned fallback remain. Listener-thread liveness is explicit in `/api/status`; verify liveness, fresh producer reports, and counter movement after a restart.
 
 ### Harmless transport canary
 
