@@ -22,8 +22,8 @@ use nix::{
 };
 use serde_json::json;
 use skynet_edr_core::{
-    built_in_ai_agent_sequence_rules, parse_canonical_event_json, ContinuousIngestStatus,
-    LocalStore,
+    built_in_ai_agent_sequence_rules, parse_canonical_event_json, CanonicalEventEnvelope,
+    ContinuousIngestStatus, LocalStore,
 };
 
 /// Runtime bounds and authorization policy for the Unix ingestion listener.
@@ -232,9 +232,9 @@ impl IngestionHealth {
         let sources = self
             .sources
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut source_values = Vec::with_capacity(sources.len());
-        let mut source_degraded = false;
+        let mut source_degraded = sources.is_empty();
         for (uid, source) in sources.iter() {
             let stale = source
                 .producer_reported_at_unix_ms
@@ -301,7 +301,7 @@ impl IngestionHealth {
         let mut sources = self
             .sources
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let source = sources.entry(uid).or_default();
         source.last_error_category = Some(category);
         source.last_error_at_unix_ms = Some(unix_ms_now());
@@ -314,7 +314,7 @@ impl IngestionHealth {
     fn record_event_received(&self, uid: u32) {
         self.sources
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(uid)
             .or_default()
             .last_event_received_at_unix_ms = Some(unix_ms_now());
@@ -324,7 +324,7 @@ impl IngestionHealth {
         let mut sources = self
             .sources
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let source = sources.entry(uid).or_default();
         match status {
             ContinuousIngestStatus::Persisted => {
@@ -343,7 +343,7 @@ impl IngestionHealth {
         let mut sources = self
             .sources
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let source = sources.entry(uid).or_default();
         source.producer_checkpoint_bytes = Some(report.checkpoint_bytes);
         source.backlog_bytes = Some(report.backlog_bytes);
@@ -451,6 +451,91 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         .map_err(io::Error::other)
 }
 
+fn handle_producer_health_frame(
+    text: &str,
+    stream: &mut UnixStream,
+    uid: u32,
+    health: &IngestionHealth,
+) -> Option<io::Result<()>> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if value
+        .get("message_type")
+        .and_then(serde_json::Value::as_str)
+        != Some("producer_health")
+    {
+        return None;
+    }
+    let Some(report) = parse_producer_health(&value) else {
+        health.invalid.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "invalid_health");
+        return Some(write_ack(
+            stream,
+            &json!({"version":1,"status":"rejected_permanent","reason":"invalid_health"}),
+        ));
+    };
+    health.record_producer_health(uid, &report);
+    Some(write_ack(
+        stream,
+        &json!({"version":1,"status":"health_recorded"}),
+    ))
+}
+
+fn commit_event_and_ack(
+    stream: &mut UnixStream,
+    uid: u32,
+    config: &UnixIngestConfig,
+    db_path: &Path,
+    health: &IngestionHealth,
+    event: &CanonicalEventEnvelope,
+) -> io::Result<()> {
+    health.record_event_received(uid);
+    let Ok(store) = LocalStore::open(db_path) else {
+        health.storage_errors.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "storage");
+        return write_ack(
+            stream,
+            &json!({"version":1,"status":"retry_later","reason":"storage"}),
+        );
+    };
+    let source_id = format!("uid:{uid}");
+    if let Ok(result) = store.commit_continuous_event(
+        &source_id,
+        event,
+        &built_in_ai_agent_sequence_rules(),
+        config.candidate_limit,
+    ) {
+        health.record_result(uid, result.status);
+        if result.correlation_truncated {
+            health.correlation_truncated.fetch_add(1, Ordering::Relaxed);
+        }
+        let status = match result.status {
+            ContinuousIngestStatus::Persisted => {
+                health.persisted.fetch_add(1, Ordering::Relaxed);
+                "persisted"
+            }
+            ContinuousIngestStatus::Duplicate => {
+                health.duplicates.fetch_add(1, Ordering::Relaxed);
+                "duplicate"
+            }
+            ContinuousIngestStatus::Collision => {
+                health.collisions.fetch_add(1, Ordering::Relaxed);
+                "collision"
+            }
+        };
+        write_ack(
+            stream,
+            &json!({"version":1,"event_id":event.event_id.as_str(),"status":status}),
+        )
+    } else {
+        health.storage_errors.fetch_add(1, Ordering::Relaxed);
+        health.record_source_error(uid, "transaction");
+        write_ack(
+            stream,
+            &json!({"version":1,"event_id":event.event_id.as_str(),"status":"retry_later","reason":"transaction"}),
+        )
+    }
+}
+
 /// Process one authenticated, bounded frame and emit one bounded ACK when possible.
 ///
 /// Authorization occurs before any frame byte is read. `persisted` is written only
@@ -523,26 +608,8 @@ pub fn process_ingest_connection(
             &json!({"version":1,"status":"rejected_permanent","reason":"invalid_event"}),
         );
     };
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        if value
-            .get("message_type")
-            .and_then(serde_json::Value::as_str)
-            == Some("producer_health")
-        {
-            let Some(report) = parse_producer_health(&value) else {
-                health.invalid.fetch_add(1, Ordering::Relaxed);
-                health.record_source_error(uid, "invalid_health");
-                return write_ack(
-                    &mut stream,
-                    &json!({"version":1,"status":"rejected_permanent","reason":"invalid_health"}),
-                );
-            };
-            health.record_producer_health(uid, &report);
-            return write_ack(
-                &mut stream,
-                &json!({"version":1,"status":"health_recorded"}),
-            );
-        }
+    if let Some(result) = handle_producer_health_frame(text, &mut stream, uid, health) {
+        return result;
     }
     let Ok(event) = parse_canonical_event_json(text) else {
         health.invalid.fetch_add(1, Ordering::Relaxed);
@@ -552,54 +619,7 @@ pub fn process_ingest_connection(
             &json!({"version":1,"status":"rejected_permanent","reason":"invalid_event"}),
         );
     };
-    health.record_event_received(uid);
-
-    let Ok(store) = LocalStore::open(db_path) else {
-        health.storage_errors.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(uid, "storage");
-        return write_ack(
-            &mut stream,
-            &json!({"version":1,"status":"retry_later","reason":"storage"}),
-        );
-    };
-
-    let source_id = format!("uid:{uid}");
-    if let Ok(result) = store.commit_continuous_event(
-        &source_id,
-        &event,
-        &built_in_ai_agent_sequence_rules(),
-        config.candidate_limit,
-    ) {
-        health.record_result(uid, result.status);
-        if result.correlation_truncated {
-            health.correlation_truncated.fetch_add(1, Ordering::Relaxed);
-        }
-        let status = match result.status {
-            ContinuousIngestStatus::Persisted => {
-                health.persisted.fetch_add(1, Ordering::Relaxed);
-                "persisted"
-            }
-            ContinuousIngestStatus::Duplicate => {
-                health.duplicates.fetch_add(1, Ordering::Relaxed);
-                "duplicate"
-            }
-            ContinuousIngestStatus::Collision => {
-                health.collisions.fetch_add(1, Ordering::Relaxed);
-                "collision"
-            }
-        };
-        write_ack(
-            &mut stream,
-            &json!({"version":1,"event_id":event.event_id.as_str(),"status":status}),
-        )
-    } else {
-        health.storage_errors.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(uid, "transaction");
-        write_ack(
-            &mut stream,
-            &json!({"version":1,"event_id":event.event_id.as_str(),"status":"retry_later","reason":"transaction"}),
-        )
-    }
+    commit_event_and_ack(&mut stream, uid, config, db_path, health, &event)
 }
 
 fn read_exact_until(

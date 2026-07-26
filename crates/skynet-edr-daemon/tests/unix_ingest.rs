@@ -54,15 +54,20 @@ fn frame(payload: &[u8]) -> Vec<u8> {
     framed
 }
 
-fn exchange(uid: u32, config: UnixIngestConfig, db_path: PathBuf, bytes: &[u8]) -> String {
+fn exchange(
+    uid: u32,
+    config: &UnixIngestConfig,
+    db_path: &std::path::Path,
+    bytes: &[u8],
+) -> String {
     let health = IngestionHealth::default();
     exchange_with_health(uid, config, db_path, bytes, &health)
 }
 
 fn exchange_with_health(
     uid: u32,
-    config: UnixIngestConfig,
-    db_path: PathBuf,
+    config: &UnixIngestConfig,
+    db_path: &std::path::Path,
     bytes: &[u8],
     health: &IngestionHealth,
 ) -> String {
@@ -71,7 +76,7 @@ fn exchange_with_health(
     client
         .shutdown(std::net::Shutdown::Write)
         .expect("request completes");
-    process_ingest_connection(server, uid, &config, &db_path, health).expect("connection handled");
+    process_ingest_connection(server, uid, config, db_path, health).expect("connection handled");
     let mut ack = String::new();
     client.read_to_string(&mut ack).expect("ack reads");
     ack
@@ -86,7 +91,7 @@ fn authorized_frame_is_acked_only_after_atomic_visibility_and_replay_is_duplicat
     event["event_id"] = serde_json::json!("evt_unix_ingest_commit");
     let payload = serde_json::to_vec(&event).expect("event serializes");
 
-    let first = exchange(1_234, config.clone(), db_path.clone(), &frame(&payload));
+    let first = exchange(1_234, &config, &db_path, &frame(&payload));
     assert!(first.contains(r#""status":"persisted""#), "{first}");
     assert!(LocalStore::open_read_only(&db_path)
         .expect("store opens read-only")
@@ -94,7 +99,7 @@ fn authorized_frame_is_acked_only_after_atomic_visibility_and_replay_is_duplicat
         .expect("event lookup succeeds")
         .is_some());
 
-    let replay = exchange(1_234, config, db_path.clone(), &frame(&payload));
+    let replay = exchange(1_234, &config, &db_path, &frame(&payload));
     assert!(replay.contains(r#""status":"duplicate""#), "{replay}");
     assert_eq!(
         LocalStore::open_read_only(&db_path)
@@ -115,21 +120,17 @@ fn collision_ack_is_explicit_only_after_durable_evidence() {
     event["event_id"] = serde_json::json!("evt_unix_collision");
     let first_payload = serde_json::to_vec(&event).expect("event serializes");
     let health = IngestionHealth::default();
-    assert!(exchange_with_health(
-        1_234,
-        config.clone(),
-        db_path.clone(),
-        &frame(&first_payload),
-        &health,
-    )
-    .contains(r#""status":"persisted""#));
+    assert!(
+        exchange_with_health(1_234, &config, &db_path, &frame(&first_payload), &health,)
+            .contains(r#""status":"persisted""#)
+    );
     event["title"] = serde_json::json!("FAKE_COLLISION_PAYLOAD_MUST_NOT_PERSIST");
     let collision_payload = serde_json::to_vec(&event).expect("collision serializes");
 
     let ack = exchange_with_health(
         2_345,
-        config,
-        db_path.clone(),
+        &config,
+        &db_path,
         &frame(&collision_payload),
         &health,
     );
@@ -172,16 +173,11 @@ fn zero_oversize_malformed_and_slow_frames_persist_nothing() {
     let mut config = config(temp_path("hostile.sock"), vec![1_234]);
     config.max_frame_bytes = 32;
 
-    let zero = exchange(1_234, config.clone(), db_path.clone(), &0_u32.to_be_bytes());
+    let zero = exchange(1_234, &config, &db_path, &0_u32.to_be_bytes());
     assert!(zero.contains(r#""status":"rejected_permanent""#));
-    let oversize = exchange(
-        1_234,
-        config.clone(),
-        db_path.clone(),
-        &33_u32.to_be_bytes(),
-    );
+    let oversize = exchange(1_234, &config, &db_path, &33_u32.to_be_bytes());
     assert!(oversize.contains(r#""reason":"frame_size""#));
-    let malformed = exchange(1_234, config.clone(), db_path.clone(), &frame(b"not-json"));
+    let malformed = exchange(1_234, &config, &db_path, &frame(b"not-json"));
     assert!(malformed.contains(r#""reason":"invalid_event""#));
 
     let health = IngestionHealth::default();
@@ -280,8 +276,8 @@ fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
 
     let ack = exchange_with_health(
         1_234,
-        config.clone(),
-        db_path.clone(),
+        &config,
+        &db_path,
         &frame(&serde_json::to_vec(&report).expect("report serializes")),
         &health,
     );
@@ -291,7 +287,7 @@ fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
         serde_json::from_str(CANONICAL_EVENT).expect("fixture parses");
     event["event_id"] = serde_json::json!("evt_health_visibility");
     let event_frame = frame(&serde_json::to_vec(&event).expect("event serializes"));
-    exchange_with_health(1_234, config, db_path.clone(), &event_frame, &health);
+    exchange_with_health(1_234, &config, &db_path, &event_frame, &health);
     let status = health.status_json(Duration::from_secs(30));
     assert_eq!(status["state"], "degraded");
     assert_eq!(status["listener_live"], true);
@@ -308,7 +304,24 @@ fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
         assert!(!serialized.contains(forbidden));
     }
 
+    thread::sleep(Duration::from_millis(2));
+    let stale = health.status_json(Duration::ZERO);
+    assert_eq!(stale["state"], "degraded");
+    assert_eq!(stale["sources"][0]["transport_state"], "stale");
+
     let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn live_listener_without_a_producer_report_does_not_claim_end_to_end_health() {
+    let health = IngestionHealth::default();
+    health.record_listener_started();
+
+    let status = health.status_json(Duration::from_secs(30));
+
+    assert_eq!(status["state"], "degraded");
+    assert_eq!(status["listener_live"], true);
+    assert_eq!(status["sources"], serde_json::json!([]));
 }
 
 #[test]
@@ -330,8 +343,8 @@ fn hostile_health_report_is_rejected_without_label_or_payload_leakage() {
 
     let ack = exchange_with_health(
         1_234,
-        config,
-        db_path,
+        &config,
+        &db_path,
         &frame(&serde_json::to_vec(&report).expect("report serializes")),
         &health,
     );
