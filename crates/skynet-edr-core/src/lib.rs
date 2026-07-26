@@ -291,6 +291,90 @@ pub struct CanonicalSpoolIngestSummary {
     pub last_processed_byte: u64,
 }
 
+/// Durable outcome returned by the continuous-ingestion transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuousIngestStatus {
+    /// The immutable event and its receipt were inserted.
+    Persisted,
+    /// The event identifier was already committed and its original payload was preserved.
+    Duplicate,
+    /// The identifier exists for another authenticated source or different payload.
+    Collision,
+}
+
+/// Summary of one atomic continuous-ingestion commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuousIngestResult {
+    /// Immutable event persistence outcome.
+    pub status: ContinuousIngestStatus,
+    /// Number of newly opened deterministic incidents.
+    pub opened_incidents: usize,
+    /// Number of indexed events evaluated for correlation.
+    pub candidate_events: usize,
+    /// Correlation was skipped because the bounded candidate set overflowed.
+    pub correlation_truncated: bool,
+    /// Maximum window derived from the validated active rules.
+    pub max_rule_window_ms: u64,
+}
+
+/// Error returned by transactional continuous ingestion.
+#[derive(Debug)]
+pub enum ContinuousIngestError {
+    /// The canonical envelope failed validation.
+    Canonical(CanonicalEventError),
+    /// The active sequence rules failed closed validation.
+    SequenceRule(SequenceRuleError),
+    /// `SQLite` persistence or indexed candidate loading failed.
+    Storage(StorageError),
+    /// The bounded indexed candidate query exceeded its configured cap.
+    CandidateLimitExceeded {
+        /// Configured maximum number of candidate events.
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for ContinuousIngestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Canonical(error) => {
+                write!(formatter, "continuous ingest canonical error: {error}")
+            }
+            Self::SequenceRule(error) => write!(formatter, "continuous ingest rule error: {error}"),
+            Self::Storage(error) => write!(formatter, "continuous ingest storage error: {error}"),
+            Self::CandidateLimitExceeded { limit } => write!(
+                formatter,
+                "continuous ingest correlation candidate limit {limit} exceeded"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ContinuousIngestError {}
+
+impl From<CanonicalEventError> for ContinuousIngestError {
+    fn from(error: CanonicalEventError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
+impl From<SequenceRuleError> for ContinuousIngestError {
+    fn from(error: SequenceRuleError) -> Self {
+        Self::SequenceRule(error)
+    }
+}
+
+impl From<StorageError> for ContinuousIngestError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<rusqlite::Error> for ContinuousIngestError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(StorageError::Sqlite(error))
+    }
+}
+
 /// Error returned when canonical JSONL spool I/O or persistence fails.
 #[derive(Debug)]
 pub enum CanonicalSpoolIngestError {
@@ -3245,6 +3329,116 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Atomically commit one immutable canonical event, derived incidents, and receipt.
+    ///
+    /// Correlation candidates are loaded only through indexed trace/session joins inside
+    /// the maximum validated rule window. Duplicate identifiers preserve their original
+    /// payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContinuousIngestError`] when validation, bounded correlation, or any
+    /// part of the `SQLite` transaction fails.
+    pub fn commit_continuous_event(
+        &self,
+        source_id: &str,
+        canonical_event: &CanonicalEventEnvelope,
+        rules: &[SequenceRule],
+        candidate_limit: usize,
+    ) -> Result<ContinuousIngestResult, ContinuousIngestError> {
+        canonical_event.validate()?;
+        if source_id.trim().is_empty() {
+            return Err(ContinuousIngestError::Canonical(
+                CanonicalEventError::Validation("ingest source_id must not be empty".to_owned()),
+            ));
+        }
+        if candidate_limit == 0 {
+            return Err(ContinuousIngestError::CandidateLimitExceeded { limit: 0 });
+        }
+        for rule in rules {
+            rule.validate()?;
+        }
+        let max_rule_window_ms = rules.iter().map(|rule| rule.window_ms).max().unwrap_or(0);
+        let event =
+            sanitize_event_for_storage(&canonical_event_to_storage_event(canonical_event.clone()));
+        let transaction = self.connection.unchecked_transaction()?;
+        let insert_status = insert_continuous_event_on_connection(
+            &transaction,
+            source_id,
+            &event,
+            canonical_event,
+        )?;
+
+        if insert_status != ContinuousIngestStatus::Persisted {
+            transaction.commit()?;
+            return Ok(ContinuousIngestResult {
+                status: insert_status,
+                opened_incidents: 0,
+                candidate_events: 0,
+                correlation_truncated: false,
+                max_rule_window_ms,
+            });
+        }
+
+        let mut candidates = load_continuous_candidates(
+            &transaction,
+            source_id,
+            canonical_event,
+            max_rule_window_ms,
+            candidate_limit,
+        )?;
+        let correlation_truncated = candidates.len() > candidate_limit;
+        candidates.truncate(candidate_limit);
+        let matches = if correlation_truncated {
+            Vec::new()
+        } else {
+            correlate_sequence_rules(rules, &candidates)?
+        };
+        let stored_events = candidates
+            .iter()
+            .cloned()
+            .map(canonical_event_to_storage_event)
+            .collect::<Vec<_>>();
+        let mut opened_incidents = 0;
+        for sequence_match in matches {
+            let incident = sanitize_incident_for_storage(&sequence_match_incident(
+                &sequence_match,
+                &stored_events,
+            ));
+            opened_incidents += insert_continuous_incident_on_connection(&transaction, &incident)?;
+        }
+        transaction.execute(
+            "INSERT INTO ingest_receipts (event_id, source_id, committed_at_unix_ms)
+             VALUES (?1, ?2, ?3)",
+            params![
+                event.id.as_str(),
+                source_id,
+                sqlite_unix_ms("ingest.receipt.committed_at_unix_ms", current_unix_ms()?)?,
+            ],
+        )?;
+        transaction.commit()?;
+
+        Ok(ContinuousIngestResult {
+            status: ContinuousIngestStatus::Persisted,
+            opened_incidents,
+            candidate_events: candidates.len(),
+            correlation_truncated,
+            max_rule_window_ms,
+        })
+    }
+
+    /// Count durable continuous-ingestion receipts without loading payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the `SQLite` count query fails.
+    pub fn count_ingest_receipts(&self) -> StorageResult<usize> {
+        self.count_rows(
+            "ingest.receipt.count",
+            "SELECT COUNT(*) FROM ingest_receipts",
+        )
+    }
+
     /// Load one event by identifier.
     ///
     /// # Errors
@@ -3403,7 +3597,27 @@ impl LocalStore {
                 payload_json TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_incidents_updated_at
-                ON incidents(updated_at_unix_ms);",
+                ON incidents(updated_at_unix_ms);
+             CREATE TABLE IF NOT EXISTS ingest_receipts (
+                event_id TEXT PRIMARY KEY NOT NULL,
+                source_id TEXT NOT NULL,
+                committed_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE RESTRICT
+             );",
+        )?;
+        ensure_nullable_column(&self.connection, "events", "event_type", "TEXT")?;
+        ensure_nullable_column(&self.connection, "events", "trace_id", "TEXT")?;
+        ensure_nullable_column(&self.connection, "events", "session_id", "TEXT")?;
+        ensure_nullable_column(&self.connection, "events", "ingest_source_id", "TEXT")?;
+        self.connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_events_trace_time
+                ON events(trace_id, observed_at_unix_ms, id);
+             CREATE INDEX IF NOT EXISTS idx_events_session_time
+                ON events(session_id, observed_at_unix_ms, id);
+             CREATE INDEX IF NOT EXISTS idx_events_ingest_source_trace_time
+                ON events(ingest_source_id, trace_id, observed_at_unix_ms, id);
+             CREATE INDEX IF NOT EXISTS idx_events_ingest_source_session_time
+                ON events(ingest_source_id, session_id, observed_at_unix_ms, id);",
         )?;
         self.normalize_legacy_incident_ids()?;
         Ok(())
@@ -3472,6 +3686,141 @@ impl LocalStore {
     }
 }
 
+fn ensure_nullable_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> StorageResult<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !names.iter().any(|name| name == column) {
+        connection.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+        ))?;
+    }
+    Ok(())
+}
+
+fn insert_continuous_event_on_connection(
+    connection: &Connection,
+    source_id: &str,
+    event: &Event,
+    canonical_event: &CanonicalEventEnvelope,
+) -> StorageResult<ContinuousIngestStatus> {
+    let payload = serde_json::to_string(event)?;
+    let severity = serde_json::to_value(event.severity)?;
+    let source_kind = serde_json::to_value(event.source.kind)?;
+    let observed_at_unix_ms =
+        sqlite_unix_ms("event.observed_at_unix_ms", event.observed_at_unix_ms)?;
+    let session_id = event_session_id(canonical_event);
+    let changed = connection.execute(
+        "INSERT INTO events (
+            id, observed_at_unix_ms, severity, source_kind, event_type, trace_id,
+            session_id, ingest_source_id, title, payload_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            event.id.as_str(),
+            observed_at_unix_ms,
+            json_string_value(&severity),
+            json_string_value(&source_kind),
+            canonical_event.event_type,
+            canonical_event.provenance.trace_id,
+            session_id,
+            source_id,
+            event.title,
+            payload,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(ContinuousIngestStatus::Persisted);
+    }
+    let (existing_source, existing_payload) = connection.query_row(
+        "SELECT ingest_source_id, payload_json FROM events WHERE id = ?1",
+        params![event.id.as_str()],
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    if existing_source.as_deref() == Some(source_id) && existing_payload == payload {
+        Ok(ContinuousIngestStatus::Duplicate)
+    } else {
+        Ok(ContinuousIngestStatus::Collision)
+    }
+}
+
+fn load_continuous_candidates(
+    connection: &Connection,
+    source_id: &str,
+    event: &CanonicalEventEnvelope,
+    max_rule_window_ms: u64,
+    candidate_limit: usize,
+) -> Result<Vec<CanonicalEventEnvelope>, ContinuousIngestError> {
+    let lower = event.observed_at_unix_ms.saturating_sub(max_rule_window_ms);
+    let upper = event.observed_at_unix_ms.saturating_add(max_rule_window_ms);
+    let trace_id = event.provenance.trace_id.as_deref();
+    let session_id = event_session_id(event);
+    let query_limit = candidate_limit.saturating_add(1);
+    let mut statement = connection.prepare(
+        "SELECT payload_json FROM events
+         WHERE ingest_source_id = ?1
+           AND observed_at_unix_ms BETWEEN ?2 AND ?3
+           AND ((?4 IS NOT NULL AND trace_id = ?4)
+             OR (?5 IS NOT NULL AND session_id = ?5)
+             OR id = ?6)
+         ORDER BY observed_at_unix_ms ASC, id ASC
+         LIMIT ?7",
+    )?;
+    let stored_events = collect_payload_rows::<Event, _>(
+        &mut statement,
+        params![
+            source_id,
+            sqlite_unix_ms("ingest.candidate.lower", lower)?,
+            sqlite_unix_ms("ingest.candidate.upper", upper)?,
+            trace_id,
+            session_id,
+            event.event_id.as_str(),
+            sqlite_usize("ingest.candidate.limit", query_limit)?,
+        ],
+    )?;
+    stored_events
+        .iter()
+        .map(storage_event_to_canonical_event)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            ContinuousIngestError::Canonical(CanonicalEventError::Validation(
+                "continuous ingest candidate could not be reconstructed".to_owned(),
+            ))
+        })
+}
+
+fn insert_continuous_incident_on_connection(
+    connection: &Connection,
+    incident: &Incident,
+) -> StorageResult<usize> {
+    let payload = serde_json::to_string(incident)?;
+    let severity = serde_json::to_value(incident.severity)?;
+    let status = serde_json::to_value(incident.status)?;
+    connection
+        .execute(
+            "INSERT INTO incidents (
+                id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                incident.id.as_str(),
+                sqlite_unix_ms("incident.created_at_unix_ms", incident.created_at_unix_ms)?,
+                sqlite_unix_ms("incident.updated_at_unix_ms", incident.updated_at_unix_ms)?,
+                json_string_value(&status),
+                json_string_value(&severity),
+                incident.title,
+                payload,
+            ],
+        )
+        .map_err(StorageError::from)
+}
+
 fn insert_event_on_connection(connection: &Connection, event: &Event) -> StorageResult<()> {
     let payload = serde_json::to_string(event)?;
     let severity = serde_json::to_value(event.severity)?;
@@ -3537,6 +3886,21 @@ fn insert_incident_on_connection(
 
 fn sqlite_unix_ms(field: &'static str, value: u64) -> StorageResult<i64> {
     i64::try_from(value).map_err(|_| StorageError::IntegerOutOfRange { field, value })
+}
+
+fn current_unix_ms() -> StorageResult<u64> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            StorageError::Io(std::io::Error::other(format!(
+                "system clock precedes Unix epoch: {error}"
+            )))
+        })?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| StorageError::IntegerOutOfRange {
+        field: "ingest.receipt.committed_at_unix_ms",
+        value: u64::MAX,
+    })
 }
 
 fn sqlite_usize(field: &'static str, value: usize) -> StorageResult<i64> {
