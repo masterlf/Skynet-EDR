@@ -101,6 +101,8 @@
     expected_disposition: new Set(["benign", "suspicious", "malicious", "unknown"]),
     drift_kind: new Set(["changed", "created", "deleted"]),
   };
+  const MIN_WIDTH_ZERO_STYLE = { minWidth: 0 };
+  const WRAP_ANYWHERE_STYLE = { minWidth: 0, overflowWrap: "anywhere", wordBreak: "break-word" };
 
   function isPlainObject(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -522,13 +524,16 @@
 
   function RiskRow(props) {
     const risk = props.risk;
+    const buttonProps = {
+      type: "button",
+      ref: props.buttonRef,
+      onClick: props.onSelect,
+      "aria-expanded": props.selected,
+      className: "grid w-full gap-2 p-4 text-left hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " + (props.selected ? "bg-muted" : ""),
+    };
+    if (props.selected) buttonProps["aria-controls"] = "skynet-risk-detail-panel";
     return h("li", { className: "border-b last:border-b-0" },
-      h("button", {
-        type: "button",
-        onClick: props.onSelect,
-        "aria-pressed": props.selected,
-        className: "grid w-full gap-2 p-4 text-left hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " + (props.selected ? "bg-muted" : ""),
-      },
+      h("button", buttonProps,
         h("span", { className: "flex flex-wrap items-start justify-between gap-2" },
           h("span", { className: "font-semibold" }, risk.title),
           h(Badge, { variant: severityVariant(risk.severity) }, labelFor(risk.severity))
@@ -551,7 +556,7 @@
       h(CardContent, { className: "p-0" },
         h("ul", { "aria-label": "Current page risk list", className: "max-h-[65vh] overflow-y-auto" },
           props.items.map(function (risk) {
-            return h(RiskRow, { key: risk.id, risk: risk, selected: props.selectedId === risk.id, onSelect: function () { props.onSelect(risk.id); } });
+            return h(RiskRow, { key: risk.id, risk: risk, selected: props.selectedId === risk.id, buttonRef: function (node) { props.setButtonRef(risk.id, node); }, onSelect: function () { props.onSelect(risk.id); } });
           })
         )
       )
@@ -559,17 +564,17 @@
   }
 
   function DefinitionBlock(props) {
-    return h("section", { className: "rounded-lg border bg-muted/30 p-3" },
+    return h("section", { className: "rounded-lg border bg-muted/30 p-3", style: MIN_WIDTH_ZERO_STYLE },
       h("h4", { className: "mb-2 text-sm font-semibold" }, props.title),
-      h("dl", { className: "grid text-sm", style: { rowGap: "0.375rem" } },
+      h("dl", { className: "grid text-sm", style: { minWidth: 0, rowGap: "0.375rem" } },
         props.rows.map(function (row) {
           return h("div", {
             key: row[0],
             className: "grid",
-            style: { gridTemplateColumns: "7rem minmax(0, 1fr)", alignItems: "baseline", columnGap: "0.75rem" },
+            style: { minWidth: 0, gridTemplateColumns: "7rem minmax(0, 1fr)", alignItems: "baseline", columnGap: "0.75rem" },
           },
             h("dt", { className: "text-muted-foreground", style: { whiteSpace: "nowrap" } }, row[0]),
-            h("dd", { className: "m-0", style: { minWidth: 0, overflowWrap: "anywhere" } }, row[1])
+            h("dd", { className: "m-0", style: WRAP_ANYWHERE_STYLE }, row[1])
           );
         })
       )
@@ -577,21 +582,21 @@
   }
 
   function EvidenceTimeline(props) {
-    return h("section", { "aria-labelledby": "skynet-evidence-heading" },
+    return h("section", { "aria-labelledby": "skynet-evidence-heading", style: MIN_WIDTH_ZERO_STYLE },
       h("h4", { id: "skynet-evidence-heading", className: "mb-3 text-sm font-semibold" }, "Evidence timeline"),
       props.evidence.length === 0
         ? h("p", { className: "text-sm text-muted-foreground" }, "No bounded evidence entries returned for this risk.")
-        : h("ol", { className: "grid gap-3" }, props.evidence.map(function (event) {
+        : h("ol", { className: "grid min-w-0 gap-3", style: MIN_WIDTH_ZERO_STYLE }, props.evidence.map(function (event) {
           const badges = indicatorBadges(event.indicators);
-          return h("li", { key: event.event_id, className: "rounded-lg border bg-card p-3" },
-            h("div", { className: "flex flex-wrap items-start justify-between gap-2" },
-              h("div", null,
-                h("div", { className: "font-medium" }, event.title),
-                h("div", { className: "mt-1 text-xs text-muted-foreground" }, formatTime(event.timestamp_unix_ms) + " · event " + event.event_id)
+          return h("li", { key: event.event_id, className: "rounded-lg border bg-card p-3", style: MIN_WIDTH_ZERO_STYLE },
+            h("div", { className: "flex min-w-0 flex-wrap items-start justify-between gap-2", style: MIN_WIDTH_ZERO_STYLE },
+              h("div", { className: "min-w-0", style: MIN_WIDTH_ZERO_STYLE },
+                h("div", { className: "font-medium", style: WRAP_ANYWHERE_STYLE }, event.title),
+                h("div", { className: "mt-1 text-xs text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, formatTime(event.timestamp_unix_ms) + " · event " + event.event_id)
               ),
               h(Badge, { variant: severityVariant(event.severity) }, labelFor(event.severity))
             ),
-            h("div", { className: "mt-2 flex flex-wrap gap-2" },
+            h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
               h(SourceBadge, { kind: event.artifact.kind }),
               h(Badge, { variant: "outline" }, "Type " + displayText(event.event_type)),
               h(Badge, { variant: "outline" }, "Trust " + labelFor(event.trust_level)),
@@ -600,7 +605,7 @@
                 return h(Badge, { key: label, variant: "secondary" }, label);
               })
             ),
-            h("p", { className: "mt-2 text-xs text-muted-foreground" },
+            h("p", { className: "mt-2 text-xs text-muted-foreground", style: WRAP_ANYWHERE_STYLE },
               "Rule " + displayText(event.rule_id, "none") + " · sensor " + event.sensor.kind + "/" + event.sensor.sensor + " · integration " + displayText(event.sensor.integration, "none")
             )
           );
@@ -610,62 +615,73 @@
 
   function RiskDetail(props) {
     const resource = props.resource;
+    function panel(title, badges, body) {
+      return h(Card, { id: "skynet-risk-detail-panel", role: "region", "aria-labelledby": "skynet-risk-detail-heading", className: "min-w-0" },
+        h(CardHeader, null,
+          h("div", { className: "flex flex-wrap items-start justify-between gap-2" },
+            h(CardTitle, { id: "skynet-risk-detail-heading", className: "text-lg" }, title),
+            h("div", { className: "flex flex-wrap gap-2" },
+              badges,
+              h(Button, { type: "button", variant: "outline", onClick: props.onClose, "aria-label": "Close selected risk detail" }, "Close detail")
+            )
+          )
+        ),
+        body
+      );
+    }
     if (resource.loading && resource.data === null) {
-      return h(StateCard, { title: "Loading risk detail", description: "Loading the selected read-only projection." });
+      return panel("Loading risk detail", null, h(CardContent, null,
+        h("p", { className: "text-sm text-muted-foreground" }, "Loading the selected read-only projection.")
+      ));
     }
     if (resource.error && resource.data === null) {
-      return h(StateCard, { role: "alert", live: "assertive", title: "Unable to load risk detail", description: "The read-only backend did not return a valid risk detail." });
+      return panel("Unable to load risk detail", null, h(CardContent, null,
+        h("p", { role: "alert", "aria-live": "assertive", className: "text-sm text-muted-foreground" }, "The read-only backend did not return a valid risk detail.")
+      ));
     }
     const risk = resource.data;
     if (!risk) return null;
-    return h(Card, { className: "min-w-0", "aria-label": "Risk detail" },
-      h(CardHeader, null,
-        h("div", { className: "flex flex-wrap items-start justify-between gap-2" },
-          h(CardTitle, { className: "text-lg" }, risk.title),
-          h("div", { className: "flex flex-wrap gap-2" },
-            h(SourceBadge, { kind: risk.artifact.kind }),
-            h(Badge, { variant: severityVariant(risk.severity) }, labelFor(risk.severity)),
-            h(Badge, { variant: statusVariant(risk.status) }, labelFor(risk.status))
-          )
+    return panel(risk.title, [
+      h(SourceBadge, { key: "source", kind: risk.artifact.kind }),
+      h(Badge, { key: "severity", variant: severityVariant(risk.severity) }, labelFor(risk.severity)),
+      h(Badge, { key: "status", variant: statusVariant(risk.status) }, labelFor(risk.status)),
+    ], h(CardContent, { className: "grid min-w-0 gap-4", style: MIN_WIDTH_ZERO_STYLE },
+      resource.error ? h("div", { role: "status", "aria-live": "polite", className: "rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm" }, "Stale detail: the latest refresh is unavailable; cached validated detail remains visible.") : null,
+      h("p", { className: "text-sm text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, risk.summary),
+      h("section", { "aria-label": "Passive read-only context", className: "rounded-lg border p-3", style: MIN_WIDTH_ZERO_STYLE },
+        h("h4", { className: "text-sm font-semibold" }, "Passive read-only context"),
+        h("p", { className: "mt-1 text-sm text-muted-foreground" }, "This Web Dashboard view displays only validated redacted API projections. It provides refresh and navigation, never containment or mutation controls."),
+        h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
+          h(Badge, { variant: "outline" }, "Confidence: Not assessed"),
+          h(Badge, { variant: risk.contains_sensitive_data ? "destructive" : "secondary" }, risk.contains_sensitive_data ? "Sensitive data redacted" : "No sensitive flag"),
+          h(Badge, { variant: "secondary" }, "Events " + countText(risk.event_count))
         )
       ),
-      h(CardContent, { className: "grid gap-4" },
-        resource.error ? h("div", { role: "status", "aria-live": "polite", className: "rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm" }, "Stale detail: the latest refresh is unavailable; cached validated detail remains visible.") : null,
-        h("p", { className: "text-sm text-muted-foreground" }, risk.summary),
-        h("section", { "aria-label": "Passive read-only context", className: "rounded-lg border p-3" },
-          h("h4", { className: "text-sm font-semibold" }, "Passive read-only context"),
-          h("p", { className: "mt-1 text-sm text-muted-foreground" }, "This Web Dashboard view displays only validated redacted API projections. It provides refresh and navigation, never containment or mutation controls."),
-          h("div", { className: "mt-2 flex flex-wrap gap-2" },
-            h(Badge, { variant: "outline" }, "Confidence: Not assessed"),
-            h(Badge, { variant: risk.contains_sensitive_data ? "destructive" : "secondary" }, risk.contains_sensitive_data ? "Sensitive data redacted" : "No sensitive flag"),
-            h(Badge, { variant: "secondary" }, "Events " + countText(risk.event_count))
-          )
-        ),
-        h("div", { className: "grid gap-3 xl:grid-cols-2" },
-          h(DefinitionBlock, { title: "Artifact provenance", rows: [
-            ["Kind", labelFor(risk.artifact.kind)],
-            ["Label", risk.artifact.display_label],
-            ["Provider", displayText(risk.artifact.provider, "none")],
-            ["Trust", labelFor(risk.artifact.trust_level)],
-          ] }),
-          h(DefinitionBlock, { title: "Sensor provenance", rows: [
-            ["Kind", labelFor(risk.sensor.kind)],
-            ["Sensor", risk.sensor.sensor],
-            ["Integration", displayText(risk.sensor.integration, "none")],
-            ["First observed", formatTime(risk.first_observed_at_unix_ms)],
-            ["Last observed", formatTime(risk.last_observed_at_unix_ms)],
-          ] })
-        ),
-        h("section", { "aria-labelledby": "skynet-traces-heading" },
-          h("h4", { id: "skynet-traces-heading", className: "mb-2 text-sm font-semibold" }, "Trace IDs"),
-          risk.trace_ids.length
-            ? h("div", { className: "flex flex-wrap gap-2" }, risk.trace_ids.map(function (trace) { return h(Badge, { key: trace, variant: "outline" }, trace); }))
-            : h("p", { className: "text-sm text-muted-foreground" }, "No trace IDs in this bounded projection.")
-        ),
-        h(Separator, null),
-        h(EvidenceTimeline, { evidence: risk.evidence })
-      )
-    );
+      h("div", { className: "grid min-w-0 gap-3 xl:grid-cols-2", style: MIN_WIDTH_ZERO_STYLE },
+        h(DefinitionBlock, { title: "Artifact provenance", rows: [
+          ["Kind", labelFor(risk.artifact.kind)],
+          ["Label", risk.artifact.display_label],
+          ["Provider", displayText(risk.artifact.provider, "none")],
+          ["Trust", labelFor(risk.artifact.trust_level)],
+        ] }),
+        h(DefinitionBlock, { title: "Sensor provenance", rows: [
+          ["Kind", labelFor(risk.sensor.kind)],
+          ["Sensor", risk.sensor.sensor],
+          ["Integration", displayText(risk.sensor.integration, "none")],
+          ["First observed", formatTime(risk.first_observed_at_unix_ms)],
+          ["Last observed", formatTime(risk.last_observed_at_unix_ms)],
+        ] })
+      ),
+      h("section", { "aria-labelledby": "skynet-traces-heading", style: MIN_WIDTH_ZERO_STYLE },
+        h("h4", { id: "skynet-traces-heading", className: "mb-2 text-sm font-semibold" }, "Trace IDs"),
+        risk.trace_ids.length
+          ? h("div", { className: "flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE }, risk.trace_ids.map(function (trace) { return h(Badge, { key: trace, variant: "outline", style: WRAP_ANYWHERE_STYLE }, trace); }))
+          : h("p", { className: "text-sm text-muted-foreground" }, "No trace IDs in this bounded projection.")
+      ),
+      h(Separator, null),
+      h(EvidenceTimeline, { evidence: risk.evidence })
+    ));
+
   }
 
   function backendHealth(status, page) {
@@ -683,6 +699,7 @@
     const [severity, setSeverity] = useState("all");
     const [statusFilter, setStatusFilter] = useState("all");
     const [artifactKind, setArtifactKind] = useState("all");
+    const rowRefs = useRef(Object.create(null));
 
     const statusLoader = useCallback(function () {
       return SDK.fetchJSON(statusPath()).then(validateStatus);
@@ -704,6 +721,41 @@
     const visibleItems = useMemo(function () {
       return filterRisks(pageItems, { search: search, severity: severity, status: statusFilter, artifactKind: artifactKind });
     }, [pageItems, search, severity, statusFilter, artifactKind]);
+
+    const setButtonRef = useCallback(function (id, node) {
+      if (node) {
+        rowRefs.current[id] = node;
+      } else {
+        delete rowRefs.current[id];
+      }
+    }, []);
+
+    const focusRiskRow = useCallback(function (id) {
+      const node = id ? rowRefs.current[id] : null;
+      if (!node || typeof node.focus !== "function") return;
+      if (typeof document !== "undefined" && document && typeof document.contains === "function" && !document.contains(node)) return;
+      node.focus();
+    }, []);
+
+    const closeSelectedDetail = useCallback(function () {
+      const closedId = selectedId;
+      if (!closedId) return;
+      setSelectedId(null);
+      focusRiskRow(closedId);
+    }, [focusRiskRow, selectedId]);
+
+    useEffect(function () {
+      if (!selectedId || typeof document === "undefined" || !document || typeof document.addEventListener !== "function") return undefined;
+      function onKeyDown(event) {
+        if (!event || event.key !== "Escape") return;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        closeSelectedDetail();
+      }
+      document.addEventListener("keydown", onKeyDown);
+      return function () {
+        if (typeof document.removeEventListener === "function") document.removeEventListener("keydown", onKeyDown);
+      };
+    }, [closeSelectedDetail, selectedId]);
 
     function resetForFilter(setter, value) {
       setter(value);
@@ -769,9 +821,9 @@
       noServerRows ? h(StateCard, { title: "No risks recorded", description: "The current server page contains no risk projections." }) : null,
       noFilterRows ? h(StateCard, { title: "No current-page matches", description: "Risks exist on this server page, but none match the active filters." }) : null,
       risks.data && visibleItems.length > 0 ? h("div", { className: "grid min-w-0 gap-4 xl:grid-cols-[minmax(20rem,0.85fr)_minmax(24rem,1.15fr)]" },
-        h(RiskList, { items: visibleItems, selectedId: selectedId, onSelect: setSelectedId }),
+        h(RiskList, { items: visibleItems, selectedId: selectedId, setButtonRef: setButtonRef, onSelect: function (id) { setSelectedId(function (current) { return current === id ? null : id; }); } }),
         selectedId
-          ? h(RiskDetail, { resource: detail })
+          ? h(RiskDetail, { resource: detail, onClose: closeSelectedDetail })
           : h(StateCard, { title: "Select a risk", description: "Inspect its read-only context, source-aware provenance, traces and evidence timeline." })
       ) : null
     );
