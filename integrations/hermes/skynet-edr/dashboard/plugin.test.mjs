@@ -85,6 +85,7 @@ function createHarness(plans = {}) {
   const intervals = [];
   const calls = [];
   const registrations = [];
+  const listeners = new Map();
   let hookIndex = 0;
   let component;
 
@@ -172,6 +173,11 @@ function createHarness(plans = {}) {
       return record;
     },
     clearInterval(record) { if (record) record.active = false; },
+    document: {
+      addEventListener(type, callback) { listeners.set(type, callback); },
+      removeEventListener(type, callback) { if (listeners.get(type) === callback) listeners.delete(type); },
+      contains(node) { return Boolean(node && node.visible !== false); },
+    },
     window: {
       __HERMES_PLUGIN_SDK__: { React, hooks, components, fetchJSON },
       __HERMES_PLUGINS__: {
@@ -211,7 +217,13 @@ function createHarness(plans = {}) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 
-  return { calls, registrations, intervals, render, flushEffects, runInterval };
+  function dispatchDocument(type, event) {
+    const listener = listeners.get(type);
+    assert.equal(typeof listener, 'function', `missing document listener: ${type}`);
+    listener(event);
+  }
+
+  return { calls, registrations, intervals, render, flushEffects, runInterval, dispatchDocument };
 }
 
 function childrenOf(node) {
@@ -353,6 +365,104 @@ test('renders source-aware list, detail provenance and evidence timeline as text
   assert.ok(harness.calls.some((args) => args[0] === '/api/plugins/skynet-edr/risks/inc%2Fopaque'));
 });
 
+test('risk rows expose expanded state and selected row click toggles detail closed', async () => {
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/risks/risk-1': canonicalDetail(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  let tree = harness.render();
+  let row = findButton(tree, 'MCP network activity');
+  assert.equal(row.props['aria-expanded'], false);
+  assert.equal(row.props['aria-controls'], undefined);
+
+  row.props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  tree = harness.render();
+  row = findButton(tree, 'MCP network activity');
+  assert.equal(row.props['aria-expanded'], true);
+  assert.equal(row.props['aria-controls'], 'skynet-risk-detail-panel');
+  const panel = findNode(tree, (node) => node.props?.id === 'skynet-risk-detail-panel', 'risk detail panel');
+  assert.equal(panel.props.role, 'region');
+  assert.equal(panel.props['aria-labelledby'], 'skynet-risk-detail-heading');
+  findNode(panel, (node) => node.props?.id === 'skynet-risk-detail-heading', 'risk detail heading');
+
+  row.props.onClick();
+  tree = harness.render();
+  assert.doesNotMatch(textOf(tree), /Artifact provenance/);
+  assert.equal(findButton(tree, 'MCP network activity').props['aria-expanded'], false);
+  assert.equal(findButton(tree, 'MCP network activity').props['aria-controls'], undefined);
+});
+
+test('visible close detail button collapses detail and returns focus to selected row', async () => {
+  let focusCount = 0;
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/risks/risk-1': canonicalDetail(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  findButton(harness.render(), 'MCP network activity').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  let tree = harness.render();
+  const row = findButton(tree, 'MCP network activity');
+  row.props.ref({ focus() { focusCount += 1; } });
+  const close = findButton(tree, 'Close detail');
+  assert.equal(close.props['aria-label'], 'Close selected risk detail');
+  close.props.onClick();
+  tree = harness.render();
+  assert.doesNotMatch(textOf(tree), /Artifact provenance/);
+  assert.equal(focusCount, 1);
+});
+
+test('close detail does not focus a row after its callback ref unmounts', async () => {
+  let focusCount = 0;
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/risks/risk-1': canonicalDetail(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  findButton(harness.render(), 'MCP network activity').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  const tree = harness.render();
+  const row = findButton(tree, 'MCP network activity');
+  row.props.ref({ focus() { focusCount += 1; } });
+  row.props.ref(null);
+  findButton(tree, 'Close detail').props.onClick();
+  assert.equal(focusCount, 0);
+});
+
+test('Escape collapses selected detail and returns focus to the visible row', async () => {
+  let focusCount = 0;
+  let prevented = false;
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/risks/risk-1': canonicalDetail(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  findButton(harness.render(), 'MCP network activity').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  let tree = harness.render();
+  const row = findButton(tree, 'MCP network activity');
+  row.props.ref({ focus() { focusCount += 1; } });
+  harness.dispatchDocument('keydown', { key: 'Escape', preventDefault() { prevented = true; } });
+  tree = harness.render();
+  assert.doesNotMatch(textOf(tree), /Artifact provenance/);
+  assert.equal(prevented, true);
+  assert.equal(focusCount, 1);
+});
+
 test('renders provenance definitions as compact label-value rows', async () => {
   const risk = canonicalRisk('compact-risk');
   const harness = createHarness({
@@ -387,6 +497,62 @@ test('renders provenance definitions as compact label-value rows', async () => {
       assert.equal(cells[1].props.style.overflowWrap, 'anywhere');
     }
   }
+});
+
+test('detail timeline and hostile long identifiers release intrinsic width and wrap deterministically', async () => {
+  const trace = 'trace-' + 'a'.repeat(122);
+  const eventId = 'evt-' + 'b'.repeat(124);
+  const risk = canonicalRisk('wrap-risk');
+  risk.trace_ids = [trace];
+  const detail = canonicalDetail('wrap-risk');
+  detail.trace_ids = [trace];
+  detail.evidence[0].event_id = eventId;
+  detail.evidence[0].sensor.sensor = 'sensor-' + 'c'.repeat(121);
+  detail.evidence[0].sensor.integration = 'integration-' + 'd'.repeat(116);
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items: [risk] }),
+    '/api/plugins/skynet-edr/risks/wrap-risk': detail,
+  });
+  harness.render();
+  await harness.flushEffects();
+  findButton(harness.render(), 'MCP network activity').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  const tree = harness.render();
+  const panel = findNode(tree, (node) => node.props?.id === 'skynet-risk-detail-panel', 'risk detail panel');
+  const content = findNode(panel, (node) => node.type === 'CardContent' && textOf(node).includes(eventId), 'risk detail content');
+  assert.equal(content.props.className, 'grid min-w-0 gap-4');
+  assert.equal(content.props.style.minWidth, 0);
+
+  const traceSection = findNode(panel, (node) => node.type === 'section' && node.props?.['aria-labelledby'] === 'skynet-traces-heading', 'trace section');
+  assert.equal(traceSection.props.style.minWidth, 0);
+  const traceList = findNode(traceSection, (node) => node.type === 'div' && textOf(node).includes(trace), 'trace badge list');
+  assert.equal(traceList.props.style.minWidth, 0);
+  const traceBadge = findNode(traceList, (node) => node.type === 'Badge' && textOf(node).includes(trace), 'trace badge');
+  assert.equal(traceBadge.props.style.minWidth, 0);
+  assert.equal(traceBadge.props.style.overflowWrap, 'anywhere');
+  assert.equal(traceBadge.props.style.wordBreak, 'break-word');
+
+  const timeline = findNode(panel, (node) => node.type === 'section' && node.props?.['aria-labelledby'] === 'skynet-evidence-heading', 'evidence timeline');
+  assert.equal(timeline.props.style.minWidth, 0);
+  const list = findNode(timeline, (node) => node.type === 'ol', 'timeline list');
+  assert.equal(list.props.className, 'grid min-w-0 gap-3');
+  assert.equal(list.props.style.minWidth, 0);
+  const item = findNode(list, (node) => node.type === 'li' && textOf(node).includes(eventId), 'timeline item');
+  assert.equal(item.props.style.minWidth, 0);
+  const meta = findNode(
+    item,
+    (node) => node.type === 'div' && node.props?.className === 'mt-1 text-xs text-muted-foreground' && textOf(node).includes('event ' + eventId),
+    'timeline event id metadata',
+  );
+  assert.equal(meta.props.style.minWidth, 0);
+  assert.equal(meta.props.style.overflowWrap, 'anywhere');
+  assert.equal(meta.props.style.wordBreak, 'break-word');
+  const provenance = findNode(item, (node) => node.type === 'p' && textOf(node).includes('sensor mcp_tool/'), 'timeline provenance metadata');
+  assert.equal(provenance.props.style.minWidth, 0);
+  assert.equal(provenance.props.style.overflowWrap, 'anywhere');
+  assert.equal(provenance.props.style.wordBreak, 'break-word');
 });
 
 test('renders every allowlisted source kind with fixed source-aware text', async () => {
