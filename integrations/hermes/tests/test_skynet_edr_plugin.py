@@ -313,6 +313,10 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                 return ack
 
         fake = FakeSocket()
+        with self.plugin._lock:
+            self.plugin._transport_counters["queue_drops"] = 1
+            self.plugin._transport_counters["socket_failures"] = 1
+            self.plugin._transport_counters["fallback_full"] = 1
         with patch.object(self.plugin.socket, "socket", return_value=fake):
             self.assertTrue(self.plugin._send_health_report())
         declared = int.from_bytes(fake.sent[:4], "big")
@@ -321,9 +325,21 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(body["message_type"], "producer_health")
         self.assertEqual(body["checkpoint_bytes"], 4)
         self.assertEqual(body["backlog_bytes"], fallback.stat().st_size - 4)
+        self.assertEqual(body["transport_state"], "degraded")
         serialized = json.dumps(body)
         self.assertNotIn(str(self.state_dir), serialized)
         self.assertLess(len(fake.sent), 4096)
+
+        (self.state_dir / "events-v1.offset").write_text(
+            str(fallback.stat().st_size), encoding="ascii"
+        )
+        recovered = FakeSocket()
+        with patch.object(self.plugin.socket, "socket", return_value=recovered):
+            self.assertTrue(self.plugin._send_health_report())
+        recovered_body = json.loads(recovered.sent[4:])
+        self.assertEqual(recovered_body["backlog_bytes"], 0)
+        self.assertEqual(recovered_body["transport_state"], "available")
+        self.assertEqual(recovered_body["events_dropped_total"], 2)
 
     def test_fallback_state_lock_serializes_processes(self):
         context = multiprocessing.get_context("spawn")

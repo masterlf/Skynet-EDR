@@ -442,9 +442,9 @@ def _send_health_report() -> bool:
                 backlog_age_ms = max(0, int((time.time() - path.stat().st_mtime) * 1000))
         with _lock:
             counters = dict(_transport_counters)
-        degraded = backlog > 0 or any(
-            counters[name] > 0 for name in ("queue_drops", "socket_failures", "fallback_full")
-        )
+        # Cumulative counters remain visible for audit, but current transport health must
+        # recover after a transient failure once the durable backlog is fully drained.
+        degraded = backlog > 0
         payload = json.dumps(
             {
                 "version": 1,
