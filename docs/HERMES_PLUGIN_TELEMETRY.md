@@ -84,7 +84,7 @@ Telemetry events now include optional safe artifact metadata when derivable. Lab
 ~/.local/state/skynet-edr/hermes/skynet-edr-plugin.log
 ```
 
-Both are created as private user files where the platform allows chmod.
+The fallback, checkpoint, lock, and log are created as private user state where the platform supports the required ownership and mode checks. The versioned fallback is not the legacy unversioned `events.jsonl`.
 
 ## Logging
 
@@ -151,6 +151,8 @@ socket_group = "skynet-edr-ingest"
 allowed_uids = [1000] # replace with the reviewed producer UID
 allow_root = false
 ```
+
+The worker replays only its producer-owned `events-v1.jsonl`, in order, and advances `events-v1.offset` only after a versioned terminal ACK for the matching event ID. The daemon never polls producer homes or the historical `events.jsonl`. Queue, socket, and fallback failures are bounded but can drop newest telemetry; they do not block Hermes. For enrollment, counter semantics, backlog measurement, failure/restart behavior, the harmless canary, and rollback, use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
 
 ## Security boundaries
 

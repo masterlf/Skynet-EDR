@@ -184,7 +184,7 @@ skynet-edr events ingest-spool \
 ```
 
 See [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) for the hook model,
-logging guarantees, environment variables, and daemon polling caveats.
+logging guarantees, and environment variables. Use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations) for the authoritative enrollment, socket/UID boundary, health counters, fallback policy, canary, restart, and rollback runbook.
 
 ## Install from `.rpm` on RHEL-compatible Linux or Fedora
 
@@ -394,4 +394,4 @@ Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default
 
 ## Current limitation
 
-The repository has a daemon skeleton but not a production long-running service loop yet. Packaging assets are intentionally conservative and should remain passive/read-only until the daemon runtime and sensor privilege model are implemented and tested.
+The packaged daemon now has a passive long-running loop, a loopback read-only API, and authenticated bounded AF_UNIX ingestion. It still has no privileged sensor or guard-mode enforcement path. Continuous ingestion is Linux-only, the ingestion accept thread is not independently supervised, and the shipped Hermes producer leaves several implemented canonical rules dark; use the [coverage matrix](DETECTIONS.md#rule-to-producer-coverage-matrix) rather than inferring coverage from rule presence.

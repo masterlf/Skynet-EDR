@@ -15,7 +15,7 @@ The current MVP is passive and Linux-first. It emphasizes redacted local evidenc
 | CLI | Local operator commands | [Local storage and CLI](LOCAL_STORAGE.md) |
 | SQLite store | Local event and incident persistence | [Local storage and CLI](LOCAL_STORAGE.md#sqlite-store) |
 | Daemon/service | Passive runtime path | [Install](INSTALL.md#what-is-installed) |
-| AF_UNIX ingestion | Authenticated, bounded producer transport | [Hermes plugin telemetry](../integrations/hermes/skynet-edr/README.md#continuous-ingestion-authorization) |
+| AF_UNIX ingestion | Authenticated, bounded producer transport | [Continuous ingestion operations](#continuous-ingestion-operations) |
 | Local HTTP API | Localhost-only read-only visibility | [Local read-only HTTP API and console](LOCAL_HTTP_API.md) |
 | MCP server | Read-only visibility for agent runtimes | [Read-only MCP integration](MCP_READ_ONLY.md) |
 
@@ -40,6 +40,167 @@ skynet-edr diagnostics collect --output ./skynet-edr-diagnostics
 The doctor command intentionally does not require `rules.d` or `agents.d` directories. Those directories may exist in package layouts for future policy/adaptor drops, but current readiness is based on config, store, and local daemon/API or plugin-spool availability.
 
 `skynet-edr diagnostics collect` creates a private bundle directory (`0700`) and writes private files (`0600`). By default it includes versions, a redacted config summary, and store counts only; it does not export raw events or create a missing database. Operator-supplied logs or service status can be added with `--log-file` and `--service-status-file`; their contents are redacted before writing.
+
+## Continuous ingestion operations
+
+The packaged continuous path accepts one length-prefixed `skynet.event.v0` event per authenticated AF_UNIX connection. It is passive: a successful transaction stores the redacted event, evaluates the built-in canonical sequence rules, stores any resulting incidents and a receipt, then returns a versioned acknowledgement. It is not guard mode and never approves, delays, blocks, or rewrites an agent action.
+
+### Deploy and enroll a producer
+
+The package creates the `skynet-edr` service account, the `skynet-edr-ingest` group, and `/run/skynet-edr-ingest` as `0750 skynet-edr:skynet-edr-ingest`. The daemon creates `ingest.sock` as `0660`, owned by the daemon and assigned to the configured socket group. Two independent checks are required:
+
+1. socket directory/file DAC: the producer must be a member of `skynet-edr-ingest`;
+2. peer authentication: the producer's numeric UID must appear in `ingest.allowed_uids`.
+
+Group membership alone does not authorize ingestion. UID `0` is rejected even if listed in `allowed_uids`; root requires the separate, explicitly reviewed `allow_root = true` setting.
+
+For each reviewed Hermes account, record its stable numeric UID, add the account to the socket group, and update `/etc/skynet-edr/config.toml`:
+
+```bash
+id hermes-user
+sudo usermod -aG skynet-edr-ingest hermes-user
+```
+
+```toml
+[ingest]
+enabled = true
+socket = "/run/skynet-edr-ingest/ingest.sock"
+socket_group = "skynet-edr-ingest"
+allowed_uids = [1000] # reviewed numeric producer UID; do not copy blindly
+allow_root = false
+max_frame_bytes = 262144
+max_connections = 16
+read_timeout_ms = 1000
+write_timeout_ms = 1000
+candidate_limit = 2048
+```
+
+Restart the producer's login session so its supplementary groups are refreshed, then restart the daemon during an approved maintenance window. This runbook documents those actions; it does not authorize an unattended service restart.
+
+Verify the effective boundary without reading producer data:
+
+```bash
+getent group skynet-edr-ingest
+id hermes-user
+stat -c '%U %G %a %n' /run/skynet-edr-ingest /run/skynet-edr-ingest/ingest.sock
+sudo -u hermes-user test -S /run/skynet-edr-ingest/ingest.sock
+```
+
+Expected packaged ownership/modes are `skynet-edr:skynet-edr-ingest 750` for the directory and `skynet-edr:skynet-edr-ingest 660` for the socket. Startup fails closed instead of replacing a symlink, a non-socket, an active listener, or a stale socket owned by another UID.
+
+### Health, counters, and backlog lag
+
+When the local read-only API is enabled, `GET /api/status` includes an `ingestion` object. `state` is `disabled` when no listener was started, `healthy` when the listener has not observed a degrading condition, and `degraded` after a storage error, frame timeout, correlation truncation, capacity rejection, listener error, or peer-credential error.
+
+```bash
+curl --fail --silent http://127.0.0.1:8787/api/status
+```
+
+The object exposes process-lifetime aggregate counters only:
+
+- connections: accepted, unauthorized, capacity-rejected, listener errors, and peer-credential errors;
+- frames: received, oversized, invalid, and timed out;
+- outcomes: persisted, duplicate, event-ID collision, correlation truncated, and storage errors.
+
+Unauthorized, malformed, oversized, duplicate, and collision counters remain visible but do not by themselves change `state` to `degraded`. Counters reset when the daemon process restarts. The current API does not expose active-connection count, oldest-event age, fallback record count, or listener-thread liveness; a green state therefore is not an end-to-end delivery guarantee.
+
+The Hermes producer writes process-lifetime transport counter snapshots to its sanitized log only when values change:
+
+```text
+transport_counters queue_drops=N socket_failures=N fallback_full=N fallback_records=N
+```
+
+`queue_drops` means the bounded in-memory queue dropped the newest event rather than block Hermes. `socket_failures` includes unavailable transport or an invalid/non-terminal ACK. `fallback_full` means the bounded fallback retained older pending records and refused the newest record. `fallback_records` counts successful durable fallback appends; it is not current backlog depth.
+
+There is no wall-clock lag metric yet. Estimate the versioned fallback backlog in bytes as the fallback size minus its producer-owned checkpoint, without opening event content:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+
+state = Path.home() / ".local/state/skynet-edr/hermes"
+spool = state / "events-v1.jsonl"
+checkpoint = state / "events-v1.offset"
+size = spool.stat().st_size if spool.exists() else 0
+try:
+    offset = int(checkpoint.read_text(encoding="ascii")) if checkpoint.exists() else 0
+except (OSError, UnicodeDecodeError, ValueError):
+    offset = 0
+print(f"fallback_pending_bytes={max(0, size - min(offset, size))}")
+PY
+```
+
+### Versioned fallback and historical backlog policy
+
+The current producer owns only `events-v1.jsonl`, `events-v1.offset`, and its process-shared lock. Appends and checkpoint replacements are flushed to the file and parent directory. Pending records are replayed in order; while any fallback remains, new events append behind it. The checkpoint advances only after a version-1 terminal ACK for the matching event ID: `persisted`, `duplicate`, or `rejected_permanent`. Timeouts, connection failures, malformed ACKs, and `retry_later` leave the record pending.
+
+The default pending-byte cap is 64 MiB and the hard configurable ceiling is 256 MiB. Acknowledged prefixes may be compacted before enforcing the cap. If pending data alone reaches the cap, the oldest pending records are retained and newer records are dropped and counted as `fallback_full`.
+
+The daemon never scans producer home directories and continuous ingestion never opens the historical unversioned `events.jsonl`. Treat that file as a separate legacy backlog. Import a specifically reviewed historical spool only with the explicit `skynet-edr events ingest-spool` command and a separate checkpoint. Do not run a manual import against `events-v1.jsonl` while the Hermes producer is active; first quiesce or disable that producer so its replay and compaction cannot race the importer.
+
+### Failure and restart behavior
+
+- If the daemon is unavailable or returns a retryable outcome, the producer attempts a durable versioned fallback append. An abrupt producer-process exit can still lose records that existed only in the in-memory queue.
+- The producer worker replays small bounded batches before new delivery and during idle periods. Duplicate event IDs from an uncertain ACK are idempotent only when source identity and payload match; a mismatch is a permanent collision.
+- A storage or correlation transaction failure rolls back event, incident, and receipt together and returns `retry_later` when an ACK can be written.
+- Candidate overflow persists the event but deliberately skips correlation for that event, increments `correlation_truncated_total`, and degrades status. Increase limits only after investigating event volume and memory/storage impact.
+- The systemd unit restarts a failed daemon after five seconds. Its in-memory counters reset; the SQLite store and producer-owned fallback remain. The current main loop does not supervise the ingestion accept thread independently, so verify both socket operation and counter movement after a restart.
+
+### Harmless transport canary
+
+Run this as an enrolled, non-root producer. It sends one informational synthetic event, performs no tool action or network egress, and should not match a rule. It verifies socket DAC, peer UID authorization, frame handling, transaction commit, and terminal ACK; it does not verify Hermes hook registration or fallback replay.
+
+```bash
+python3 - <<'PY'
+import json, socket, struct, time, uuid
+
+now = int(time.time() * 1000)
+event_id = f"evt_ops_canary_{uuid.uuid4().hex}"
+event = {
+    "schema_version": "skynet.event.v0",
+    "event_id": event_id,
+    "event_type": "agent.session.canary",
+    "observed_at_unix_ms": now,
+    "received_at_unix_ms": now,
+    "severity": "informational",
+    "source": {"kind": "sensor", "sensor": "operations-canary", "integration": "manual-local"},
+    "provenance": {
+        "producer": "operations-canary",
+        "collector": "skynet-edr-daemon",
+        "tenant": "local-canary",
+        "source_event_id": event_id,
+        "trace_id": f"trace_{event_id}",
+    },
+    "trust_level": "sensor_observation",
+    "title": "Harmless local continuous-ingestion canary",
+    "attributes": {"canary": True},
+    "redaction": {"contains_sensitive_data": False, "redacted_fields": []},
+}
+payload = json.dumps(event, separators=(",", ":"), sort_keys=True).encode()
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.settimeout(2)
+    client.connect("/run/skynet-edr-ingest/ingest.sock")
+    client.sendall(struct.pack(">I", len(payload)) + payload)
+    ack = client.makefile("rb").readline(4097)
+response = json.loads(ack)
+assert response == {"event_id": event_id, "status": "persisted", "version": 1}, response
+print(json.dumps(response, sort_keys=True))
+PY
+```
+
+Confirm `events_persisted_total` increased by one and no incident was opened for the canary. Re-running the script creates a new event; replaying the exact same payload should return `duplicate`.
+
+### Continuous-ingestion rollback
+
+For a transport-only rollback that preserves evidence capture:
+
+1. set `ingest.enabled = false` in the reviewed config and restart the daemon in an approved window;
+2. leave the current Hermes plugin enabled if bounded `events-v1.jsonl` capture is desired during the outage, and monitor `fallback_full`;
+3. do not delete the socket path manually; package tmpfiles handling and the daemon's safe stale-socket checks own it;
+4. before any plugin downgrade, stop or disable the producer, preserve its private versioned fallback/checkpoint as evidence, and confirm the target version's spool contract;
+5. after restoring the reviewed config/version, re-enroll UIDs if needed, run the harmless canary, and verify fallback pending bytes trend to zero.
+
+Package-version rollback commands are in [Install](INSTALL.md#upgrade-and-rollback). Do not restore an older SQLite database over a live service, and do not claim fallback drain until the producer checkpoint reaches the versioned fallback size.
 
 For source checkouts, also run:
 

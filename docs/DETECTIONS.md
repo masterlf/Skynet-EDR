@@ -22,9 +22,29 @@ Detection rules may use:
 
 ## Implemented engines
 
-- Hermes-specific correlators currently emit `EDR-EXFIL-001` and `EDR-MALWARE-001` incidents from normalized Hermes telemetry.
+- The explicit `events ingest-hermes` trace importer runs Hermes-specific correlators for `EDR-EXFIL-001` and `EDR-MALWARE-001`. Those correlators are not currently invoked by AF_UNIX continuous ingestion or canonical JSONL spool ingestion.
 - The canonical sequence engine evaluates ordered canonical events with exact `event_type`, exact `trust_level`, optional `attributes.*` predicates, a fixed time window, deterministic timestamp/event-id ordering, and same-session or same-trace joins.
 - The built-in canonical sequence rule pack covers `EDR-MCP-001`, `EDR-CONFIG-001`, `EDR-CRON-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-SCOPE-001`, and `EDR-PERSIST-001` as passive explainable matches. It does not replace or duplicate the existing `EDR-EXFIL-001` Hermes secret-egress correlator.
+
+## Rule-to-producer coverage matrix
+
+“Live” means the shipped Hermes plugin can emit the exact trigger shape and the AF_UNIX transaction evaluates the relevant engine. “Producer-dependent” means the engine evaluates canonical spool records, but coverage exists only if an external producer supplies the documented event types and attributes. “Dark” means the rule is implemented but the named shipped producer does not emit its required action event. None of these paths provides guard-mode prevention.
+
+| Rule | Engine | Hermes plugin → AF_UNIX | Canonical JSONL spool | `events ingest-hermes` trace import |
+|---|---|---|---|---|
+| `EDR-MCP-001` | canonical sequence | **Live, bounded:** prompt-injection tool output followed in the same trace by an unknown/MCP tool request with a recognized network indicator | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-PI-001` | canonical sequence | **Live, narrow:** prompt-injection tool output followed by `agent.tool.requested` carrying both `network_indicator=true` and `sensitive_access=true` | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-MSG-001` | canonical sequence | **Live, narrow:** prompt-injection tool output followed by a recognized delivery tool request that also carries `sensitive_access=true` | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-NET-001` | canonical sequence | **Live, narrow:** prompt-injection tool output followed by a recognized explicit IPv4 destination emitted as `agent.network.egress` with `direct_ip=true` | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-CONFIG-001` | canonical sequence | **Dark:** plugin emits no `agent.config.changed` event or `approval_required` attribute | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-CRON-001` | canonical sequence | **Dark:** plugin emits no `agent.automation.scheduled` event or `persistence_indicator` attribute | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-SCOPE-001` | canonical sequence | **Dark:** plugin emits no `agent.approval.granted` event or `scope_expansion` attribute | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-PERSIST-001` | canonical sequence | **Dark:** plugin emits no `agent.config.changed` event with `persistence_indicator=true` | **Producer-dependent** | Not evaluated by this importer |
+| `EDR-EXFIL-001` | Hermes-specific correlator | **Unsupported on this path:** plugin indicators may be stored, but continuous ingestion does not run this correlator | Not evaluated by canonical spool ingestion | **Implemented and regression-tested** for normalized Hermes secret-access → egress traces |
+| `EDR-MALWARE-001` | Hermes-specific correlator | **Unsupported on this path:** plugin can emit a safe malware-test indicator, but continuous ingestion does not run this correlator | Not evaluated by canonical spool ingestion | **Implemented and regression-tested** for normalized safe test-marker traces |
+| `EDR-SECRET-001` | roadmap candidate only | **Unsupported:** no standalone shipped correlator | Unsupported | Unsupported |
+
+Live rows still depend on event ordering within 60 seconds, the same trace, exact typed attributes, successful durable ingestion, and a non-truncated correlation candidate set. The plugin's network classifier does not fully cover IPv6, indirect SDK/Python/cloud-client egress, `scp`, `rsync`, `ftp://`, or `s3://`; absence of a match is not proof of safety. See [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md#detection-limits) and [continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
 
 ## Rule families
 
