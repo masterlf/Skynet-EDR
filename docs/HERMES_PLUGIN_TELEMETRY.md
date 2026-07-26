@@ -14,9 +14,10 @@ Hermes lifecycle hooks
         ↓
 skynet-edr Hermes plugin
         ↓
-canonical skynet.event.v0 JSONL spool + sanitized plugin log
+bounded in-memory queue → producer-owned AF_UNIX forwarder
         ↓
-skynet-edr daemon/CLI ingest-spool
+authenticated daemon transaction (event + correlation + receipt)
+        ↘ private events-v1.jsonl fallback on retryable failure
         ↓
 local events, incidents, API, MCP visibility
 ```
@@ -78,7 +79,8 @@ Telemetry events now include optional safe artifact metadata when derivable. Lab
 ## Default user-local outputs
 
 ```text
-~/.local/state/skynet-edr/hermes/events.jsonl
+~/.local/state/skynet-edr/hermes/events-v1.jsonl
+~/.local/state/skynet-edr/hermes/events-v1.offset
 ~/.local/state/skynet-edr/hermes/skynet-edr-plugin.log
 ```
 
@@ -86,10 +88,9 @@ Both are created as private user files where the platform allows chmod.
 
 ## Logging
 
-The operational log is sanitized. It records plugin lifecycle, hook failures,
-and event-write acknowledgements such as event ID, event type, and severity. It
-must not contain raw tool parameters, raw tool output, local secret paths, or
-credential values.
+The operational log is sanitized. It records plugin lifecycle and hook failures,
+but the normal hook path does not write event acknowledgements. It must not
+contain raw tool parameters, raw tool output, local secret paths, or credentials.
 
 The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 
@@ -99,7 +100,12 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 |---|---|
 | `SKYNET_EDR_HERMES_PLUGIN_ENABLED=0` | Disable emission without uninstalling. |
 | `SKYNET_EDR_STATE_DIR` | Override base state directory. |
-| `SKYNET_EDR_SPOOL_PATH` | Override event JSONL spool path. |
+| `SKYNET_EDR_INGEST_SOCKET` | Override local AF_UNIX ingest socket. |
+| `SKYNET_EDR_EVENT_QUEUE_SIZE` | Bound in-memory event queue. |
+| `SKYNET_EDR_SOCKET_TIMEOUT_MS` | Bound worker socket operations. |
+| `SKYNET_EDR_SPOOL_PATH` | Override versioned fallback JSONL path. |
+| `SKYNET_EDR_CHECKPOINT_PATH` | Override producer-owned replay checkpoint. |
+| `SKYNET_EDR_FALLBACK_MAX_BYTES` | Bound fallback bytes (hard ceiling 256 MiB). |
 | `SKYNET_EDR_LOG_PATH` | Override plugin log path. |
 | `SKYNET_EDR_TENANT` | Tenant/workspace label. |
 | `SKYNET_EDR_MAX_FIELD_CHARS` | Bound safe preview field size. |
@@ -121,30 +127,29 @@ indirect egress inside arbitrary Python, SDK, cloud-client,
 `scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed network indicators
 as a coverage limitation, not proof of safety.
 
-## Manual ingestion
+## Legacy manual ingestion
 
 ```bash
 skynet-edr events ingest-spool \
   --db /var/lib/skynet-edr/skynet.sqlite \
-  --spool ~/.local/state/skynet-edr/hermes/events.jsonl \
-  --checkpoint ~/.local/state/skynet-edr/hermes/events.offset
+  --spool ~/.local/state/skynet-edr/hermes/events-v1.jsonl \
+  --checkpoint ~/.local/state/skynet-edr/hermes/manual-import.offset
 ```
 
-## Daemon polling
+## Continuous daemon ingestion
 
-The daemon can poll the plugin spool through `[spool]` in
-`/etc/skynet-edr/config.toml`, but only if the `skynet-edr` service account can
-read the user-local spool. That access is an explicit operator decision because
-broad home-directory reads increase privacy and credential exposure.
-
-Example for a dedicated lab user:
+The packaged daemon listens on a private AF_UNIX socket and does not read user
+homes (`ProtectHome=true`). Kernel socket DAC and `SO_PEERCRED` are separate
+checks: add a reviewed producer to `skynet-edr-ingest` and allowlist its numeric
+UID. Root remains denied unless explicitly enabled.
 
 ```toml
-[spool]
+[ingest]
 enabled = true
-db = "/var/lib/skynet-edr/skynet.sqlite"
-path = "/home/skynet/.local/state/skynet-edr/hermes/events.jsonl"
-checkpoint = "/var/lib/skynet-edr/hermes-plugin.offset"
+socket = "/run/skynet-edr-ingest/ingest.sock"
+socket_group = "skynet-edr-ingest"
+allowed_uids = [1000] # replace with the reviewed producer UID
+allow_root = false
 ```
 
 ## Security boundaries

@@ -3,12 +3,15 @@ import hashlib
 import importlib.util
 import json
 import logging
+import multiprocessing
 import os
 import re
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -29,6 +32,13 @@ def load_plugin():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def append_fallback_in_spawned_process(state_dir: str, connection) -> None:
+    os.environ["SKYNET_EDR_STATE_DIR"] = state_dir
+    plugin = load_plugin()
+    connection.send(plugin._append_fallback('{"event_id":"evt_child"}'))
+    connection.close()
 
 
 class FakeHTTPException(Exception):
@@ -156,6 +166,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_MAX_LOG_BYTES", None)
         os.environ.pop("SKYNET_EDR_MAX_FIELD_CHARS", None)
         os.environ.pop("SKYNET_EDR_HERMES_PLUGIN_ENABLED", None)
+        os.environ.pop("SKYNET_EDR_FALLBACK_MAX_BYTES", None)
+        os.environ.pop("SKYNET_EDR_CHECKPOINT_PATH", None)
+        os.environ.pop("SKYNET_EDR_INGEST_SOCKET", None)
         self.plugin = load_plugin()
         logger = logging.getLogger("skynet_edr_hermes_plugin")
         for handler in list(logger.handlers):
@@ -169,6 +182,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         setattr(self.plugin, "_session_trace_id", "hermes-local-test-session")
 
     def tearDown(self):
+        self.plugin._worker_stop.set()
+        if self.plugin._worker_thread is not None:
+            self.plugin._worker_thread.join(timeout=2)
         self.tmp.cleanup()
         os.environ.pop("SKYNET_EDR_STATE_DIR", None)
         os.environ.pop("SKYNET_EDR_SPOOL_PATH", None)
@@ -176,10 +192,209 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_MAX_LOG_BYTES", None)
         os.environ.pop("SKYNET_EDR_MAX_FIELD_CHARS", None)
         os.environ.pop("SKYNET_EDR_HERMES_PLUGIN_ENABLED", None)
+        os.environ.pop("SKYNET_EDR_FALLBACK_MAX_BYTES", None)
+        os.environ.pop("SKYNET_EDR_CHECKPOINT_PATH", None)
+        os.environ.pop("SKYNET_EDR_INGEST_SOCKET", None)
 
     def read_events(self):
-        spool = self.state_dir / "events.jsonl"
+        self.plugin._event_queue.join()
+        spool = self.state_dir / "events-v1.jsonl"
         return [json.loads(line) for line in spool.read_text().splitlines()]
+
+    def test_hook_thread_only_enqueues_and_worker_owns_socket_and_fallback_io(self):
+        caller_thread = threading.get_ident()
+        worker_threads = []
+
+        def failed_send(_line):
+            worker_threads.append(threading.get_ident())
+            return "retry_later"
+
+        original_append = self.plugin._append_fallback
+
+        def observed_append(line):
+            worker_threads.append(threading.get_ident())
+            return original_append(line)
+
+        with patch.object(self.plugin, "_send_frame", side_effect=failed_send), patch.object(
+            self.plugin, "_append_fallback", side_effect=observed_append
+        ):
+            started = time.monotonic()
+            self.plugin._write_event(
+                event_type="agent.session.started",
+                source_kind="sensor",
+                trust_level="sensor_observation",
+                severity="informational",
+                title="Fake non-blocking test event",
+                attributes={"fake": True},
+            )
+            elapsed = time.monotonic() - started
+            self.plugin._event_queue.join()
+
+        self.assertLess(elapsed, 0.05)
+        self.assertTrue(worker_threads)
+        self.assertTrue(all(worker != caller_thread for worker in worker_threads))
+
+    def test_default_socket_matches_packaged_ingress_path(self):
+        self.assertEqual(self.plugin.DEFAULT_INGEST_SOCKET, "/run/skynet-edr-ingest/ingest.sock")
+
+    def test_terminal_ack_requires_version_and_matching_event_id(self):
+        line = '{"event_id":"evt_ack_expected"}'
+
+        class FakeSocket:
+            def __init__(self, ack):
+                self.ack = ack
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _path):
+                pass
+
+            def sendall(self, _payload):
+                pass
+
+            def recv(self, _size):
+                ack, self.ack = self.ack, b""
+                return ack
+
+        bad_acks = [
+            b'{"version":2,"event_id":"evt_ack_expected","status":"persisted"}\n',
+            b'{"version":1,"event_id":"evt_other","status":"persisted"}\n',
+            b'{"version":1,"status":"duplicate"}\n',
+            b'{"version":1,"event_id":"evt_ack_expected","status":"persisted"}\ntrailing',
+        ]
+        for ack in bad_acks:
+            with self.subTest(ack=ack), patch.object(
+                self.plugin.socket, "socket", return_value=FakeSocket(ack)
+            ):
+                self.assertEqual(self.plugin._send_frame(line), "retry_later")
+
+        good = b'{"version":1,"event_id":"evt_ack_expected","status":"duplicate"}\n'
+        with patch.object(self.plugin.socket, "socket", return_value=FakeSocket(good)):
+            self.assertEqual(self.plugin._send_frame(line), "duplicate")
+
+    def test_fallback_state_lock_serializes_processes(self):
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=False)
+
+        with self.plugin._spool_state_lock():
+            process = context.Process(
+                target=append_fallback_in_spawned_process,
+                args=(str(self.state_dir), child),
+            )
+            process.start()
+            self.assertFalse(parent.poll(0.2), "child append must wait for the process-shared lock")
+        process.join(timeout=2)
+        self.assertEqual(process.exitcode, 0)
+        self.assertTrue(parent.recv())
+
+    def test_durable_spool_and_checkpoint_sync_their_parent_directories(self):
+        synced_modes = []
+        real_fsync = os.fsync
+
+        def observed_fsync(fd):
+            synced_modes.append(os.fstat(fd).st_mode)
+            return real_fsync(fd)
+
+        with patch.object(self.plugin.os, "fsync", side_effect=observed_fsync):
+            self.assertTrue(self.plugin._append_fallback('{"event_id":"evt_durable"}'))
+            self.plugin._write_checkpoint(self.state_dir / "events-v1.offset", 1)
+        self.assertTrue(any(stat.S_ISREG(mode) for mode in synced_modes))
+        self.assertTrue(any(stat.S_ISDIR(mode) for mode in synced_modes))
+
+    def test_private_directory_rejects_symlink_without_chmodding_target(self):
+        target = self.state_dir / "real-target"
+        target.mkdir(mode=0o755)
+        link = self.state_dir / "linked-state"
+        link.symlink_to(target, target_is_directory=True)
+        before = stat.S_IMODE(target.stat().st_mode)
+
+        with self.assertRaises(OSError):
+            self.plugin._ensure_private_dir(link)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), before)
+
+    def test_failed_delivery_uses_private_versioned_fallback_and_never_historical_spool(self):
+        historical = self.state_dir / "events.jsonl"
+        historical.write_text("HISTORICAL_SENTINEL_MUST_NOT_BE_REPLAYED\n", encoding="utf-8")
+        before = historical.stat().st_mtime_ns
+        with patch.object(self.plugin, "_send_frame", return_value="retry_later"):
+            self.plugin._write_event(
+                event_type="agent.session.started",
+                source_kind="sensor",
+                trust_level="sensor_observation",
+                severity="informational",
+                title="Fake fallback test event",
+                attributes={"fake": True},
+            )
+            self.plugin._event_queue.join()
+
+        fallback = self.state_dir / "events-v1.jsonl"
+        events = [json.loads(line) for line in fallback.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_id"], events[0]["provenance"]["source_event_id"])
+        self.assertEqual(historical.read_text(encoding="utf-8"), "HISTORICAL_SENTINEL_MUST_NOT_BE_REPLAYED\n")
+        self.assertEqual(historical.stat().st_mtime_ns, before)
+        self.assertEqual(stat.S_IMODE(fallback.stat().st_mode) & 0o077, 0)
+
+    def test_replay_checkpoint_advances_only_after_terminal_ack(self):
+        fallback = self.state_dir / "events-v1.jsonl"
+        first = '{"event_id":"evt_replay_first"}'
+        second = '{"event_id":"evt_replay_second"}'
+        fallback.write_text(f"{first}\n{second}\n", encoding="utf-8")
+        fallback.chmod(0o600)
+
+        with patch.object(self.plugin, "_send_frame", side_effect=["persisted", "retry_later"]):
+            self.assertEqual(self.plugin._replay_fallback(max_records=4), 1)
+        checkpoint = self.state_dir / "events-v1.offset"
+        self.assertEqual(int(checkpoint.read_text(encoding="ascii")), len(first.encode()) + 1)
+
+        with patch.object(self.plugin, "_send_frame", return_value="duplicate") as send:
+            self.assertEqual(self.plugin._replay_fallback(max_records=4), 1)
+            self.assertEqual(send.call_args.args[0], second)
+        self.assertEqual(int(checkpoint.read_text(encoding="ascii")), fallback.stat().st_size)
+
+    def test_fallback_cap_retains_oldest_and_symlink_target_is_rejected(self):
+        first = '{"event_id":"evt_oldest"}'
+        second = '{"event_id":"evt_newest"}'
+        os.environ["SKYNET_EDR_FALLBACK_MAX_BYTES"] = str(len(first.encode()) + 1)
+        self.assertTrue(self.plugin._append_fallback(first))
+        self.assertFalse(self.plugin._append_fallback(second))
+        fallback = self.state_dir / "events-v1.jsonl"
+        self.assertEqual(fallback.read_text(encoding="utf-8"), first + "\n")
+
+        fallback.unlink()
+        target = self.state_dir / "symlink-target"
+        target.write_text("SENTINEL\n", encoding="utf-8")
+        fallback.symlink_to(target)
+        self.assertFalse(self.plugin._append_fallback(second))
+        self.assertEqual(target.read_text(encoding="utf-8"), "SENTINEL\n")
+        fallback.unlink()
+        os.mkfifo(fallback, 0o600)
+        self.assertFalse(self.plugin._append_fallback(second))
+
+    def test_acknowledged_fallback_prefix_is_compacted_before_capacity_drop(self):
+        first = '{"event_id":"evt_acked_prefix"}'
+        second = '{"event_id":"evt_pending_oldest"}'
+        third = '{"event_id":"evt_pending_newest"}'
+        fallback = self.state_dir / "events-v1.jsonl"
+        fallback.write_text(f"{first}\n{second}\n", encoding="utf-8")
+        fallback.chmod(0o600)
+        checkpoint = self.state_dir / "events-v1.offset"
+        checkpoint.write_text(str(len(first.encode()) + 1), encoding="ascii")
+        checkpoint.chmod(0o600)
+        os.environ["SKYNET_EDR_FALLBACK_MAX_BYTES"] = str(
+            len(second.encode()) + len(third.encode()) + 2
+        )
+
+        self.assertTrue(self.plugin._append_fallback(third))
+        self.assertEqual(fallback.read_text(encoding="utf-8"), f"{second}\n{third}\n")
+        self.assertEqual(checkpoint.read_text(encoding="ascii"), "0")
 
     def test_registers_expected_passive_hooks(self):
         ctx = FakeContext()
@@ -503,14 +718,15 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         ctx = FakeContext()
         self.plugin.register(ctx)
         ctx.hooks["pre_tool_call"]("terminal", {"command": "cat /root/.hermes/auth.json password=fake-secret"})
+        self.read_events()
         log_path = self.state_dir / "skynet-edr-plugin.log"
         log_text = log_path.read_text()
-        self.assertIn("wrote_event", log_text)
+        self.assertIn("registering Skynet-EDR Hermes plugin", log_text)
         self.assertNotIn("fake-secret", log_text)
         self.assertNotIn("/root/.hermes/auth.json", log_text)
         mode = stat.S_IMODE(log_path.stat().st_mode)
         self.assertEqual(mode & 0o077, 0)
-        spool_mode = stat.S_IMODE((self.state_dir / "events.jsonl").stat().st_mode)
+        spool_mode = stat.S_IMODE((self.state_dir / "events-v1.jsonl").stat().st_mode)
         self.assertEqual(spool_mode & 0o077, 0)
 
     def test_pre_llm_call_emits_event_without_returning_override(self):
@@ -557,6 +773,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.plugin.register(ctx)
         ctx.hooks["pre_tool_call"]("terminal", {"command": "curl https://example.invalid"})
         self.assertFalse((self.state_dir / "events.jsonl").exists())
+        self.assertFalse((self.state_dir / "events-v1.jsonl").exists())
 
 
 def run_desktop_plugin_script(extra_js: str, react_stub: str = "const React = {useState(initial) { return [initial, () => {}]; }};\n") -> subprocess.CompletedProcess:

@@ -10,6 +10,21 @@ enabled = true
 bind = "127.0.0.1:8787"
 read_only = true
 
+[ingest]
+# The daemon authenticates every connection with SO_PEERCRED. Add only the
+# numeric UID of each reviewed producer; group membership alone is insufficient.
+# Enable only after configuring allowed_uids and producer group membership.
+enabled = false
+socket = "/run/skynet-edr-ingest/ingest.sock"
+socket_group = "skynet-edr-ingest"
+allowed_uids = []
+allow_root = false
+max_frame_bytes = 262144
+max_connections = 16
+read_timeout_ms = 1000
+write_timeout_ms = 1000
+candidate_limit = 2048
+
 [agent_scope]
 # Product scope for local AI-agent protection. Operators should grant concrete
 # read-only access per agent after reviewing privacy and credential exposure.

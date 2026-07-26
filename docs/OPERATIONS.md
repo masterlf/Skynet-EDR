@@ -15,6 +15,7 @@ The current MVP is passive and Linux-first. It emphasizes redacted local evidenc
 | CLI | Local operator commands | [Local storage and CLI](LOCAL_STORAGE.md) |
 | SQLite store | Local event and incident persistence | [Local storage and CLI](LOCAL_STORAGE.md#sqlite-store) |
 | Daemon/service | Passive runtime path | [Install](INSTALL.md#what-is-installed) |
+| AF_UNIX ingestion | Authenticated, bounded producer transport | [Hermes plugin telemetry](../integrations/hermes/skynet-edr/README.md#continuous-ingestion-authorization) |
 | Local HTTP API | Localhost-only read-only visibility | [Local read-only HTTP API and console](LOCAL_HTTP_API.md) |
 | MCP server | Read-only visibility for agent runtimes | [Read-only MCP integration](MCP_READ_ONLY.md) |
 
@@ -94,4 +95,5 @@ Before trusting an operational setup:
 - test fixtures use fake honeytokens only;
 - alert output is redacted;
 - logs do not contain raw secrets;
+- daemon home access is disabled and ingest producers are UID-allowlisted;
 - documentation checks and relevant Rust gates pass.
