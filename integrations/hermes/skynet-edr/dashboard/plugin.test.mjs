@@ -353,6 +353,42 @@ test('renders source-aware list, detail provenance and evidence timeline as text
   assert.ok(harness.calls.some((args) => args[0] === '/api/plugins/skynet-edr/risks/inc%2Fopaque'));
 });
 
+test('renders provenance definitions as compact label-value rows', async () => {
+  const risk = canonicalRisk('compact-risk');
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items: [risk] }),
+    '/api/plugins/skynet-edr/risks/compact-risk': canonicalDetail('compact-risk'),
+  });
+  harness.render();
+  await harness.flushEffects();
+  let tree = harness.render();
+  findButton(tree, 'MCP network activity').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  tree = harness.render();
+
+  for (const title of ['Artifact provenance', 'Sensor provenance']) {
+    const section = findNode(
+      tree,
+      (node) => node.type === 'section' && textOf(node).includes(title),
+      `${title} section`,
+    );
+    const list = findNode(section, (node) => node.type === 'dl', `${title} definition list`);
+    const rows = childrenOf(list);
+    assert.ok(rows.length >= 4);
+    for (const row of rows) {
+      const cells = childrenOf(row);
+      assert.equal(cells[0].type, 'dt');
+      assert.equal(cells[1].type, 'dd');
+      assert.equal(row.props.style.gridTemplateColumns, '7rem minmax(0, 1fr)');
+      assert.equal(row.props.style.alignItems, 'baseline');
+      assert.equal(cells[1].props.style.minWidth, 0);
+      assert.equal(cells[1].props.style.overflowWrap, 'anywhere');
+    }
+  }
+});
+
 test('renders every allowlisted source kind with fixed source-aware text', async () => {
   const labels = {
     email: 'Email content',
