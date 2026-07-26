@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import importlib.util
 import json
 import logging
@@ -9,14 +11,15 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import Mock, patch
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "__init__.py"
 DASHBOARD_API_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "plugin_api.py"
 DASHBOARD_MANIFEST_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "manifest.json"
 DASHBOARD_BUNDLE_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "plugin.js"
 DESKTOP_PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "desktop" / "plugin.js"
+CI_WORKFLOW_PATH = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci.yml"
 
 
 def load_plugin():
@@ -98,17 +101,40 @@ class FakeContext:
 
 
 class SkynetEdrHermesPluginTests(unittest.TestCase):
-    def test_dashboard_backend_companion_is_hidden_and_has_loadable_bundle(self):
+    def test_ci_executes_dashboard_behavior_tests(self):
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("node --test integrations/hermes/skynet-edr/dashboard/plugin.test.mjs", workflow)
+
+    def test_dashboard_risk_explorer_is_visible_integrity_pinned_and_loadable(self):
         manifest = json.loads(DASHBOARD_MANIFEST_PATH.read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "skynet-edr")
+        self.assertEqual(manifest["label"], "Skynet-EDR")
+        self.assertEqual(manifest["icon"], "Shield")
         self.assertEqual(manifest["api"], "plugin_api.py")
         self.assertEqual(manifest["entry"], "plugin.js")
-        self.assertTrue(manifest["tab"]["hidden"])
+        self.assertEqual(manifest["tab"]["path"], "/skynet-edr/risks")
+        self.assertFalse(manifest["tab"]["hidden"])
         self.assertTrue(DASHBOARD_BUNDLE_PATH.is_file())
 
-        bundle = DASHBOARD_BUNDLE_PATH.read_text(encoding="utf-8")
+        bundle_bytes = DASHBOARD_BUNDLE_PATH.read_bytes()
+        bundle = bundle_bytes.decode("utf-8")
+        expected_integrity = "sha384-" + base64.b64encode(hashlib.sha384(bundle_bytes).digest()).decode("ascii")
+        self.assertEqual(manifest["integrity"], expected_integrity)
         self.assertIn('registry.register("skynet-edr"', bundle)
-        for forbidden in ("fetch(", "XMLHttpRequest", ".innerHTML", "WebSocket("):
+        self.assertIn("window.__HERMES_PLUGIN_SDK__", bundle)
+        self.assertIn("SDK.fetchJSON", bundle)
+        self.assertIn("const POLL_MS = 10000", bundle)
+        for forbidden in (
+            "fetch(",
+            "XMLHttpRequest",
+            ".innerHTML",
+            "dangerouslySetInnerHTML",
+            "WebSocket(",
+            'method: "POST"',
+            'method: "PUT"',
+            'method: "PATCH"',
+            'method: "DELETE"',
+        ):
             self.assertNotIn(forbidden, bundle)
 
         syntax = subprocess.run(
