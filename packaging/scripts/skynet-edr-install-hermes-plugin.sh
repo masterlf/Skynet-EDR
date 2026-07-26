@@ -31,15 +31,26 @@ if [ ! -d "$PLUGIN_SOURCE" ]; then
 fi
 
 TARGET="$HERMES_HOME/plugins/skynet-edr"
-install -d -m 0700 "$HERMES_HOME" "$HERMES_HOME/plugins" "$TARGET"
+DESKTOP_TARGET="$HERMES_HOME/desktop-plugins/skynet-edr"
+install -d -m 0700 "$HERMES_HOME" "$HERMES_HOME/plugins" "$TARGET" "$HERMES_HOME/desktop-plugins" "$DESKTOP_TARGET"
 install -m 0644 "$PLUGIN_SOURCE/plugin.yaml" "$TARGET/plugin.yaml"
 install -m 0644 "$PLUGIN_SOURCE/__init__.py" "$TARGET/__init__.py"
 install -m 0644 "$PLUGIN_SOURCE/README.md" "$TARGET/README.md"
+if [ -d "$PLUGIN_SOURCE/dashboard" ]; then
+  install -d -m 0700 "$TARGET/dashboard"
+  install -m 0644 "$PLUGIN_SOURCE/dashboard/manifest.json" "$TARGET/dashboard/manifest.json"
+  install -m 0644 "$PLUGIN_SOURCE/dashboard/plugin.js" "$TARGET/dashboard/plugin.js"
+  install -m 0644 "$PLUGIN_SOURCE/dashboard/plugin_api.py" "$TARGET/dashboard/plugin_api.py"
+fi
+if [ -f "$PLUGIN_SOURCE/desktop/plugin.js" ]; then
+  install -m 0644 "$PLUGIN_SOURCE/desktop/plugin.js" "$DESKTOP_TARGET/plugin.js"
+fi
 
 STATE_DIR=${SKYNET_EDR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/skynet-edr/hermes}
 install -d -m 0700 "$STATE_DIR"
 
 echo "Installed Skynet-EDR Hermes plugin to $TARGET"
+echo "Installed Skynet-EDR Desktop plugin to $DESKTOP_TARGET"
 echo "Default event spool: ${SKYNET_EDR_SPOOL_PATH:-$STATE_DIR/events.jsonl}"
 echo "Default plugin log:  ${SKYNET_EDR_LOG_PATH:-$STATE_DIR/skynet-edr-plugin.log}"
 

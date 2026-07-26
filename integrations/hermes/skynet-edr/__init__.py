@@ -36,6 +36,11 @@ _LOCAL_CONTEXT_RE = re.compile(
 )
 _NETWORK_RE = re.compile(r"(?i)(\bcurl\b|\bwget\b|https?://|/dev/tcp|\bnc\b|\bncat\b)")
 _URL_RE = re.compile(r"(?i)https?://[^\s\"'\\]+")
+_GITHUB_SCP_RE = re.compile(r"(?i)git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?")
+_GITHUB_BARE_RE = re.compile(r"(?i)github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?")
+_GITHUB_FALLBACK_RE = re.compile(
+    r"(?i)(?:https?://[^\s\"'\\]+|ssh://[^\s\"'\\]+|(?<![/\w.-])git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?|(?<![/\w.-])github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)"
+)
 _DEV_TCP_DESTINATION_RE = re.compile(r"(?i)/dev/tcp/([^/\s\"'\\]+)/\d+")
 _SIMPLE_DIRECT_IPV4_DESTINATION_RE = re.compile(
     r"(?i)\b(?:curl|wget|nc|ncat)\b\s+(?:https?://)?((?:\d{1,3}\.){3}\d{1,3})(?=$|[\s/:\"'\\])"
@@ -49,6 +54,19 @@ _PROMPT_INJECTION_RE = re.compile(
 _MALWARE_TEST_RE = re.compile(
     r"(?i)(skynet_fake_malware_test_string_do_not_execute|eicar-standard-antivirus-test-file)"
 )
+_BROWSER_TOOLS = {"browser_navigate", "browser_snapshot", "browser_click", "web_search", "web_extract"}
+_CODE_TOOLS = {"execute_code", "codex", "claude_code"}
+_MESSAGE_TOOLS = {"send_message", "telegram", "discord", "slack", "sms", "whatsapp", "signal"}
+_ARTIFACT_PROVIDER_BY_KIND = {
+    "email": "email",
+    "url": "browser",
+    "git_repository": "github",
+    "code": "code",
+    "file": "file",
+    "message": "messaging",
+    "mcp": "mcp",
+    "terminal": "terminal",
+}
 
 _lock = threading.Lock()
 _logger_lock = threading.Lock()
@@ -124,6 +142,7 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
     tool_name, params = _extract_tool_call(args, kwargs)
     params_text = _safe_json(params)
     indicators = _classify_tool(tool_name, params_text)
+    artifact = _artifact_for_tool(tool_name, params, params_text, "agent_action")
     attrs: dict[str, Any] = {
         "hook": "pre_tool_call",
         "tool_name": tool_name,
@@ -139,7 +158,7 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         attrs["params_preview"] = replacement
         redacted.append(_redacted_field("attributes.params_preview", replacement))
     else:
-        attrs["params_preview"] = _truncate(params_text)
+        attrs["params_preview"] = "[OMITTED:tool_params]"
     if indicators["command_class"]:
         attrs["command_class"] = indicators["command_class"]
     if indicators["source_kind"] == "mcp_tool":
@@ -157,6 +176,7 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         else "low",
         title=f"Hermes tool requested: {tool_name}",
         attributes=attrs,
+        artifact=artifact,
         redacted_fields=redacted,
     )
 
@@ -166,6 +186,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
     result_text = _stringify(result)
     params_text = _safe_json(params)
     indicators = _classify_tool(tool_name, params_text)
+    artifact = _artifact_for_tool(tool_name, params, params_text, "tool_output")
     malware_signature = _malware_signature(result_text)
     injection = bool(_PROMPT_INJECTION_RE.search(result_text))
     attrs: dict[str, Any] = {
@@ -190,6 +211,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
         severity="high" if malware_signature or injection else "informational",
         title=f"Hermes tool completed: {tool_name}",
         attributes=attrs,
+        artifact=artifact,
     )
     if injection:
         _write_event(
@@ -198,6 +220,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
             trust_level="untrusted_content",
             severity="medium",
             title="Untrusted Hermes tool output contains prompt-injection instructions",
+            artifact=artifact,
             attributes={
                 "hook": "post_tool_call",
                 "tool_name": tool_name,
@@ -219,6 +242,7 @@ def _write_event(
     severity: str,
     title: str,
     attributes: dict[str, Any],
+    artifact: dict[str, Any] | None = None,
     redacted_fields: list[dict[str, str]] | None = None,
 ) -> None:
     if not _enabled():
@@ -252,6 +276,8 @@ def _write_event(
             "redacted_fields": redacted_fields,
         },
     }
+    if artifact is not None:
+        event["artifact"] = artifact
     line = json.dumps(event, separators=(",", ":"), sort_keys=True)
     spool = _spool_path()
     _ensure_private_dir(spool.parent)
@@ -421,6 +447,249 @@ def _classify_tool(tool_name: str, params_text: str) -> dict[str, Any]:
         "sensitive_access": sensitive,
         "command_class": "network_egress" if network else None,
     }
+
+
+def _artifact_for_tool(tool_name: str, params: Any, params_text: str, trust_level: str) -> dict[str, Any]:
+    kind = _artifact_kind(tool_name, params_text)
+    label = {
+        "email": "Email content",
+        "url": "URL content",
+        "git_repository": "Git repository",
+        "code": "Code content",
+        "file": "File content",
+        "message": "Message content",
+        "mcp": "MCP content",
+        "terminal": "Terminal output",
+        "unknown": "Unclassified artifact",
+    }[kind]
+    return {
+        "kind": kind,
+        "provider": _ARTIFACT_PROVIDER_BY_KIND.get(kind),
+        "display_label": label,
+        "locator_hash": _locator_hash(kind, params, params_text),
+        "trust_level": trust_level,
+    }
+
+
+def _artifact_kind(tool_name: str, params_text: str) -> str:
+    lower = tool_name.lower()
+    segments = [segment for segment in re.split(r"[.:/]+", lower) if segment]
+    leaf = segments[-1] if segments else lower
+    if leaf in {"gmail", "himalaya", "email"}:
+        return "email"
+    if leaf in _BROWSER_TOOLS or lower.startswith("browser") or leaf in {"web_search", "web_extract"}:
+        return "url"
+    if "github" in lower or leaf in {"git", "gh"} or "git_repository" in params_text.lower():
+        return "git_repository"
+    if leaf in _CODE_TOOLS:
+        return "code"
+    if leaf in _FILE_TOOLS:
+        return "file"
+    if leaf in _MESSAGE_TOOLS:
+        return "message"
+    if leaf in _PROCESS_TOOLS:
+        return "terminal"
+    if "." in tool_name or ":" in tool_name:
+        return "mcp"
+    return "unknown"
+
+
+def _locator_hash(kind: str, params: Any, params_text: str) -> str | None:
+    locator: str | None = None
+    if kind == "url":
+        locator = _safe_url_locator(params, params_text)
+    elif kind == "git_repository":
+        locator = _safe_git_locator(params, params_text)
+    if locator is None:
+        return None
+    return "sha256:" + hashlib.sha256(locator.encode("utf-8")).hexdigest()
+
+
+def _safe_url_locator(params: Any, params_text: str) -> str | None:
+    candidates: list[str] = []
+    if isinstance(params, dict):
+        for key in ("url", "uri"):
+            value = params.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    candidates.extend(_URL_RE.findall(params_text))
+    for candidate in candidates:
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            continue
+        try:
+            parsed_port = parsed.port
+        except ValueError:
+            continue
+        host = _canonical_url_host(parsed)
+        if host is None:
+            continue
+        port = _canonical_port(parsed.scheme.lower(), parsed_port)
+        path = _canonical_url_path(parsed.path)
+        return f"{parsed.scheme.lower()}://{host}{port}{path}"
+    return None
+
+
+
+def _canonical_url_host(parsed: Any) -> str | None:
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    if netloc.startswith("["):
+        end = netloc.find("]")
+        if end < 0:
+            return None
+        raw_address = netloc[1:end]
+        remainder = netloc[end + 1 :]
+        if remainder and not remainder.startswith(":"):
+            return None
+        zone = None
+        address = raw_address
+        if "%25" in raw_address:
+            address, zone = raw_address.split("%25", 1)
+            if not zone:
+                return None
+        elif "%" in raw_address:
+            return None
+        try:
+            canonical = ipaddress.IPv6Address(address).compressed
+        except ValueError:
+            return None
+        if zone is not None:
+            canonical = f"{canonical}%25{zone}"
+        return f"[{canonical}]"
+    host = parsed.hostname
+    if host is None or ":" in host:
+        return None
+    return host.lower()
+
+def _canonical_port(scheme: str, port: int | None) -> str:
+    if port is None:
+        return ""
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        return ""
+    return f":{port}"
+
+
+def _canonical_url_path(path: str) -> str:
+    normalized = _decode_unreserved_and_uppercase_escapes(path or "/")
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return _remove_dot_segments(normalized)
+
+
+def _decode_unreserved_and_uppercase_escapes(value: str) -> str:
+    output: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "%" and index + 2 < len(value) and all(c in "0123456789abcdefABCDEF" for c in value[index + 1:index + 3]):
+            hex_value = value[index + 1:index + 3]
+            decoded = chr(int(hex_value, 16))
+            if decoded.isascii() and (decoded.isalnum() or decoded in "-._~"):
+                output.append(decoded)
+            else:
+                output.append("%" + hex_value.upper())
+            index += 3
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _remove_dot_segments(path: str) -> str:
+    input_buffer = path
+    output = ""
+    while input_buffer:
+        if input_buffer.startswith("../"):
+            input_buffer = input_buffer[3:]
+            continue
+        if input_buffer.startswith("./"):
+            input_buffer = input_buffer[2:]
+            continue
+        if input_buffer.startswith("/./"):
+            input_buffer = "/" + input_buffer[3:]
+            continue
+        if input_buffer == "/.":
+            input_buffer = "/"
+            continue
+        if input_buffer.startswith("/../"):
+            input_buffer = "/" + input_buffer[4:]
+            output = _remove_last_path_segment(output)
+            continue
+        if input_buffer == "/..":
+            input_buffer = "/"
+            output = _remove_last_path_segment(output)
+            continue
+        if input_buffer in (".", ".."):
+            input_buffer = ""
+            continue
+        if input_buffer.startswith("/"):
+            next_slash = input_buffer.find("/", 1)
+            if next_slash < 0:
+                output += input_buffer
+                input_buffer = ""
+            else:
+                output += input_buffer[:next_slash]
+                input_buffer = input_buffer[next_slash:]
+            continue
+        next_slash = input_buffer.find("/")
+        if next_slash < 0:
+            output += input_buffer
+            input_buffer = ""
+        else:
+            output += input_buffer[:next_slash]
+            input_buffer = input_buffer[next_slash:]
+    if not output.startswith("/"):
+        output = "/" + output
+    return output or "/"
+
+
+def _remove_last_path_segment(path: str) -> str:
+    if not path:
+        return ""
+    slash = path.rfind("/")
+    if slash <= 0:
+        return ""
+    return path[:slash]
+
+
+def _safe_git_locator(params: Any, params_text: str) -> str | None:
+    candidates: list[str] = []
+    if isinstance(params, dict):
+        for key in ("repository", "repo", "remote", "url"):
+            value = params.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    candidates.extend(_GITHUB_FALLBACK_RE.findall(params_text))
+    for candidate in candidates:
+        if _is_github_git_locator(candidate):
+            return "github.com/repository"
+    return None
+
+
+def _is_github_git_locator(candidate: str) -> bool:
+    locator = candidate.strip().rstrip(",;)}]")
+    if _is_github_url_locator(locator):
+        return True
+    if _GITHUB_SCP_RE.fullmatch(locator):
+        return True
+    return bool(_GITHUB_BARE_RE.fullmatch(locator))
+
+
+def _is_github_url_locator(locator: str) -> bool:
+    try:
+        parsed = urlsplit(locator)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"https", "ssh"}:
+        return False
+    try:
+        parsed.port
+    except ValueError:
+        return False
+    return parsed.hostname == "github.com"
 
 
 def _contains_direct_ipv4_destination(text: str) -> bool:

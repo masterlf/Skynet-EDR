@@ -1,0 +1,15 @@
+{
+  "name": "skynet-edr",
+  "label": "Skynet-EDR",
+  "description": "Passive read-only Risk Explorer for validated, redacted Skynet-EDR projections.",
+  "icon": "Shield",
+  "version": "0.4.0",
+  "tab": {
+    "path": "/skynet-edr/risks",
+    "position": "after:logs",
+    "hidden": false
+  },
+  "entry": "plugin.js",
+  "integrity": "sha384-CDMRTiTN8oJ6HQXpNCcPtqpMimm4wDDe7jVRWqyvR+9VtQLSsRZM484V7VjLTR2N",
+  "api": "plugin_api.py"
+}

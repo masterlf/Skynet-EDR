@@ -31,6 +31,15 @@ grep_listing() {
   fi
 }
 
+reject_cache_files() {
+  listing="$1"
+  if grep -E '(__pycache__/|\.pyc$)' "$listing" >/dev/null 2>&1; then
+    echo "artifact listing $listing contains generated Python cache files" >&2
+    grep -E '(__pycache__/|\.pyc$)' "$listing" >&2
+    exit 1
+  fi
+}
+
 tarball=$(require_one 'skynet-edr-*.tar.gz')
 deb=$(require_one 'skynet-edr_*.deb')
 rpm=$(require_one 'skynet-edr-*.rpm')
@@ -41,15 +50,22 @@ mkdir -p "$DIST_DIR/inspection"
 
 require_cmd tar
 tar -tzf "$tarball" > "$DIST_DIR/inspection/tarball.txt"
+reject_cache_files "$DIST_DIR/inspection/tarball.txt"
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/bin/skynet-edr-daemon$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/SHA256SUMS$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/skynet-edr-install-hermes-plugin.sh$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/__init__.py$'
 grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/plugin.yaml$'
+grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/README.md$'
+grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/dashboard/plugin.js$'
+grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/dashboard/plugin_api.py$'
+grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr/desktop/plugin.js$'
 
 require_cmd dpkg-deb
 dpkg-deb --contents "$deb" > "$DIST_DIR/inspection/deb.txt"
+reject_cache_files "$DIST_DIR/inspection/deb.txt"
 if [ "$(dpkg-deb -f "$deb" Version)" != "$version" ]; then
   echo "deb metadata version does not match artifact version: $(dpkg-deb -f "$deb" Version) != $version" >&2
   exit 1
@@ -62,9 +78,15 @@ grep_listing "$DIST_DIR/inspection/deb.txt" './usr/lib/systemd/system/skynet-edr
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/bin/skynet-edr-install-hermes-plugin$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/__init__.py$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml$'
+grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md$'
+grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js$'
+grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py$'
+grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js$'
 
 require_cmd rpm
 rpm -qpl "$rpm" > "$DIST_DIR/inspection/rpm.txt"
+reject_cache_files "$DIST_DIR/inspection/rpm.txt"
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/bin/skynet-edr-daemon$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/etc/skynet-edr/config.toml$'
@@ -72,9 +94,15 @@ grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/lib/systemd/system/skynet-edr
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/bin/skynet-edr-install-hermes-plugin$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/__init__.py$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml$'
+grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md$'
+grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js$'
+grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py$'
+grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js$'
 
 require_cmd zstd
 tar --zstd -tf "$arch" > "$DIST_DIR/inspection/archlinux.txt"
+reject_cache_files "$DIST_DIR/inspection/archlinux.txt"
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/bin/skynet-edr-daemon$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^etc/skynet-edr/config.toml$'
@@ -82,6 +110,11 @@ grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/lib/systemd/system/skyne
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/bin/skynet-edr-install-hermes-plugin$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/__init__.py$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml$'
+grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/README.md$'
+grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/manifest.json$'
+grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin.js$'
+grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/dashboard/plugin_api.py$'
+grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/share/skynet-edr/hermes-plugin/skynet-edr/desktop/plugin.js$'
 
 (
   cd "$DIST_DIR"

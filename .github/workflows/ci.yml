@@ -50,9 +50,11 @@ jobs:
         if: steps.rust.outputs.present != 'true'
         run: echo "No Cargo.toml yet; Rust CI will activate when the workspace is added."
   python:
-    name: Python integration quality gate
+    name: Hermes integration quality gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Test Hermes Web Dashboard behavior
+        run: node --test integrations/hermes/skynet-edr/dashboard/plugin.test.mjs
       - name: Test dependency-free Hermes plugin
         run: python3 -m unittest discover -s integrations/hermes/tests -p 'test_*.py'

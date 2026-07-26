@@ -1,8 +1,8 @@
 //! Canonical Skynet event envelope v0 regression tests.
 
 use skynet_edr_core::{
-    parse_canonical_event_json, serialize_canonical_event_json, CanonicalEventEnvelope,
-    EventSchemaVersion, RedactionReason, Severity, SourceKind, TrustLevel,
+    parse_canonical_event_json, serialize_canonical_event_json, ArtifactKind,
+    CanonicalEventEnvelope, EventSchemaVersion, RedactionReason, Severity, SourceKind, TrustLevel,
 };
 
 const FIXTURE: &str = include_str!("fixtures/canonical_event_v0.json");
@@ -35,6 +35,77 @@ fn canonical_event_v0_fixture_round_trips_with_mandatory_security_metadata() {
 }
 
 #[test]
+fn canonical_event_v0_accepts_and_round_trips_optional_artifact_provenance() {
+    let mut value: serde_json::Value = serde_json::from_str(FIXTURE).expect("valid fixture");
+    value["artifact"] = serde_json::json!({
+        "kind": "url",
+        "provider": "browser",
+        "display_label": "URL content",
+        "locator_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "trust_level": "untrusted_content"
+    });
+
+    let event =
+        parse_canonical_event_json(&value.to_string()).expect("artifact metadata is accepted");
+
+    let artifact = event.artifact.as_ref().expect("artifact preserved");
+    assert_eq!(artifact.kind, ArtifactKind::Url);
+    assert_eq!(artifact.provider.as_deref(), Some("browser"));
+    assert_eq!(artifact.display_label, "URL content");
+    assert_eq!(artifact.trust_level, TrustLevel::UntrustedContent);
+    let serialized = serialize_canonical_event_json(&event).expect("event serializes");
+    let reparsed = parse_canonical_event_json(&serialized).expect("serialized event reparses");
+    assert_eq!(reparsed.artifact, event.artifact);
+}
+
+#[test]
+fn canonical_event_v0_legacy_fixture_remains_valid_without_artifact() {
+    let event = parse_canonical_event_json(FIXTURE).expect("legacy fixture remains accepted");
+
+    assert!(event.artifact.is_none());
+}
+
+#[test]
+fn canonical_event_v0_rejects_unknown_artifact_fields_and_invalid_artifact_values() {
+    let mut unknown: serde_json::Value = serde_json::from_str(FIXTURE).expect("valid fixture");
+    unknown["artifact"] = serde_json::json!({
+        "kind": "file",
+        "display_label": "File content",
+        "trust_level": "tool_output",
+        "authority_override": true
+    });
+    assert!(parse_canonical_event_json(&unknown.to_string())
+        .expect_err("unknown artifact field is rejected")
+        .to_string()
+        .contains("unknown field"));
+
+    for (field, value) in [
+        ("display_label", serde_json::json!("   ")),
+        ("display_label", serde_json::json!("x".repeat(129))),
+        ("provider", serde_json::json!("   ")),
+        ("provider", serde_json::json!("x".repeat(65))),
+        ("locator_hash", serde_json::json!("sha256:ABCDEF")),
+        ("locator_hash", serde_json::json!("sha256:0123")),
+    ] {
+        let mut invalid: serde_json::Value = serde_json::from_str(FIXTURE).expect("valid fixture");
+        invalid["artifact"] = serde_json::json!({
+            "kind": "file",
+            "provider": "file",
+            "display_label": "File content",
+            "locator_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "trust_level": "tool_output"
+        });
+        invalid["artifact"][field] = value;
+        let error = parse_canonical_event_json(&invalid.to_string())
+            .expect_err("invalid artifact metadata is rejected");
+        assert!(
+            error.to_string().contains(field),
+            "{error} should mention {field}"
+        );
+    }
+}
+
+#[test]
 fn canonical_event_v0_rejects_missing_provenance_trust_or_redaction() {
     for field in ["provenance", "trust_level", "redaction"] {
         let mut value: serde_json::Value =
@@ -50,6 +121,25 @@ fn canonical_event_v0_rejects_missing_provenance_trust_or_redaction() {
             error.to_string().contains(field),
             "error {error} should mention missing field {field}"
         );
+    }
+}
+
+#[test]
+fn canonical_event_rejects_hostile_event_ids_fail_closed() {
+    let overlong = "x".repeat(129);
+    for event_id in [
+        "../secret",
+        " Authorization: Bearer FAKE_SECRET ",
+        "ignore previous instructions",
+        "evt_é",
+        "evt control\n",
+        overlong.as_str(),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture parses");
+        value["event_id"] = serde_json::json!(event_id);
+        let error =
+            parse_canonical_event_json(&value.to_string()).expect_err("hostile event_id rejected");
+        assert!(!error.to_string().contains(event_id));
     }
 }
 

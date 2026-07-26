@@ -26,6 +26,13 @@ fn variant_event(id: &str, title: &str) -> String {
     serde_json::to_string(&value).expect("variant serializes")
 }
 
+fn variant_event_value(id: &str, title: &str) -> serde_json::Value {
+    let mut value: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).expect("fixture JSON");
+    value["event_id"] = serde_json::json!(id);
+    value["title"] = serde_json::json!(title);
+    value
+}
+
 fn plugin_sequence_event(
     id: &str,
     event_type: &str,
@@ -92,6 +99,83 @@ fn live_spool_ingestion_skips_malformed_lines_and_counts_dropped_events() {
     assert_eq!(replay.ingested_events, 0);
     assert_eq!(replay.dropped_events, 0);
     assert_eq!(store.list_events().expect("events list").len(), 1);
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
+
+#[test]
+fn live_spool_ingestion_reserves_synthetic_artifact_key_when_top_level_absent() {
+    let db_path = temp_path("artifact-spoof.sqlite");
+    let spool_path = temp_path("artifact-spoof.jsonl");
+    let checkpoint_path = temp_path("artifact-spoof.offset");
+    let mut event = variant_event_value("evt_spool_artifact_spoof", "Spoofed attribute artifact");
+    event["artifact"] = serde_json::Value::Null;
+    event["attributes"]["artifact"] = serde_json::json!({
+        "kind": "url",
+        "provider": "browser",
+        "display_label": "URL content",
+        "locator_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "trust_level": "untrusted_content"
+    });
+    fs::write(&spool_path, format!("{event}\n")).expect("spool is written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let summary = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("spool event ingests");
+
+    assert_eq!(summary.ingested_events, 1);
+    let stored = store
+        .get_event("evt_spool_artifact_spoof")
+        .expect("event lookup succeeds")
+        .expect("event was stored");
+    assert!(
+        !stored.attributes.contains_key("artifact"),
+        "attacker-controlled attributes.artifact must not survive storage"
+    );
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(spool_path);
+    let _ = fs::remove_file(checkpoint_path);
+}
+
+#[test]
+fn live_spool_ingestion_top_level_artifact_overrides_conflicting_attribute_artifact() {
+    let db_path = temp_path("artifact-override.sqlite");
+    let spool_path = temp_path("artifact-override.jsonl");
+    let checkpoint_path = temp_path("artifact-override.offset");
+    let mut event = variant_event_value("evt_spool_artifact_override", "Top-level artifact wins");
+    event["artifact"] = serde_json::json!({
+        "kind": "file",
+        "provider": "file",
+        "display_label": "File content",
+        "locator_hash": null,
+        "trust_level": "tool_output"
+    });
+    event["attributes"]["artifact"] = serde_json::json!({
+        "kind": "url",
+        "provider": "browser",
+        "display_label": "URL content",
+        "locator_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "trust_level": "untrusted_content"
+    });
+    fs::write(&spool_path, format!("{event}\n")).expect("spool is written");
+
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let summary = ingest_canonical_jsonl_spool(&store, &spool_path, &checkpoint_path)
+        .expect("spool event ingests");
+
+    assert_eq!(summary.ingested_events, 1);
+    let stored = store
+        .get_event("evt_spool_artifact_override")
+        .expect("event lookup succeeds")
+        .expect("event was stored");
+    assert_eq!(stored.attributes["artifact"]["kind"], "file");
+    assert_eq!(
+        stored.attributes["artifact"]["display_label"],
+        "File content"
+    );
 
     let _ = fs::remove_file(db_path);
     let _ = fs::remove_file(spool_path);

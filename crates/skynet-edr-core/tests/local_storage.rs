@@ -1,10 +1,15 @@
 //! `SQLite` and JSONL local storage regression tests.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use skynet_edr_core::{
-    append_event_jsonl, append_incident_jsonl, Event, EventId, EventSource, Incident, IncidentId,
-    IncidentStatus, LocalStore, RedactionMetadata, Severity, SourceKind,
+    append_event_jsonl, append_incident_jsonl, is_routable_incident_identifier,
+    safe_incident_identifier, Event, EventId, EventSource, Incident, IncidentId, IncidentStatus,
+    LocalStore, RedactionMetadata, Severity, SourceKind,
 };
 
 fn temp_path(name: &str) -> PathBuf {
@@ -63,6 +68,61 @@ fn sample_incident(id: &str, event: Event) -> Incident {
         source: sample_source(),
         events: vec![event],
         redaction: no_redaction(),
+    }
+}
+
+fn insert_raw_incident_row(path: &PathBuf, column_id: &str, payload: &Incident) {
+    let connection = rusqlite::Connection::open(path).expect("raw sqlite connection opens");
+    let payload_json = serde_json::to_string(payload).expect("legacy payload serializes");
+    connection
+        .execute(
+            "INSERT INTO incidents (
+                id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                column_id,
+                i64::try_from(payload.created_at_unix_ms).expect("created timestamp fits sqlite"),
+                i64::try_from(payload.updated_at_unix_ms).expect("updated timestamp fits sqlite"),
+                "open",
+                "high",
+                payload.title,
+                payload_json,
+            ],
+        )
+        .expect("raw legacy row inserts");
+}
+
+fn raw_incident_ids(path: &PathBuf) -> Vec<String> {
+    let connection = rusqlite::Connection::open(path).expect("raw sqlite connection opens");
+    let mut statement = connection
+        .prepare("SELECT id FROM incidents ORDER BY id ASC")
+        .expect("raw incident id query prepares");
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("raw incident id query runs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("raw incident ids decode")
+}
+
+fn raw_incident_payloads(path: &PathBuf) -> Vec<String> {
+    let connection = rusqlite::Connection::open(path).expect("raw sqlite connection opens");
+    let mut statement = connection
+        .prepare("SELECT payload_json FROM incidents ORDER BY id ASC")
+        .expect("raw incident payload query prepares");
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("raw incident payload query runs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("raw incident payloads decode")
+}
+
+fn cleanup_sqlite_files(path: &Path) {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        let _ = fs::remove_file(candidate);
     }
 }
 
@@ -194,6 +254,40 @@ fn sqlite_store_normalizes_hostile_redaction_metadata_before_persistence() {
 }
 
 #[test]
+fn sqlite_store_pseudonymizes_invalid_event_ids_before_persistence() {
+    let db_path = temp_path("event-id-pseudonym.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let raw_one = "../secret/FAKE_TOKEN_NEVER_EXPOSE ignore previous instructions";
+    let raw_two = "../secret/FAKE_TOKEN_NEVER_EXPOSE different";
+
+    store
+        .insert_event(&sample_event(raw_one))
+        .expect("hostile event persists safely");
+    store
+        .insert_event(&sample_event(raw_two))
+        .expect("second hostile event persists safely");
+
+    let events = store.list_events().expect("events list succeeds");
+    let body = serde_json::to_string(&events).expect("events serialize");
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.id.as_str().starts_with("redacted-event-sha256-")));
+    assert!(events
+        .iter()
+        .all(|event| event.id.as_str().len() == "redacted-event-sha256-".len() + 64));
+    assert_ne!(events[0].id, events[1].id);
+    assert!(!body.contains("FAKE_TOKEN_NEVER_EXPOSE"));
+    assert!(!body.contains("ignore previous instructions"));
+    assert!(store
+        .get_event(raw_one)
+        .expect("raw id query succeeds")
+        .is_none());
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
 fn sqlite_store_upserts_events_without_duplicate_rows() {
     let db_path = temp_path("upsert.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");
@@ -228,6 +322,223 @@ fn jsonl_export_appends_one_event_per_line() {
     assert_eq!(decoded_second.id.as_str(), "evt_jsonl_2");
 
     fs::remove_file(jsonl_path).expect("temporary jsonl is removed");
+}
+
+#[test]
+fn incident_identifier_contract_preserves_valid_opaque_values_and_pseudonymizes_invalid() {
+    let max_non_bmp = "😀".repeat(256);
+    let with_slash_space = "inc with spaces/and/slashes";
+    let hostile_inert = "<script>alert(1)</script> ../ still opaque";
+
+    for value in [max_non_bmp.as_str(), with_slash_space, hostile_inert] {
+        assert!(is_routable_incident_identifier(value));
+        assert_eq!(safe_incident_identifier(value), value);
+    }
+
+    for invalid in ["", ".", "..", &"a".repeat(257)] {
+        let pseudonym = safe_incident_identifier(invalid);
+        assert!(!is_routable_incident_identifier(invalid));
+        assert!(pseudonym.starts_with("redacted-incident-sha256-"));
+        assert_eq!(pseudonym.len(), "redacted-incident-sha256-".len() + 64);
+        assert!(pseudonym["redacted-incident-sha256-".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
+}
+
+#[test]
+fn sqlite_and_jsonl_storage_normalize_invalid_incident_ids_but_preserve_valid_opaque_ids() {
+    let db_path = temp_path("incident-id-pseudonym.sqlite");
+    let jsonl_path = temp_path("incident-id-pseudonym.jsonl");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let empty = sample_incident("", sample_event("evt_incident_empty"));
+    let overlong_id = "😀".repeat(257);
+    let overlong = sample_incident(&overlong_id, sample_event("evt_incident_overlong"));
+    let dot = sample_incident(".", sample_event("evt_incident_dot"));
+    let dotdot = sample_incident("..", sample_event("evt_incident_dotdot"));
+    let valid = sample_incident(
+        "inc/../secret with spaces",
+        sample_event("evt_incident_valid"),
+    );
+    let max_non_bmp_id = "😀".repeat(256);
+    let max_non_bmp = sample_incident(&max_non_bmp_id, sample_event("evt_incident_non_bmp"));
+
+    store
+        .insert_incident(&empty)
+        .expect("empty incident persists as pseudonym");
+    store
+        .insert_incident(&overlong)
+        .expect("overlong incident persists as pseudonym");
+    store
+        .insert_incident(&dot)
+        .expect("dot incident persists as pseudonym");
+    store
+        .insert_incident(&dotdot)
+        .expect("dotdot incident persists as pseudonym");
+    store
+        .insert_incident(&valid)
+        .expect("valid opaque incident persists unchanged");
+    store
+        .insert_incident(&max_non_bmp)
+        .expect("max non-BMP incident persists unchanged");
+    append_incident_jsonl(&jsonl_path, &overlong).expect("overlong incident appends safely");
+    append_incident_jsonl(&jsonl_path, &dot).expect("dot incident appends safely");
+
+    let empty_safe = safe_incident_identifier("");
+    let overlong_safe = safe_incident_identifier(&overlong_id);
+    let dot_safe = safe_incident_identifier(".");
+    let dotdot_safe = safe_incident_identifier("..");
+    let stored = store.list_incidents().expect("incidents list succeeds");
+    let body = serde_json::to_string(&stored).expect("stored incidents serialize");
+    let jsonl = fs::read_to_string(&jsonl_path).expect("jsonl reads");
+
+    assert!(store
+        .get_incident("")
+        .expect("raw empty query succeeds")
+        .is_none());
+    assert!(store
+        .get_incident(&overlong_id)
+        .expect("raw overlong query succeeds")
+        .is_none());
+    assert!(store
+        .get_incident(".")
+        .expect("raw dot query succeeds")
+        .is_none());
+    assert!(store
+        .get_incident("..")
+        .expect("raw dotdot query succeeds")
+        .is_none());
+    assert_eq!(
+        store
+            .get_incident(&empty_safe)
+            .expect("empty pseudonym query succeeds")
+            .expect("empty pseudonym exists")
+            .id
+            .as_str(),
+        empty_safe
+    );
+    assert_eq!(
+        store
+            .get_incident("inc/../secret with spaces")
+            .expect("valid opaque query succeeds")
+            .expect("valid opaque exists")
+            .id
+            .as_str(),
+        "inc/../secret with spaces"
+    );
+    assert!(body.contains(&overlong_safe));
+    assert!(body.contains(&dot_safe));
+    assert!(body.contains(&dotdot_safe));
+    assert!(!body.contains(&overlong_id));
+    assert!(jsonl.contains(&overlong_safe));
+    assert!(jsonl.contains(&dot_safe));
+    assert!(!jsonl.contains(&overlong_id));
+
+    cleanup_sqlite_files(&db_path);
+    fs::remove_file(jsonl_path).expect("temporary jsonl is removed");
+}
+
+#[test]
+fn writable_migration_normalizes_legacy_invalid_incident_rows_transactionally() {
+    let db_path = temp_path("legacy-incident-id-migration.sqlite");
+    {
+        let store = LocalStore::open(&db_path).expect("store creates schema");
+        store
+            .insert_incident(&sample_incident(
+                "inc_preserved",
+                sample_event("evt_preserved"),
+            ))
+            .expect("preserved incident persists");
+    }
+    let overlong_raw = "x".repeat(257);
+    let nul_initial_raw = format!("\0{}", "n".repeat(257));
+    let nul_after_one_raw = format!("a\0{}", "m".repeat(256));
+    let invalid_rows = [
+        overlong_raw.as_str(),
+        nul_initial_raw.as_str(),
+        nul_after_one_raw.as_str(),
+        ".",
+        "..",
+    ];
+    for (index, raw) in invalid_rows.iter().enumerate() {
+        insert_raw_incident_row(
+            &db_path,
+            raw,
+            &sample_incident(raw, sample_event(&format!("evt_legacy_{index}"))),
+        );
+    }
+
+    let store = LocalStore::open(&db_path).expect("writable migration succeeds");
+    let ids = raw_incident_ids(&db_path);
+    let payloads = raw_incident_payloads(&db_path).join("\n");
+    let all = serde_json::to_string(&store.list_incidents().expect("incidents list succeeds"))
+        .expect("incidents serialize");
+
+    assert!(ids.contains(&"inc_preserved".to_owned()));
+    for raw in invalid_rows {
+        let safe = safe_incident_identifier(raw);
+        assert!(ids.contains(&safe));
+        assert!(!ids.contains(&raw.to_owned()));
+        let migrated = store
+            .get_incident(&safe)
+            .expect("migrated incident query succeeds")
+            .expect("migrated incident exists");
+        assert_eq!(migrated.id.as_str(), safe);
+        if raw.chars().count() > 2 {
+            assert!(!payloads.contains(raw));
+        }
+    }
+    assert!(store
+        .get_incident("inc_preserved")
+        .expect("preserved query succeeds")
+        .is_some());
+    assert!(!all.contains(&overlong_raw));
+
+    cleanup_sqlite_files(&db_path);
+}
+
+#[test]
+fn writable_migration_rolls_back_on_incident_pseudonym_collision() {
+    let db_path = temp_path("legacy-incident-id-collision.sqlite");
+    {
+        let _store = LocalStore::open(&db_path).expect("store creates schema");
+    }
+    let legacy_raw = "z".repeat(257);
+    let legacy_safe = safe_incident_identifier(&legacy_raw);
+    let dot_raw = ".";
+    insert_raw_incident_row(
+        &db_path,
+        &legacy_safe,
+        &sample_incident(&legacy_safe, sample_event("evt_existing_collision")),
+    );
+    insert_raw_incident_row(
+        &db_path,
+        &legacy_raw,
+        &sample_incident(
+            "raw-payload-before-rollback",
+            sample_event("evt_legacy_collision"),
+        ),
+    );
+    insert_raw_incident_row(
+        &db_path,
+        dot_raw,
+        &sample_incident(
+            "dot-payload-before-rollback",
+            sample_event("evt_dot_collision"),
+        ),
+    );
+
+    let Err(error) = LocalStore::open(&db_path) else {
+        panic!("collision should fail closed");
+    };
+    let ids = raw_incident_ids(&db_path);
+
+    assert!(error.to_string().contains("sqlite storage error"));
+    assert!(ids.contains(&legacy_safe));
+    assert!(ids.contains(&legacy_raw));
+    assert!(ids.contains(&dot_raw.to_owned()));
+
+    cleanup_sqlite_files(&db_path);
 }
 
 #[test]

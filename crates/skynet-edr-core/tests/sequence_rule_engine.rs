@@ -742,6 +742,7 @@ fn canonical_event(
             span_id: None,
             parent_span_id: None,
         },
+        artifact: None,
         trust_level,
         title: format!("fixture {id}"),
         details: None,

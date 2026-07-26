@@ -5,13 +5,15 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Operator-facing Skynet-EDR runtime mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +170,46 @@ pub struct EventProvenance {
     pub parent_span_id: Option<String>,
 }
 
+/// Risky artifact class associated with a canonical event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    /// Email or mailbox content.
+    Email,
+    /// URL/web content.
+    Url,
+    /// Git repository or hosting content.
+    GitRepository,
+    /// Source code or generated code content.
+    Code,
+    /// File content or metadata.
+    File,
+    /// Chat/message content.
+    Message,
+    /// MCP tool or server content.
+    Mcp,
+    /// Terminal or shell content.
+    Terminal,
+    /// Unknown or intentionally unclassified artifact.
+    Unknown,
+}
+
+/// Explicit metadata about the risky artifact, separate from sensor provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactProvenance {
+    /// Coarse artifact type.
+    pub kind: ArtifactKind,
+    /// Bounded integration/provider label when safely known.
+    pub provider: Option<String>,
+    /// Fixed coarse operator-facing label; never raw subject/body/URL/path/command text.
+    pub display_label: String,
+    /// Optional safe locator digest as `sha256:` plus lowercase hex.
+    pub locator_hash: Option<String>,
+    /// Trust class of the artifact content/origin.
+    pub trust_level: TrustLevel,
+}
+
 /// Canonical event envelope exchanged between agent adapters and Skynet-EDR.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -189,6 +231,9 @@ pub struct CanonicalEventEnvelope {
     pub source: EventSource,
     /// Provenance and correlation identity.
     pub provenance: EventProvenance,
+    /// Optional explicit artifact origin metadata kept separate from sensor provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ArtifactProvenance>,
     /// Trust class assigned to the event source/content.
     pub trust_level: TrustLevel,
     /// Short operator-facing event title.
@@ -295,9 +340,9 @@ impl CanonicalEventEnvelope {
     /// Returns [`CanonicalEventError::Validation`] when identity, provenance,
     /// or redaction metadata is missing, blank, or internally inconsistent.
     pub fn validate(&self) -> Result<(), CanonicalEventError> {
-        if self.event_id.as_str().trim().is_empty() {
+        if !is_safe_event_identifier(self.event_id.as_str()) {
             return Err(CanonicalEventError::Validation(
-                "event_id must not be empty".to_owned(),
+                "event_id must match safe identifier contract".to_owned(),
             ));
         }
         if self.event_type.trim().is_empty() {
@@ -324,6 +369,9 @@ impl CanonicalEventEnvelope {
             return Err(CanonicalEventError::Validation(
                 "title must not be empty".to_owned(),
             ));
+        }
+        if let Some(artifact) = &self.artifact {
+            validate_artifact_provenance(artifact)?;
         }
         if self.redaction.contains_sensitive_data == self.redaction.redacted_fields.is_empty() {
             return Err(CanonicalEventError::Validation(
@@ -371,6 +419,52 @@ impl CanonicalEventEnvelope {
             ))),
         }
     }
+}
+
+fn validate_artifact_provenance(artifact: &ArtifactProvenance) -> Result<(), CanonicalEventError> {
+    const MAX_DISPLAY_LABEL_CHARS: usize = 128;
+    const MAX_PROVIDER_CHARS: usize = 64;
+
+    if artifact.display_label.trim().is_empty() {
+        return Err(CanonicalEventError::Validation(
+            "artifact.display_label must not be empty".to_owned(),
+        ));
+    }
+    if artifact.display_label.chars().count() > MAX_DISPLAY_LABEL_CHARS {
+        return Err(CanonicalEventError::Validation(
+            "artifact.display_label exceeds maximum length".to_owned(),
+        ));
+    }
+    if let Some(provider) = &artifact.provider {
+        if provider.trim().is_empty() {
+            return Err(CanonicalEventError::Validation(
+                "artifact.provider must not be empty".to_owned(),
+            ));
+        }
+        if provider.chars().count() > MAX_PROVIDER_CHARS {
+            return Err(CanonicalEventError::Validation(
+                "artifact.provider exceeds maximum length".to_owned(),
+            ));
+        }
+    }
+    if let Some(locator_hash) = &artifact.locator_hash {
+        if !valid_locator_hash(locator_hash) {
+            return Err(CanonicalEventError::Validation(
+                "artifact.locator_hash must be sha256: plus 64 lowercase hex characters".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_locator_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// Parse, deny unknown top-level fields, and validate one canonical event JSON document.
@@ -502,6 +596,7 @@ fn trim_line_bytes(segment: &[u8]) -> &[u8] {
 
 fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {
     let mut attributes = event.attributes;
+    attributes.remove("artifact");
     attributes.insert(
         "schema_version".to_owned(),
         serde_json::json!("skynet.event.v0"),
@@ -515,6 +610,12 @@ fn canonical_event_to_storage_event(event: CanonicalEventEnvelope) -> Event {
         "provenance".to_owned(),
         serde_json::to_value(event.provenance).expect("provenance serializes"),
     );
+    if let Some(artifact) = event.artifact {
+        attributes.insert(
+            "artifact".to_owned(),
+            serde_json::to_value(artifact).expect("artifact serializes"),
+        );
+    }
     if let Some(received_at_unix_ms) = event.received_at_unix_ms {
         attributes.insert(
             "received_at_unix_ms".to_owned(),
@@ -545,6 +646,10 @@ fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvel
     let provenance =
         serde_json::from_value::<EventProvenance>(event.attributes.get("provenance")?.clone())
             .ok()?;
+    let artifact = event
+        .attributes
+        .get("artifact")
+        .and_then(|value| serde_json::from_value::<ArtifactProvenance>(value.clone()).ok());
     let received_at_unix_ms = event
         .attributes
         .get("received_at_unix_ms")
@@ -555,6 +660,7 @@ fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvel
         "event_type",
         "trust_level",
         "provenance",
+        "artifact",
         "received_at_unix_ms",
     ] {
         attributes.remove(synthetic_key);
@@ -569,6 +675,7 @@ fn storage_event_to_canonical_event(event: &Event) -> Option<CanonicalEventEnvel
         severity: event.severity,
         source: event.source.clone(),
         provenance,
+        artifact,
         trust_level,
         title: event.title.clone(),
         details: event.details.clone(),
@@ -2011,6 +2118,28 @@ impl EventId {
     }
 }
 
+/// Return whether a raw event identifier matches the operator-safe contract.
+#[must_use]
+pub fn is_safe_event_identifier(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed == value
+        && trimmed.len() <= 128
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-'))
+}
+
+/// Return a safe event identifier, pseudonymizing invalid legacy raw values.
+#[must_use]
+pub fn safe_event_identifier(value: &str) -> String {
+    if is_safe_event_identifier(value) {
+        return value.to_owned();
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    format!("redacted-event-sha256-{digest:x}")
+}
+
 /// Stable platform-independent incident identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -2028,6 +2157,22 @@ impl IncidentId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Return whether a raw incident identifier matches the routable opaque contract.
+#[must_use]
+pub fn is_routable_incident_identifier(value: &str) -> bool {
+    !value.is_empty() && value != "." && value != ".." && value.chars().count() <= 256
+}
+
+/// Return a routable incident identifier, pseudonymizing invalid legacy raw values.
+#[must_use]
+pub fn safe_incident_identifier(value: &str) -> String {
+    if is_routable_incident_identifier(value) {
+        return value.to_owned();
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    format!("redacted-incident-sha256-{digest:x}")
 }
 
 /// Platform-independent security event payload.
@@ -2937,6 +3082,8 @@ pub enum StorageError {
     Json(serde_json::Error),
     /// Filesystem I/O failed for a database or JSONL export path.
     Io(std::io::Error),
+    /// Existing database header indicates a non-rollback journal mode read-only paths reject.
+    UnsupportedReadOnlyJournalMode,
     /// A timestamp does not fit `SQLite`'s signed integer representation.
     IntegerOutOfRange {
         /// Name of the timestamp field being persisted.
@@ -2952,6 +3099,10 @@ impl std::fmt::Display for StorageError {
             Self::Sqlite(error) => write!(formatter, "sqlite storage error: {error}"),
             Self::Json(error) => write!(formatter, "json storage error: {error}"),
             Self::Io(error) => write!(formatter, "local storage I/O error: {error}"),
+            Self::UnsupportedReadOnlyJournalMode => write!(
+                formatter,
+                "unsupported SQLite journal mode for read-only local store"
+            ),
             Self::IntegerOutOfRange { field, value } => {
                 write!(
                     formatter,
@@ -2982,6 +3133,36 @@ impl From<std::io::Error> for StorageError {
     }
 }
 
+/// Return the actual `SQLite` sidecar path by appending a suffix to the full DB path.
+#[must_use]
+pub fn sqlite_sidecar_path(path: impl AsRef<Path>, suffix: &str) -> PathBuf {
+    let path = path.as_ref();
+    let mut file_name: OsString = path
+        .file_name()
+        .map_or_else(|| path.as_os_str().to_os_string(), ToOwned::to_owned);
+    file_name.push(suffix);
+    path.with_file_name(file_name)
+}
+
+fn reject_unsupported_header_for_read_only(path: &Path) -> StorageResult<()> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(StorageError::Io(error)),
+    };
+    let mut header = [0_u8; 20];
+    match file.read_exact(&mut header) {
+        Ok(()) => {
+            if &header[..16] == b"SQLite format 3\0" && (header[18] != 1 || header[19] != 1) {
+                return Err(StorageError::UnsupportedReadOnlyJournalMode);
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(error) => Err(StorageError::Io(error)),
+    }
+}
+
 /// Local `SQLite` storage for redacted events and incidents.
 pub struct LocalStore {
     path: PathBuf,
@@ -3001,6 +3182,33 @@ impl LocalStore {
         let store = Self { path, connection };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Open an existing local `SQLite` store for read-only queries only.
+    ///
+    /// This constructor is the mutation boundary for HTTP/MCP visibility paths:
+    /// it uses `SQLITE_OPEN_READ_ONLY`, sets connection-local `query_only`, and
+    /// deliberately does not call [`Self::migrate`]. Missing databases, absent
+    /// schema, or attempted writes are returned as storage errors instead of
+    /// creating files, sidecars, tables, indexes, or WAL state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when `SQLite` cannot open the existing database
+    /// read-only or cannot enable/verify `query_only` on the connection.
+    pub fn open_read_only(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        reject_unsupported_header_for_read_only(&path)?;
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.pragma_update(None, "query_only", true)?;
+        let query_only =
+            connection.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))?;
+        if query_only != 1 {
+            return Err(StorageError::Sqlite(
+                rusqlite::Error::ExecuteReturnedResults,
+            ));
+        }
+        Ok(Self { path, connection })
     }
 
     /// Return the database path backing this local store.
@@ -3093,9 +3301,87 @@ impl LocalStore {
         collect_payload_rows(&mut statement, [])
     }
 
+    /// Count all stored incidents without loading incident payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the `SQLite` count query fails or the count
+    /// cannot be represented as `usize`.
+    pub fn count_incidents(&self) -> StorageResult<usize> {
+        self.count_rows("incident.count", "SELECT COUNT(*) FROM incidents")
+    }
+
+    /// Count all stored events without loading event payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the `SQLite` count query fails or the count
+    /// cannot be represented as `usize`.
+    pub fn count_events(&self) -> StorageResult<usize> {
+        self.count_rows("event.count", "SELECT COUNT(*) FROM events")
+    }
+
+    /// List one `SQLite`-bounded incident page ordered newest update first.
+    ///
+    /// Incidents are ordered by `updated_at_unix_ms DESC, id ASC`, with `LIMIT`
+    /// and `OFFSET` applied inside `SQLite` using bound parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when integer conversion, `SQLite` query, or JSON
+    /// deserialization fails.
+    pub fn list_incidents_page(&self, limit: usize, offset: usize) -> StorageResult<Vec<Incident>> {
+        let limit = sqlite_usize("incident.page.limit", limit)?;
+        let offset = sqlite_usize("incident.page.offset", offset)?;
+        let mut statement = self.connection.prepare(
+            "SELECT payload_json FROM incidents
+             ORDER BY updated_at_unix_ms DESC, id ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        collect_payload_rows(&mut statement, params![limit, offset])
+    }
+
+    /// Count all incidents and list one bounded page from one `SQLite` read snapshot.
+    ///
+    /// The count and page are read inside one explicit transaction on this
+    /// connection so readers cannot observe a total from one snapshot and rows
+    /// from another during concurrent ingestion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when integer conversion, `SQLite` query, or JSON
+    /// deserialization fails.
+    pub fn count_and_list_incidents_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> StorageResult<(usize, Vec<Incident>)> {
+        let limit = sqlite_usize("incident.page.limit", limit)?;
+        let offset = sqlite_usize("incident.page.offset", offset)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let count = transaction.query_row("SELECT COUNT(*) FROM incidents", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let total = usize::try_from(count).map_err(|_| StorageError::IntegerOutOfRange {
+            field: "incident.count",
+            value: u64::MAX,
+        })?;
+        let incidents = {
+            let mut statement = transaction.prepare(
+                "SELECT payload_json FROM incidents
+                 ORDER BY updated_at_unix_ms DESC, id ASC
+                 LIMIT ?1 OFFSET ?2",
+            )?;
+            collect_payload_rows(&mut statement, params![limit, offset])?
+        };
+        transaction.commit()?;
+        Ok((total, incidents))
+    }
+
     fn migrate(&self) -> StorageResult<()> {
         self.connection.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA journal_mode = DELETE;
              PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY NOT NULL,
@@ -3119,7 +3405,70 @@ impl LocalStore {
              CREATE INDEX IF NOT EXISTS idx_incidents_updated_at
                 ON incidents(updated_at_unix_ms);",
         )?;
+        self.normalize_legacy_incident_ids()?;
         Ok(())
+    }
+
+    fn normalize_legacy_incident_ids(&self) -> StorageResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let rows = {
+            let mut statement =
+                transaction.prepare("SELECT id, payload_json FROM incidents ORDER BY id ASC")?;
+            let mapped = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (raw_id, payload_json) in rows
+            .into_iter()
+            .filter(|(raw_id, _)| !is_routable_incident_identifier(raw_id))
+        {
+            let mut incident: Incident = serde_json::from_str(&payload_json)?;
+            let safe_id = safe_incident_identifier(&raw_id);
+            incident.id = IncidentId::new(safe_id);
+            let incident = sanitize_incident_for_storage(&incident);
+            let payload = serde_json::to_string(&incident)?;
+            let severity = serde_json::to_value(incident.severity)?;
+            let status = serde_json::to_value(incident.status)?;
+            let created_at_unix_ms =
+                sqlite_unix_ms("incident.created_at_unix_ms", incident.created_at_unix_ms)?;
+            let updated_at_unix_ms =
+                sqlite_unix_ms("incident.updated_at_unix_ms", incident.updated_at_unix_ms)?;
+            transaction.execute(
+                "UPDATE incidents
+                 SET id = ?1,
+                     created_at_unix_ms = ?2,
+                     updated_at_unix_ms = ?3,
+                     status = ?4,
+                     severity = ?5,
+                     title = ?6,
+                     payload_json = ?7
+                 WHERE id = ?8",
+                params![
+                    incident.id.as_str(),
+                    created_at_unix_ms,
+                    updated_at_unix_ms,
+                    json_string_value(&status),
+                    json_string_value(&severity),
+                    incident.title,
+                    payload,
+                    raw_id,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn count_rows(&self, field: &'static str, sql: &str) -> StorageResult<usize> {
+        let count = self
+            .connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))?;
+        usize::try_from(count).map_err(|_| StorageError::IntegerOutOfRange {
+            field,
+            value: u64::MAX,
+        })
     }
 }
 
@@ -3190,10 +3539,18 @@ fn sqlite_unix_ms(field: &'static str, value: u64) -> StorageResult<i64> {
     i64::try_from(value).map_err(|_| StorageError::IntegerOutOfRange { field, value })
 }
 
+fn sqlite_usize(field: &'static str, value: usize) -> StorageResult<i64> {
+    i64::try_from(value).map_err(|_| StorageError::IntegerOutOfRange {
+        field,
+        value: u64::try_from(value).unwrap_or(u64::MAX),
+    })
+}
+
 fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
     let mut sanitized = incident.clone();
     let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
 
+    sanitized.id = IncidentId::new(safe_incident_identifier(sanitized.id.as_str()));
     sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
     sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut fields);
     sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
@@ -3210,6 +3567,7 @@ fn sanitize_event_for_storage(event: &Event) -> Event {
     let mut sanitized = event.clone();
     let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
 
+    sanitized.id = EventId::new(safe_event_identifier(sanitized.id.as_str()));
     sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
     sanitized.details = sanitized
         .details
@@ -3342,4 +3700,174 @@ fn collect_payload_rows<T: for<'de> Deserialize<'de>, P: rusqlite::Params>(
     let rows = statement.query_map(params, |row| deserialize_row_json(row, 0))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StorageError::from)
+}
+
+#[cfg(test)]
+mod storage_hardening_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "skynet-edr-core-{name}-{}-{}.sqlite-nonce",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ))
+    }
+
+    fn sidecars(path: &Path) -> [PathBuf; 2] {
+        [
+            sqlite_sidecar_path(path, "-wal"),
+            sqlite_sidecar_path(path, "-shm"),
+        ]
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_file(path);
+        for sidecar in sidecars(path) {
+            let _ = fs::remove_file(sidecar);
+        }
+    }
+
+    fn force_wal_header_without_sidecars(path: &Path) {
+        cleanup(path);
+        mark_existing_db_wal_without_sidecars(path);
+    }
+
+    fn mark_existing_db_wal_without_sidecars(path: &Path) {
+        {
+            let connection = Connection::open(path).expect("raw sqlite opens");
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+                .expect("journal mode switches to WAL");
+            assert_eq!(mode, "wal");
+            connection
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS incidents (id TEXT PRIMARY KEY NOT NULL, payload_json TEXT NOT NULL);\
+                     CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY NOT NULL, payload_json TEXT NOT NULL);\
+                     INSERT OR IGNORE INTO incidents (id, payload_json) VALUES ('inc', '{}');\
+                     PRAGMA wal_checkpoint(TRUNCATE);",
+                )
+                .expect("raw WAL DB initializes");
+        }
+        for sidecar in sidecars(path) {
+            let _ = fs::remove_file(sidecar);
+        }
+        let mut header = [0_u8; 20];
+        File::open(path)
+            .expect("DB file opens")
+            .read_exact(&mut header)
+            .expect("header reads");
+        assert_eq!(&header[..16], b"SQLite format 3\0");
+        assert_eq!(header[18], 2, "read version must be WAL");
+        assert_eq!(header[19], 2, "write version must be WAL");
+    }
+
+    fn sample_source() -> EventSource {
+        EventSource {
+            kind: SourceKind::Configuration,
+            sensor: "linux-passive-fixture".to_owned(),
+            integration: Some("hermes".to_owned()),
+        }
+    }
+
+    fn no_redaction() -> RedactionMetadata {
+        RedactionMetadata {
+            contains_sensitive_data: false,
+            redacted_fields: Vec::new(),
+        }
+    }
+
+    fn sample_incident() -> Incident {
+        let event = Event {
+            id: EventId::new("evt_storage_hardening"),
+            observed_at_unix_ms: 1_781_440_123_000,
+            severity: Severity::High,
+            source: sample_source(),
+            title: "Storage hardening test event".to_owned(),
+            details: Some("Clearly fake test data; no secrets.".to_owned()),
+            attributes: BTreeMap::from([(
+                "event_type".to_owned(),
+                serde_json::json!("agent.mcp.tool.requested"),
+            )]),
+            redaction: no_redaction(),
+        };
+        Incident {
+            id: IncidentId::new("inc_storage_hardening"),
+            created_at_unix_ms: 1_781_440_123_000,
+            updated_at_unix_ms: 1_781_440_124_000,
+            status: IncidentStatus::Open,
+            severity: Severity::High,
+            title: "Storage hardening test incident".to_owned(),
+            summary: "Clearly fake incident; no secrets.".to_owned(),
+            source: event.source.clone(),
+            events: vec![event],
+            redaction: no_redaction(),
+        }
+    }
+
+    #[test]
+    fn read_only_open_fails_closed_for_wal_header_without_creating_appended_sidecars() {
+        let path = temp_db("wal-read-only-fail-closed");
+        force_wal_header_without_sidecars(&path);
+
+        let Err(error) = LocalStore::open_read_only(&path) else {
+            panic!("read-only WAL DB must fail closed")
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported SQLite journal mode"),
+            "unexpected error: {error}"
+        );
+        for sidecar in sidecars(&path) {
+            assert!(
+                !sidecar.exists(),
+                "read-only open must not create {sidecar:?}"
+            );
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn writable_open_converts_existing_wal_store_to_rollback_journal_and_preserves_rows() {
+        let path = temp_db("wal-migration-preserves-rows");
+        cleanup(&path);
+        {
+            let store = LocalStore::open(&path).expect("initial writable store opens");
+            store
+                .insert_incident(&sample_incident())
+                .expect("sample incident persists");
+        }
+        mark_existing_db_wal_without_sidecars(&path);
+
+        {
+            let store = LocalStore::open(&path).expect("writable open converts WAL store");
+            assert_eq!(store.count_incidents().expect("incident count reads"), 1);
+            assert_eq!(store.count_events().expect("event count reads"), 1);
+            let mode: String = store
+                .connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .expect("journal mode reads");
+            assert_eq!(mode, "delete");
+        }
+        for sidecar in sidecars(&path) {
+            assert!(
+                !sidecar.exists(),
+                "writable migration must close without {sidecar:?}"
+            );
+        }
+        let read_only = LocalStore::open_read_only(&path).expect("converted DB opens read-only");
+        assert_eq!(
+            read_only.count_incidents().expect("incident count reads"),
+            1
+        );
+        assert_eq!(read_only.count_events().expect("event count reads"), 1);
+        cleanup(&path);
+    }
 }

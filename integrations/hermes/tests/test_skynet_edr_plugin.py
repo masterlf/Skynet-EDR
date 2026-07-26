@@ -1,13 +1,25 @@
+import base64
+import hashlib
 import importlib.util
 import json
 import logging
 import os
+import re
 import stat
+import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "__init__.py"
+DASHBOARD_API_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "plugin_api.py"
+DASHBOARD_MANIFEST_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "manifest.json"
+DASHBOARD_BUNDLE_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "dashboard" / "plugin.js"
+DESKTOP_PLUGIN_PATH = Path(__file__).resolve().parents[1] / "skynet-edr" / "desktop" / "plugin.js"
+CI_WORKFLOW_PATH = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci.yml"
 
 
 def load_plugin():
@@ -19,6 +31,67 @@ def load_plugin():
     return module
 
 
+class FakeHTTPException(Exception):
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+class FakeAPIRouter:
+    def __init__(self) -> None:
+        self.routes = []
+
+    def get(self, path):
+        def decorator(func):
+            self.routes.append(("GET", path, func.__name__))
+            return func
+
+        return decorator
+
+
+def fake_query(default, ge=None, le=None):
+    return default
+
+
+def load_dashboard_api():
+    fake_fastapi = types.ModuleType("fastapi")
+    setattr(fake_fastapi, "APIRouter", FakeAPIRouter)
+    setattr(fake_fastapi, "HTTPException", FakeHTTPException)
+    setattr(fake_fastapi, "Query", fake_query)
+    spec = importlib.util.spec_from_file_location("skynet_edr_dashboard_api_test", DASHBOARD_API_PATH)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    original = sys.modules.get("fastapi")
+    sys.modules["fastapi"] = fake_fastapi
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if original is None:
+            sys.modules.pop("fastapi", None)
+        else:
+            sys.modules["fastapi"] = original
+    return module
+
+
+class FakeResponse:
+    def __init__(self, body: bytes, content_type: str = "application/json") -> None:
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, limit: int = -1) -> bytes:
+        if limit < 0:
+            return self._body
+        return self._body[:limit]
+
+
 class FakeContext:
     def __init__(self):
         self.hooks = {}
@@ -28,6 +101,50 @@ class FakeContext:
 
 
 class SkynetEdrHermesPluginTests(unittest.TestCase):
+    def test_ci_executes_dashboard_behavior_tests(self):
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("node --test integrations/hermes/skynet-edr/dashboard/plugin.test.mjs", workflow)
+
+    def test_dashboard_risk_explorer_is_visible_integrity_pinned_and_loadable(self):
+        manifest = json.loads(DASHBOARD_MANIFEST_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "skynet-edr")
+        self.assertEqual(manifest["label"], "Skynet-EDR")
+        self.assertEqual(manifest["icon"], "Shield")
+        self.assertEqual(manifest["api"], "plugin_api.py")
+        self.assertEqual(manifest["entry"], "plugin.js")
+        self.assertEqual(manifest["tab"]["path"], "/skynet-edr/risks")
+        self.assertFalse(manifest["tab"]["hidden"])
+        self.assertTrue(DASHBOARD_BUNDLE_PATH.is_file())
+
+        bundle_bytes = DASHBOARD_BUNDLE_PATH.read_bytes()
+        bundle = bundle_bytes.decode("utf-8")
+        expected_integrity = "sha384-" + base64.b64encode(hashlib.sha384(bundle_bytes).digest()).decode("ascii")
+        self.assertEqual(manifest["integrity"], expected_integrity)
+        self.assertIn('registry.register("skynet-edr"', bundle)
+        self.assertIn("window.__HERMES_PLUGIN_SDK__", bundle)
+        self.assertIn("SDK.fetchJSON", bundle)
+        self.assertIn("const POLL_MS = 10000", bundle)
+        for forbidden in (
+            "fetch(",
+            "XMLHttpRequest",
+            ".innerHTML",
+            "dangerouslySetInnerHTML",
+            "WebSocket(",
+            'method: "POST"',
+            'method: "PUT"',
+            'method: "PATCH"',
+            'method: "DELETE"',
+        ):
+            self.assertNotIn(forbidden, bundle)
+
+        syntax = subprocess.run(
+            ["node", "--check", str(DASHBOARD_BUNDLE_PATH)],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.state_dir = Path(self.tmp.name)
@@ -97,6 +214,216 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertNotIn("/root/.hermes/auth.json", serialized)
         self.assertTrue(event["redaction"]["contains_sensitive_data"])
 
+    def test_pre_tool_call_omits_url_query_params_without_secret_regex_match(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"](
+            "web_extract",
+            {"url": "https://example.invalid/patient?condition=FAKE_CONDITION&name=FAKE_ALICE"},
+        )
+        event = self.read_events()[-1]
+        serialized = json.dumps(event)
+
+        self.assertEqual(event["attributes"]["params_preview"], "[OMITTED:tool_params]")
+        self.assertNotIn("FAKE_CONDITION", serialized)
+        self.assertNotIn("FAKE_ALICE", serialized)
+        self.assertNotIn("condition=", serialized)
+        self.assertNotIn("name=", serialized)
+
+    def test_pre_tool_call_omits_unknown_and_mcp_params_by_default(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("unknown_tool", {"note": "FAKE_UNKNOWN_VALUE"})
+        ctx.hooks["pre_tool_call"]("remote.fetch", {"note": "FAKE_MCP_VALUE"})
+        unknown_event, mcp_event = self.read_events()[-2:]
+        serialized = "\n".join(json.dumps(event) for event in (unknown_event, mcp_event))
+
+        self.assertEqual(unknown_event["attributes"]["params_preview"], "[OMITTED:tool_params]")
+        self.assertEqual(mcp_event["attributes"]["params_preview"], "[OMITTED:tool_params]")
+        self.assertNotIn("FAKE_UNKNOWN_VALUE", serialized)
+        self.assertNotIn("FAKE_MCP_VALUE", serialized)
+
+    def test_url_locator_hash_ignores_credentials_query_and_fragment(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"](
+            "web_extract",
+            {"url": "https://user:pass@example.invalid/repo?condition=FAKE_CONDITION#frag"},
+        )
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/repo?name=FAKE_ALICE#other"})
+        first, second = self.read_events()[-2:]
+        serialized = "\n".join(json.dumps(event) for event in (first, second))
+
+        self.assertRegex(first["artifact"]["locator_hash"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(first["artifact"]["locator_hash"], second["artifact"]["locator_hash"])
+        self.assertEqual(first["attributes"]["params_preview"], "[OMITTED:tool_params]")
+        self.assertNotIn("user:pass", serialized)
+        self.assertNotIn("FAKE_CONDITION", serialized)
+        self.assertNotIn("FAKE_ALICE", serialized)
+        self.assertNotIn("/repo?", serialized)
+
+    def test_url_locator_hash_keeps_distinct_safe_paths(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/alpha"})
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/beta"})
+        first, second = self.read_events()[-2:]
+
+        self.assertNotEqual(first["artifact"]["locator_hash"], second["artifact"]["locator_hash"])
+
+    def test_url_locator_hash_preserves_repeated_path_slashes_and_omits_raw_url_parts(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        for url in [
+            "https://user:pass@example.invalid/a//b?secret=FAKE_QUERY#frag",
+            "https://example.invalid/a/b?other=FAKE_OTHER#other",
+            "https://example.invalid/a//./b?x=FAKE_X#x",
+        ]:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        repeated, collapsed, dot_segment = self.read_events()[-3:]
+        serialized = "\n".join(json.dumps(event) for event in (repeated, collapsed, dot_segment))
+
+        self.assertNotEqual(repeated["artifact"]["locator_hash"], collapsed["artifact"]["locator_hash"])
+        self.assertEqual(repeated["artifact"]["locator_hash"], dot_segment["artifact"]["locator_hash"])
+        for forbidden in ["user:pass", "FAKE_QUERY", "FAKE_OTHER", "FAKE_X", "#frag", "?secret"]:
+            self.assertNotIn(forbidden, serialized)
+
+    def test_url_locator_hash_canonicalizes_only_safe_equivalences(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        equivalent_urls = [
+            "HTTPS://Example.Invalid:443/a/b/../c/%7euser/%41",
+            "https://example.invalid/a/c/~user/A",
+            "https://example.invalid:443/a/%2e/b/%2E%2e/c/~user/A",
+        ]
+        for url in equivalent_urls:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-3:]]
+        self.assertEqual(len(set(hashes)), 1)
+
+    def test_url_locator_hash_preserves_non_default_ports_and_reserved_escapes(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        for url in [
+            "https://example.invalid/path",
+            "https://example.invalid:444/path",
+            "https://example.invalid/a%2Fb",
+            "https://example.invalid/a/b",
+        ]:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-4:]]
+        self.assertNotEqual(hashes[0], hashes[1])
+        self.assertNotEqual(hashes[2], hashes[3])
+
+    def test_url_locator_hash_canonicalizes_ipv6_and_terminal_dot_segments(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        equivalent_groups = [
+            [
+                "https://[0:0:0:0:0:0:0:1]:443/a/b/.",
+                "https://[::1]/a/b/",
+                "https://[::1]/a/%62/",
+            ],
+            [
+                "http://example.invalid:80/a/b/..",
+                "http://EXAMPLE.INVALID/a/",
+                "http://example.invalid/a/b/%2E%2e",
+            ],
+        ]
+        for group in equivalent_groups:
+            for url in group:
+                ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+            hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-len(group):]]
+            self.assertEqual(len(set(hashes)), 1)
+
+    def test_url_locator_hash_keeps_ipv6_host_port_and_zone_semantics_distinct(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        urls = [
+            "https://[::1]:444/a",
+            "https://[::1:444]/a",
+            "https://[fe80::1%25Eth0]/a",
+            "https://[fe80::1%25eth0]/a",
+        ]
+        for url in urls:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+        hashes = [event["artifact"]["locator_hash"] for event in self.read_events()[-4:]]
+        self.assertNotEqual(hashes[0], hashes[1])
+        self.assertNotEqual(hashes[2], hashes[3])
+
+    def test_git_locator_hash_rejects_github_substring_in_structured_params_and_fallback(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        hostile_locators = [
+            "https://notgithub.com/owner/repo",
+            "https://github.com.evil/owner/repo",
+            "https://evil.invalid/path/github.com/repo",
+        ]
+        for locator in hostile_locators:
+            ctx.hooks["pre_tool_call"]("git", {"repository": locator})
+            ctx.hooks["pre_tool_call"]("git", {"payload": f"clone {locator}"})
+
+        events = self.read_events()[-6:]
+        serialized = "\n".join(json.dumps(event) for event in events)
+
+        self.assertTrue(all(event["artifact"]["kind"] == "git_repository" for event in events))
+        self.assertTrue(all(event["artifact"]["locator_hash"] is None for event in events))
+        for locator in hostile_locators:
+            self.assertNotIn(locator, serialized)
+
+    def test_git_locator_hash_accepts_exact_github_host_and_bounded_scp_syntax(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        valid_locators = [
+            "https://github.com/owner/repo",
+            "ssh://git@github.com/owner/repo",
+            "git@github.com:owner/repo",
+            "github.com/owner/repo",
+        ]
+        for locator in valid_locators:
+            ctx.hooks["pre_tool_call"]("git", {"repository": locator})
+            ctx.hooks["pre_tool_call"]("git", {"payload": f"clone {locator}"})
+
+        events = self.read_events()[-8:]
+        serialized = "\n".join(json.dumps(event) for event in events)
+
+        self.assertTrue(all(event["artifact"]["kind"] == "git_repository" for event in events))
+        self.assertTrue(all(re.fullmatch(r"sha256:[0-9a-f]{64}", event["artifact"]["locator_hash"] or "") for event in events))
+        self.assertEqual(len({event["artifact"]["locator_hash"] for event in events}), 1)
+        for locator in valid_locators:
+            self.assertNotIn(locator, serialized)
+
+    def test_known_secret_redaction_metadata_still_works_without_raw_value(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("web_extract", {"url": "https://example.invalid/repo?token=FAKE_TOKEN_VALUE"})
+        event = self.read_events()[-1]
+        serialized = json.dumps(event)
+
+        self.assertEqual(event["attributes"]["params_preview"], "[REDACTED:secret]")
+        self.assertTrue(event["redaction"]["contains_sensitive_data"])
+        self.assertEqual(
+            event["redaction"]["redacted_fields"],
+            [{"path": "attributes.params_preview", "reason": "secret", "replacement": "[REDACTED:secret]"}],
+        )
+        self.assertNotIn("FAKE_TOKEN_VALUE", serialized)
+
+    def test_terminal_and_file_artifacts_use_fixed_labels_without_paths_or_commands(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("terminal", {"command": "cat /tmp/private-name.env"})
+        ctx.hooks["post_tool_call"]("read_file", {"path": "/tmp/private-name.env"}, "safe")
+        events = self.read_events()
+        serialized = "\n".join(json.dumps(event) for event in events)
+
+        self.assertEqual(events[-2]["artifact"]["kind"], "terminal")
+        self.assertEqual(events[-2]["artifact"]["display_label"], "Terminal output")
+        self.assertEqual(events[-2]["artifact"]["locator_hash"], None)
+        self.assertEqual(events[-1]["artifact"]["kind"], "file")
+        self.assertEqual(events[-1]["artifact"]["display_label"], "File content")
+        self.assertNotIn("cat /tmp/private-name.env", serialized)
+        self.assertNotIn("/tmp/private-name.env", serialized)
+
     def test_mcp_network_tool_emits_event_consumed_by_mcp_sequence_rule(self):
         ctx = FakeContext()
         self.plugin.register(ctx)
@@ -141,6 +468,17 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(event["event_type"], "agent.tool.requested")
         self.assertTrue(event["attributes"]["network_indicator"])
         self.assertFalse(event["attributes"]["direct_ip"])
+
+    def test_browser_url_with_invalid_port_still_emits_telemetry_without_locator_hash(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        for url in ["https://example.invalid:notaport/path", "https://example.invalid:999999/path"]:
+            ctx.hooks["pre_tool_call"]("web_extract", {"url": url})
+            event = self.read_events()[-1]
+            self.assertIn(event["event_type"], {"agent.tool.requested", "agent.mcp.tool.requested"})
+            self.assertEqual(event["artifact"]["kind"], "url")
+            self.assertEqual(event["artifact"]["locator_hash"], None)
+            self.assertTrue(event["attributes"]["network_indicator"])
 
     def test_post_tool_call_omits_malware_and_prompt_injection_content_but_records_indicators(self):
         ctx = FakeContext()
@@ -219,6 +557,538 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.plugin.register(ctx)
         ctx.hooks["pre_tool_call"]("terminal", {"command": "curl https://example.invalid"})
         self.assertFalse((self.state_dir / "events.jsonl").exists())
+
+
+def run_desktop_plugin_script(extra_js: str, react_stub: str = "const React = {useState(initial) { return [initial, () => {}]; }};\n") -> subprocess.CompletedProcess:
+    text = DESKTOP_PLUGIN_PATH.read_text()
+    transformed = re.sub(r"import\s+React\s+from\s+['\"]react['\"];\n", react_stub, text)
+    transformed = re.sub(r"import\s+\{\s*jsx,\s*jsxs\s*\}\s+from\s+['\"]react/jsx-runtime['\"];\n", "const jsx = (type, props) => ({type, props: props || {}}); const jsxs = jsx;\n", transformed)
+    transformed = re.sub(
+        r"import\s+\{.*?\}\s+from\s+['\"]@hermes/plugin-sdk['\"];\n",
+        "const Badge = 'Badge'; const Button = 'Button'; const EmptyState = 'EmptyState'; const ErrorState = 'ErrorState'; const ScrollArea = 'ScrollArea'; const SearchField = 'SearchField'; const Skeleton = 'Skeleton'; const PALETTE_AREA = 'palette'; const ROUTES_AREA = 'routes'; const SIDEBAR_NAV_AREA = 'sidebar'; const navigateCalls = []; const host = {navigate(path) { navigateCalls.push(path); }}; let queryCalls = []; const useQuery = (config) => { queryCalls.push(config); return {data: undefined, isLoading: false, isFetching: false, error: null, refetch() {}}; }; const fmtDateTime = {format(value) { return Number.isNaN(value.getTime()) ? 'bad' : `fmt:${value.getTime()}`; }};\n",
+        transformed,
+        flags=re.S,
+    )
+    transformed = transformed.replace("export default", "const pluginDefault =")
+    transformed += extra_js
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as handle:
+        handle.write(transformed)
+        script_path = handle.name
+    try:
+        return subprocess.run(["node", script_path], capture_output=True, text=True, check=False)
+    finally:
+        Path(script_path).unlink(missing_ok=True)
+
+
+class SkynetEdrHermesDashboardTests(unittest.TestCase):
+    def test_dashboard_backend_source_is_read_only_loopback_proxy(self):
+        text = DASHBOARD_API_PATH.read_text()
+
+        self.assertIn("router = APIRouter()", text)
+        self.assertIn("http://127.0.0.1", text)
+        self.assertIn("/api/v1/risks", text)
+        self.assertIn("urllib.request", text)
+        self.assertNotIn("sqlite3", text)
+        self.assertNotIn("subprocess", text)
+        self.assertNotIn("os.system", text)
+        self.assertNotIn("requests", text)
+
+    def test_dashboard_import_registers_routes_without_network(self):
+        with patch("urllib.request.urlopen") as urlopen, patch("urllib.request.build_opener") as build_opener:
+            module = load_dashboard_api()
+
+        urlopen.assert_not_called()
+        build_opener.assert_called_once()
+        self.assertEqual(
+            module.router.routes,
+            [("GET", "/risks", "risks"), ("GET", "/risks/{risk_id:path}", "risk_detail"), ("GET", "/status", "status")],
+        )
+
+    def test_dashboard_upstream_success_and_content_type_json_parsing(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        module._opener.open.return_value = FakeResponse(b'{"ok": true}', "application/json; charset=utf-8")
+
+        self.assertEqual(module._upstream("/api/status"), {"ok": True})
+        request = module._opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787/api/status")
+        self.assertEqual(request.get_method(), "GET")
+
+    def test_dashboard_upstream_bounds_response_and_rejects_invalid_json_or_content_type(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        cases = [
+            (FakeResponse(b"x" * (module._MAX_RESPONSE_BYTES + 1)), "upstream_response_too_large"),
+            (FakeResponse(b"{}", "text/plain"), "invalid_upstream_content_type"),
+            (FakeResponse(b"{not-json"), "invalid_upstream_json"),
+        ]
+        for response, detail in cases:
+            module._opener.open.reset_mock()
+            module._opener.open.return_value = response
+            with self.assertRaises(FakeHTTPException) as raised:
+                module._upstream("/api/status")
+            self.assertEqual(raised.exception.status_code, 502)
+            self.assertEqual(raised.exception.detail, detail)
+
+    def test_dashboard_upstream_errors_redirects_and_404_are_generic(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        for error in [TimeoutError("/private/path"), OSError("raw socket path"), module.urllib.error.URLError("body")]:
+            module._opener.open.side_effect = error
+            with self.assertRaises(FakeHTTPException) as raised:
+                module._upstream("/api/status")
+            self.assertEqual(raised.exception.status_code, 502)
+            self.assertEqual(raised.exception.detail, "upstream_unavailable")
+            self.assertNotIn("private", raised.exception.detail)
+
+        module._opener.open.side_effect = module.urllib.error.HTTPError(
+            "http://127.0.0.1:8787/api/v1/risks/missing", 404, "not found", {}, None
+        )
+        with self.assertRaises(FakeHTTPException) as raised:
+            module._upstream("/api/v1/risks/missing")
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(raised.exception.detail, "risk_not_found")
+
+        module._opener.open.side_effect = module.urllib.error.HTTPError(
+            "http://127.0.0.1:8787/api/status", 302, "redirect", {"Location": "http://169.254.169.254/"}, None
+        )
+        with self.assertRaises(FakeHTTPException) as raised:
+            module._upstream("/api/status")
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(raised.exception.detail, "upstream_unavailable")
+
+    def test_dashboard_validates_fixed_loopback_port_and_query_bounds(self):
+        module = load_dashboard_api()
+        for raw in ["not-a-port", "0", "65536", "8787;host=evil"]:
+            with patch.dict(os.environ, {"SKYNET_EDR_API_PORT": raw}):
+                self.assertEqual(module._port(), module._DEFAULT_PORT)
+        with patch.dict(os.environ, {"SKYNET_EDR_API_PORT": "8788"}):
+            self.assertEqual(module._port(), 8788)
+
+        with self.assertRaises(FakeHTTPException) as low:
+            module.risks(limit=0, offset=0)
+        self.assertEqual(low.exception.status_code, 400)
+        with self.assertRaises(FakeHTTPException) as high:
+            module.risks(limit=101, offset=0)
+        self.assertEqual(high.exception.detail, "bad_request")
+        self.assertEqual(module._bounded_page(50, 10050), {"limit": 50, "offset": 10050})
+        self.assertEqual(module._bounded_page(100, 9_007_199_254_740_991), {"limit": 100, "offset": 9_007_199_254_740_991})
+        with self.assertRaises(FakeHTTPException):
+            module.risks(limit=50, offset=9_007_199_254_740_992)
+
+    def test_dashboard_risk_detail_encodes_opaque_id_path(self):
+        module = load_dashboard_api()
+        captured = []
+
+        def fake_upstream(path, query=None):
+            captured.append((path, query))
+            return {"ok": True}
+
+        setattr(module, "_upstream", fake_upstream)
+        self.assertEqual(module.risk_detail("inc:EDR-X:a/b?query#frag"), {"ok": True})
+        self.assertEqual(captured, [("/api/v1/risks/inc%3AEDR-X%3Aa%2Fb%3Fquery%23frag", None)])
+
+    def test_dashboard_risk_detail_encodes_decoded_slash_once_for_upstream(self):
+        module = load_dashboard_api()
+        captured = []
+
+        def fake_upstream(path, query=None):
+            captured.append((path, query))
+            return {"ok": True}
+
+        setattr(module, "_upstream", fake_upstream)
+        self.assertEqual(module.risk_detail("inc/opaque with space"), {"ok": True})
+        self.assertEqual(captured, [("/api/v1/risks/inc%2Fopaque%20with%20space", None)])
+
+    def test_dashboard_risk_detail_rejects_dot_and_overlong_opaque_ids_before_upstream(self):
+        module = load_dashboard_api()
+        setattr(module, "_upstream", Mock())
+        self.assertEqual(len("😀" * 256), 256)
+        module.risk_detail("😀" * 256)
+        for bad_id in [".", "..", "😀" * 257, "a" * 3073]:
+            with self.subTest(bad_id=bad_id):
+                with self.assertRaises(FakeHTTPException) as raised:
+                    module.risk_detail(bad_id)
+                self.assertEqual(raised.exception.status_code, 400)
+                self.assertEqual(raised.exception.detail, "bad_request")
+
+    def test_dashboard_upstream_accepts_listed_opaque_id_with_dotdot_literal(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        module._opener.open.return_value = FakeResponse(b'{"id": "inc..opaque"}', "application/json")
+
+        self.assertEqual(module.risk_detail("inc..opaque"), {"id": "inc..opaque"})
+        request = module._opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787/api/v1/risks/inc..opaque")
+
+    def test_dashboard_upstream_rejects_direct_unsafe_non_api_and_traversal_paths(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+
+        for path in ["/metrics", "/api/../status", "/api/v1/risks/%2e%2e/internal", "/api/v1/risks/..", "/api/v1/risks/.", "/api/v1/risks/%2E", "/api/v1/risks/%2E%2E"]:
+            with self.subTest(path=path):
+                with self.assertRaises(FakeHTTPException) as raised:
+                    module._upstream(path)
+                self.assertEqual(raised.exception.status_code, 400)
+                self.assertEqual(raised.exception.detail, "bad_request")
+        module._opener.open.assert_not_called()
+
+    def test_dashboard_upstream_preserves_encoded_slash_and_dotdot_as_opaque_id_data(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        module._opener.open.return_value = FakeResponse(b'{"id": "inc/../secret"}', "application/json")
+
+        path = "/api/v1/risks/inc%2F..%2Fsecret"
+        self.assertEqual(module._upstream(path), {"id": "inc/../secret"})
+        request = module._opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787" + path)
+        self.assertEqual(request.get_method(), "GET")
+
+    def test_desktop_plugin_is_parseable_read_only_disk_plugin(self):
+        text = DESKTOP_PLUGIN_PATH.read_text()
+
+        imports = dict(re.findall(r"import\s+(.*?)\s+from\s+['\"]([^'\"]+)['\"]", text, re.S))
+        self.assertEqual(set(imports.values()), {"react", "react/jsx-runtime", "@hermes/plugin-sdk"})
+        sdk_import = next(spec for names, spec in imports.items() if spec == "@hermes/plugin-sdk")
+        sdk_symbols = set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", next(names for names, spec in imports.items() if spec == sdk_import)))
+        self.assertEqual(
+            sdk_symbols,
+            {
+                "Badge",
+                "Button",
+                "EmptyState",
+                "ErrorState",
+                "PALETTE_AREA",
+                "ROUTES_AREA",
+                "SIDEBAR_NAV_AREA",
+                "ScrollArea",
+                "SearchField",
+                "Skeleton",
+                "fmtDateTime",
+                "host",
+                "useQuery",
+            },
+        )
+        self.assertIn("register(ctx)", text)
+        self.assertIn("ctx.registerMany", text)
+        self.assertIn("ROUTES_AREA", text)
+        self.assertIn("SIDEBAR_NAV_AREA", text)
+        self.assertIn("PALETTE_AREA", text)
+        self.assertIn("host.navigate('/skynet-edr/risks')", text)
+        self.assertIn("refetchInterval: POLL_MS", text)
+        self.assertIn("const POLL_MS = 10000", text)
+        self.assertIn("fmtDateTime.format(new Date(", text)
+        self.assertNotRegex(text, r"(?<!\.)\bfmtDateTime\s*\(")
+
+        for missing_var in ["--ui-text", "--ui-surface", "--ui-accent-soft"]:
+            self.assertNotRegex(text, rf"var\({re.escape(missing_var)}\)")
+        for theme_var in [
+            "--ui-text-primary",
+            "--ui-text-secondary",
+            "--ui-text-tertiary",
+            "--ui-bg-editor",
+            "--ui-bg-card",
+            "--ui-bg-elevated",
+            "--ui-bg-input",
+            "--ui-stroke-primary",
+            "--ui-stroke-secondary",
+            "--ui-control-hover-background",
+            "--ui-control-active-background",
+            "--ui-surface-background",
+            "--ui-base",
+        ]:
+            self.assertIn(theme_var, text)
+
+        for status in ["open", "investigating", "contained", "resolved", "dismissed"]:
+            self.assertRegex(text, rf"option\('{status}'")
+        for artifact_kind in [
+            "email",
+            "url",
+            "git_repository",
+            "code",
+            "file",
+            "message",
+            "mcp",
+            "terminal",
+            "unknown",
+        ]:
+            self.assertRegex(text, rf"option\('{artifact_kind}'")
+        for severity in ["critical", "high", "medium", "low", "informational"]:
+            self.assertRegex(text, rf"option\('{severity}'")
+
+        for forbidden_sink in [
+            "dangerouslySetInnerHTML",
+            "innerHTML",
+            "JSON.stringify",
+            "href:",
+            "src:",
+            "url(",
+            "markdown",
+        ]:
+            self.assertNotIn(forbidden_sink, text)
+        for safe_label in [
+            "Passive · Read only",
+            "current page",
+            "Not assessed",
+            "No current-page matches",
+            "No risks recorded",
+            "Page metadata",
+            "read-only context",
+        ]:
+            self.assertIn(safe_label, text)
+        for forbidden in [
+            "definePlugin",
+            "activate(",
+            "registerRoute",
+            "registerSidebarItem",
+            "registerCommand",
+            "ctx.navigate",
+            "dangerouslySetInnerHTML",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "sqlite",
+            "child_process",
+        ]:
+            self.assertNotIn(forbidden, text)
+
+        check = subprocess.run(["node", "--check", str(DESKTOP_PLUGIN_PATH)], capture_output=True, text=True, check=False)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_plugin_registers_palette_command_with_current_sdk_shape(self):
+        text = DESKTOP_PLUGIN_PATH.read_text()
+        transformed = re.sub(r"import\s+React\s+from\s+['\"]react['\"];\n", "const React = {useState() { return [null, () => {}]; }};\n", text)
+        transformed = re.sub(r"import\s+\{\s*jsx,\s*jsxs\s*\}\s+from\s+['\"]react/jsx-runtime['\"];\n", "const jsx = (type, props) => ({type, props}); const jsxs = jsx;\n", transformed)
+        transformed = re.sub(
+            r"import\s+\{.*?\}\s+from\s+['\"]@hermes/plugin-sdk['\"];\n",
+            "const Badge = 'Badge'; const Button = 'Button'; const EmptyState = 'EmptyState'; const ErrorState = 'ErrorState'; const ScrollArea = 'ScrollArea'; const SearchField = 'SearchField'; const Skeleton = 'Skeleton'; const PALETTE_AREA = 'palette'; const ROUTES_AREA = 'routes'; const SIDEBAR_NAV_AREA = 'sidebar'; const navigateCalls = []; const host = {navigate(path) { navigateCalls.push(path); }}; const useQuery = () => ({}); const fmtDateTime = {format(value) { return Number.isNaN(value.getTime()) ? 'bad' : `fmt:${value.getTime()}`; }};\n",
+            transformed,
+            flags=re.S,
+        )
+        transformed = transformed.replace("export default", "const pluginDefault =")
+        transformed += """
+const registered = [];
+pluginDefault.register({registerMany(items) { registered.push(...items); }});
+const palette = registered.find(item => item.area === PALETTE_AREA && item.id === 'open-risks');
+if (!palette) throw new Error('missing open-risks palette contribution');
+if (palette.id !== 'open-risks') throw new Error('palette contribution id must be open-risks');
+if (!palette.data || palette.data.id !== 'skynet-edr.open-risks') throw new Error('palette data id must be skynet-edr.open-risks');
+if (palette.data.label !== 'Open Skynet-EDR risks') throw new Error('palette label must be Open Skynet-EDR risks');
+if (JSON.stringify(palette.data.keywords) !== JSON.stringify(['security', 'risk', 'edr'])) throw new Error('palette keywords must stay stable');
+if (typeof palette.data.run !== 'function') throw new Error('palette data.run must be callable');
+if (Object.prototype.hasOwnProperty.call(palette, 'run')) throw new Error('palette contribution must not have top-level run');
+palette.data.run();
+if (JSON.stringify(navigateCalls) !== JSON.stringify(['/skynet-edr/risks'])) throw new Error('palette command must navigate to risks exactly once');
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as handle:
+            handle.write(transformed)
+            script_path = handle.name
+        try:
+            check = subprocess.run(["node", script_path], capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stderr)
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+    def test_desktop_plugin_pure_helpers_project_safe_operator_text(self):
+        check = run_desktop_plugin_script("""
+if (formatTime(1234) !== 'fmt:1234') throw new Error('finite timestamp must use fmtDateTime.format(new Date(...))');
+for (const value of [null, undefined, '', 'not-a-number', Number.NaN, Infinity, -Infinity]) {
+  if (formatTime(value) !== 'unknown') throw new Error('invalid timestamp must be unknown');
+}
+const filtered = filterRisks([{id:'1', severity:'high', status:'open', artifact:{kind:'file'}, title:'Secret access', rule_id:'EDR-EXFIL-001', sensor:{sensor:'hermes', integration:'hermes'}}], {search:'secret', severity:'high', status:'open', artifactKind:'file'});
+if (filtered.length !== 1) throw new Error('current-page filters should match canonical fields');
+if (filterRisks(filtered, {search:'nomatch', severity:'all', status:'all', artifactKind:'all'}).length !== 0) throw new Error('search filter should narrow current page');
+const projected = indicatorBadges({network_indicator: true, direct_ip: false, command_class: 'network_egress', hostile: '<script>'});
+if (!projected.some(item => item.label === 'Network') || !projected.some(item => item.label === 'Command class' && item.value === 'network egress')) throw new Error('allowlisted indicators must project to stable labels');
+if (projected.some(item => item.label === 'hostile' || item.value === '<script>')) throw new Error('unallowlisted indicators must not render');
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_pagination_contracts_and_backend_state_are_fail_closed(self):
+        check = run_desktop_plugin_script("""
+const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 1 redacted evidence event. Review sensor and artifact provenance plus allowlisted indicators.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:1, trace_ids:['trace-1'], contains_sensitive_data:false};
+const canonicalEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'high', event_type:'agent.mcp.tool.requested', title:'MCP tool request evidence', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'agent_action'}, trust_level:'agent_action', rule_id:'EDR-MCP-001', redaction:{contains_sensitive_data:false, redacted_count:0}, indicators:{network_indicator:true, direct_ip:false, command_class:'network_egress'}};
+const canonicalPage = {schema_version:'skynet.risk.v1', read_only:true, items:Array(50).fill(canonicalItem).map((item, index) => ({...item, id:'risk-' + index, trace_ids:['trace-' + index]})), page:{limit:50, offset:0, returned:50, total:10051, has_more:true}};
+const partialFinalPage = {schema_version:'skynet.risk.v1', read_only:true, items:[canonicalItem], page:{limit:50, offset:10050, returned:1, total:10051, has_more:false}};
+const emptyBeyondTotal = {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:100, returned:0, total:51, has_more:false}};
+const pageWith = (items, page = {}) => ({schema_version:'skynet.risk.v1', read_only:true, items, page:{limit:50, offset:0, returned:items.length, total:items.length, has_more:false, ...page}});
+const page = validateRiskPage(canonicalPage, 0);
+if (page !== canonicalPage) throw new Error('valid risk page should be returned unchanged');
+if (validateRiskPage(partialFinalPage, 10050) !== partialFinalPage) throw new Error('partial final page beyond old offset cap should pass');
+if (validateRiskPage(emptyBeyondTotal, 100) !== emptyBeyondTotal) throw new Error('valid empty page beyond total should be preserved');
+const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[canonicalEvidence]};
+if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('valid risk detail should be returned unchanged');
+const nullHeavyItem = {...canonicalItem, rule_id:null, confidence:null, sensor:{...canonicalItem.sensor, integration:null}, artifact:{...canonicalItem.artifact, provider:null, locator_hash:null, trust_level:null}, title:'Security risk detected'};
+const nullHeavyEvidence = {...canonicalEvidence, event_type:null, trust_level:null, rule_id:null, title:'Security event evidence'};
+const nullHeavyDetail = {...nullHeavyItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[nullHeavyEvidence]};
+if (validateRiskDetail(nullHeavyDetail, 'risk-1') !== nullHeavyDetail) throw new Error('explicit backend nulls should pass');
+const canonicalStatus = {product:'Skynet-EDR', binary:'skynet-edr', run_mode:'passive', server:'skynet-edr-mcp', read_only:true, tool_count:6, incident_count:1, event_count:1};
+if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('valid status should be returned unchanged');
+for (const key of ['confidence', 'rule_id', 'sensor', 'artifact', 'trace_ids']) {
+  const badItem = {...canonicalItem, sensor:{...canonicalItem.sensor}, artifact:{...canonicalItem.artifact}, trace_ids:[...canonicalItem.trace_ids]};
+  if (key === 'sensor') delete badItem.sensor.integration;
+  else if (key === 'artifact') delete badItem.artifact.provider;
+  else delete badItem[key];
+  let failed = false;
+  try { validateRiskPage(pageWith([badItem]), 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('missing nullable risk key must fail closed: ' + key);
+}
+for (const key of ['event_type', 'trust_level', 'rule_id']) {
+  const badEvidence = {...canonicalEvidence};
+  delete badEvidence[key];
+  let failed = false;
+  try { validateRiskDetail({...canonicalDetail, evidence:[badEvidence]}, 'risk-1'); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('missing nullable evidence key must fail closed: ' + key);
+}
+for (const bad of [
+  {...canonicalItem, rule_id:'unsafe rule'},
+  {...canonicalItem, trace_ids:['bad trace']},
+  {...canonicalItem, title:'Spoofed risk title'},
+  {...canonicalItem, summary:'Spoofed risk summary'},
+]) {
+  let failed = false;
+  try { validateRiskPage(pageWith([bad]), 0); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('unsafe or spoofed risk projection must fail closed');
+}
+const unknownSafeRule = {...canonicalItem, rule_id:'EDR-UNKNOWN-999', title:'Security risk detected'};
+if (validateRiskPage(pageWith([unknownSafeRule]), 0).items[0] !== unknownSafeRule) throw new Error('unknown safe rule with fallback title should pass');
+const knownMappings = {
+  'EDR-MCP-001': 'MCP network activity after untrusted content',
+  'EDR-CONFIG-001': 'Agent configuration drift detected',
+  'EDR-CRON-001': 'Risky unattended automation detected',
+  'EDR-PI-001': 'Privileged tool request after untrusted content',
+  'EDR-MSG-001': 'Suspicious message delivery activity',
+  'EDR-NET-001': 'Direct-IP egress activity',
+  'EDR-SCOPE-001': 'Privilege or scope expansion activity',
+  'EDR-PERSIST-001': 'Agent persistence change activity',
+  'EDR-EXFIL-001': 'Sensitive access followed by outbound delivery',
+  'EDR-MALWARE-001': 'Malware-like content supplied to AI runtime',
+};
+for (const [ruleId, title] of Object.entries(knownMappings)) {
+  const mapped = {...canonicalItem, rule_id:ruleId, title};
+  if (validateRiskPage(pageWith([mapped]), 0).items[0] !== mapped) throw new Error('known risk title mapping should pass: ' + ruleId);
+}
+const singularSummary = {...canonicalItem, event_count:1, summary:'Read-only projection of 1 redacted evidence event. Review sensor and artifact provenance plus allowlisted indicators.'};
+const pluralSummary = {...canonicalItem, event_count:2, summary:'Read-only projection of 2 redacted evidence events. Review sensor and artifact provenance plus allowlisted indicators.'};
+if (validateRiskPage(pageWith([singularSummary]), 0).items[0] !== singularSummary) throw new Error('singular risk summary should pass');
+if (validateRiskPage(pageWith([pluralSummary]), 0).items[0] !== pluralSummary) throw new Error('plural risk summary should pass');
+for (const bad of [null, [], {}, {...canonicalPage, schema_version:'wrong'}, {...canonicalPage, read_only:false}, {...canonicalPage, items:{}}, {...canonicalPage, items:[]}, {...canonicalPage, items:[null], page:{...canonicalPage.page, total:1}}, {...canonicalPage, items:[{...canonicalItem, id:''}]}, {...canonicalPage, items:[canonicalItem, {...canonicalItem}], page:{...canonicalPage.page, returned:2, total:2, has_more:false}}, {...canonicalPage, items:[{...canonicalItem, sensor:null}]}, {...canonicalPage, items:[{...canonicalItem, artifact:{...canonicalItem.artifact, kind:'<script>'}}]}, {...canonicalPage, page:{...canonicalPage.page, limit:49}}, {...canonicalPage, page:{...canonicalPage.page, offset:-1}}, {...canonicalPage, page:{...canonicalPage.page, offset:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, returned:-1}}, {...canonicalPage, page:{...canonicalPage.page, returned:51}}, {...canonicalPage, page:{...canonicalPage.page, returned:1}}, {...canonicalPage, page:{...canonicalPage.page, total:-1}}, {...canonicalPage, page:{...canonicalPage.page, total:Number.MAX_SAFE_INTEGER + 1}}, {...canonicalPage, page:{...canonicalPage.page, total:50, has_more:true}}, {...canonicalPage, page:{...canonicalPage.page, total:10051, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, offset:51, total:51, has_more:false}}, {...canonicalPage, page:{...canonicalPage.page, has_more:'yes'}}, {...canonicalPage, page:null}]) {
+  let failed = false;
+  try { validateRiskPage(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('invalid risk page contract must fail closed');
+}
+for (const bad of [null, [], {}, {...canonicalDetail, schema_version:'wrong'}, {...canonicalDetail, read_only:false}, {...canonicalDetail, id:''}, {...canonicalDetail, id:'x'.repeat(257)}, {...canonicalDetail, id:'other'}, {...canonicalDetail, evidence:[null]}, {...canonicalDetail, evidence:[{...canonicalEvidence, event_id:''}]}, {...canonicalDetail, evidence:[canonicalEvidence, {...canonicalEvidence}], event_count:2}, {...canonicalDetail, trace_ids:['trace-1','trace-1']}, {...canonicalDetail, evidence:[{...canonicalEvidence, redaction:null}]}, {...canonicalDetail, evidence:[{...canonicalEvidence, indicators:{network_indicator:'yes'}}]}]) {
+  let failed = false;
+  try { validateRiskDetail(bad, 'risk-1'); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('invalid risk detail contract must fail closed');
+}
+for (const bad of [null, [], {}, {read_only:false}, {read_only:true}, {...canonicalStatus, product:''}, {...canonicalStatus, incident_count:-1}, {...canonicalStatus, tool_count:'6'}]) {
+  let failed = false;
+  try { validateStatus(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('invalid status contract must fail closed');
+}
+if (backendState({data: canonicalStatus}, {data: canonicalPage}) !== 'Backend health: passive read-only projection online') throw new Error('both valid contracts should be online');
+for (const malformedPage of [undefined, {schema_version:'skynet.risk.v1', read_only:true}, {...canonicalPage, items:[], page:{...canonicalPage.page, returned:1}}, {...canonicalPage, page:{...canonicalPage.page, has_more:false}}]) {
+  if (backendState({data: canonicalStatus}, {data: malformedPage}) === 'Backend health: passive read-only projection online') throw new Error('malformed risk page must not be online');
+}
+if (backendState({data: undefined}, {data: canonicalPage}) === 'Backend health: passive read-only projection online') throw new Error('risk page alone must not be online');
+if (backendState({data: {read_only:false}}, {data: canonicalPage}) === 'Backend health: passive read-only projection online') throw new Error('malformed status must not be online');
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_pagination_url_query_key_and_offset_helpers(self):
+        source = DESKTOP_PLUGIN_PATH.read_text()
+        self.assertIn("ctx.rest(riskPagePath(offset))", source)
+        check = run_desktop_plugin_script("""
+if (PAGE_LIMIT !== 50) throw new Error('page limit must stay 50');
+if (riskPagePath(0) !== '/risks?limit=50&offset=0') throw new Error('risk page path must encode offset 0');
+if (riskPagePath(50) !== '/risks?limit=50&offset=50') throw new Error('risk page path must encode offset 50');
+if (riskPagePath(10050) !== '/risks?limit=50&offset=10050') throw new Error('risk page path must encode offset 10050');
+if (nextOffset({offset:0, returned:50, has_more:true}) !== 50) throw new Error('next page should advance by returned rows');
+if (nextOffset({offset:49, returned:1, has_more:true}) !== 50) throw new Error('next page should not skip after partial non-terminal rejection defenses');
+if (nextOffset({offset:Number.MAX_SAFE_INTEGER, returned:50, has_more:true}) !== Number.MAX_SAFE_INTEGER) throw new Error('next page must clamp to max safe integer');
+if (nextOffset({offset:50, returned:50, has_more:false}) !== 50) throw new Error('next page must not advance without has_more');
+if (previousOffset(0) !== 0 || previousOffset(49) !== 0 || previousOffset(50) !== 0 || previousOffset(100) !== 50) throw new Error('previous page must clamp and step by 50');
+const requested = [];
+RiskExplorer({ctx:{rest(path) { requested.push(path); return {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:0, returned:0, total:0, has_more:false}}; }}});
+const riskQuery = queryCalls.find(call => JSON.stringify(call.queryKey) === JSON.stringify(['skynet-edr','risks',0]));
+if (!riskQuery) throw new Error('risk queryKey must include offset 0');
+riskQuery.queryFn();
+if (JSON.stringify(requested) !== JSON.stringify(['/risks?limit=50&offset=0'])) throw new Error('risk query must request exact offset 0 path');
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+        check = run_desktop_plugin_script("""
+const requested = [];
+RiskExplorer({ctx:{rest(path) { requested.push(path); return {schema_version:'skynet.risk.v1', read_only:true, items:[], page:{limit:50, offset:50, returned:0, total:0, has_more:false}}; }}});
+const riskQuery = queryCalls.find(call => JSON.stringify(call.queryKey) === JSON.stringify(['skynet-edr','risks',50]));
+if (!riskQuery) throw new Error('risk queryKey must include offset 50');
+riskQuery.queryFn();
+if (JSON.stringify(requested) !== JSON.stringify(['/risks?limit=50&offset=50'])) throw new Error('risk query must request exact offset 50 path');
+""", react_stub="const React = {calls: 0, useState(initial) { this.calls += 1; return [this.calls === 2 ? 50 : initial, () => {}]; }};\n")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_exact_backend_contracts_and_searchfield_structure(self):
+        check = run_desktop_plugin_script("""
+const canonicalItem = {id:'risk-1', severity:'high', confidence:null, status:'open', rule_id:'EDR-MCP-001', title:'MCP network activity after untrusted content', summary:'Read-only projection of 2 redacted evidence events. Review sensor and artifact provenance plus allowlisted indicators.', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:'sha256:' + 'a'.repeat(64), trust_level:'runtime_policy'}, first_observed_at_unix_ms:1, last_observed_at_unix_ms:2, event_count:2, trace_ids:['trace-1'], contains_sensitive_data:false};
+const runtimePolicyEvidence = {event_id:'evt-1', timestamp_unix_ms:2, severity:'high', event_type:'agent.session.started', title:'Security event evidence', sensor:{kind:'configuration', sensor:'linux-passive-fixture', integration:'hermes'}, artifact:{kind:'url', provider:'browser', display_label:'URL content', locator_hash:null, trust_level:'authenticated_user'}, trust_level:'runtime_policy', rule_id:'EDR-MCP-001', redaction:{contains_sensitive_data:false, redacted_count:0}, indicators:{network_indicator:true, direct_ip:false, command_class:'network_egress'}};
+const canonicalDetail = {...canonicalItem, schema_version:'skynet.risk.v1', read_only:true, evidence:[runtimePolicyEvidence]};
+if (validateRiskDetail(canonicalDetail, 'risk-1') !== canonicalDetail) throw new Error('runtime_policy/authenticated_user and safe unknown event type must be accepted');
+for (const bad of [
+  {...canonicalDetail, evidence:[{...runtimePolicyEvidence, event_id:'../../private/instruction text'}]},
+  {...canonicalDetail, evidence:[{...runtimePolicyEvidence, event_type:'bad space'}]},
+  {...canonicalDetail, evidence:[{...runtimePolicyEvidence, title:'agent session started'}]},
+  {...canonicalDetail, evidence:[runtimePolicyEvidence, {...runtimePolicyEvidence, event_id:'evt-2'}], event_count:1},
+  {...canonicalDetail, artifact:{...canonicalDetail.artifact, display_label:'Spoofed URL'}},
+  {...canonicalDetail, artifact:{...canonicalDetail.artifact, locator_hash:'sha256:' + 'A'.repeat(64)}},
+  {...canonicalDetail, artifact:{...canonicalDetail.artifact, trust_level:'unknown'}},
+  {...canonicalDetail, sensor:{...canonicalDetail.sensor, sensor:'bad sensor'}},
+]) {
+  let failed = false;
+  try { validateRiskDetail(bad, 'risk-1'); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('spoofed or divergent detail contract must fail closed');
+}
+const canonicalStatus = {product:'Skynet-EDR', binary:'skynet-edr', run_mode:'passive', server:'skynet-edr-mcp', read_only:true, tool_count:6, incident_count:1, event_count:1};
+if (validateStatus(canonicalStatus) !== canonicalStatus) throw new Error('canonical passive status should pass');
+for (const bad of [{...canonicalStatus, product:'Other'}, {...canonicalStatus, binary:'skynet'}, {...canonicalStatus, run_mode:'local'}, {...canonicalStatus, server:'other'}, {...canonicalStatus, tool_count:7}]) {
+  let failed = false;
+  try { validateStatus(bad); } catch (error) { failed = error.message === 'Invalid read-only risk projection'; }
+  if (!failed) throw new Error('wrong service identity must fail closed');
+}
+const tree = Filters({search:'', setSearch() {}, severity:'all', setSeverity() {}, status:'all', setStatus() {}, artifactKind:'all', setArtifactKind() {}});
+const searchContainer = tree.props.children[0];
+if (searchContainer.type === 'label') throw new Error('SearchField must not be nested in an outer label');
+const searchField = searchContainer.props.children.props.children[1];
+if (searchField.type !== SearchField || searchField.props['aria-label'] !== 'Search current page risks') throw new Error('SearchField aria-label must be retained');
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_desktop_ui_remediation_source_semantics_and_stale_data(self):
+        text = DESKTOP_PLUGIN_PATH.read_text()
+        self.assertIn("setOffset(0)", text)
+        self.assertIn("setSelectedId(null)", text)
+        self.assertIn("detail.refetch()", text)
+        self.assertIn("role: 'status'", text)
+        self.assertIn("'aria-live': 'polite'", text)
+        self.assertIn("'Previous page'", text)
+        self.assertIn("'Next page'", text)
+        self.assertRegex(text, r"jsx\('ul', \{[^\n]+children: items\.map")
+        self.assertRegex(text, r"jsx\('li', \{[^\n]+jsx\('button'")
+        self.assertNotIn("role: 'listitem'", text)
+        self.assertIn("riskPageAvailable", text)
+        self.assertNotIn("risks.isLoading || risks.error ? []", text)
+        self.assertIn("Stale data", text)
+        self.assertIn("This warning is generic", text)
+        self.assertIn("Stale detail", text)
+        self.assertIn("cached validated detail remains visible", text)
+        self.assertIn("Not assessed", text)
+        self.assertNotIn("Locator digest", text)
+        self.assertNotRegex(text, r"risk\.artifact\?\.locator_hash|event\.artifact\?\.locator_hash")
+        for safe_field in ["rule_id", "sensor?.kind", "sensor?.sensor", "sensor?.integration", "artifact?.kind", "artifact?.display_label", "artifact?.provider", "artifact?.trust_level"]:
+            self.assertIn(safe_field, text)
+        for unsafe_field in ["attributes", "url", "path", "command", "raw_content"]:
+            self.assertNotRegex(text, rf"event\.{unsafe_field}|risk\.{unsafe_field}")
 
 
 if __name__ == "__main__":

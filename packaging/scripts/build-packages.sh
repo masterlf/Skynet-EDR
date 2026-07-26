@@ -7,6 +7,7 @@ RPM_ARCH="${NFPM_RPM_ARCH:-x86_64}"
 ARCHLINUX_ARCH="${NFPM_ARCHLINUX_ARCH:-x86_64}"
 NFPM_RENDERED="dist/nfpm.${VERSION}.yaml"
 CARGO_RELEASE_DIR="${CARGO_TARGET_DIR:-target}/release"
+STAGED_HERMES_PLUGIN="dist/staging/nfpm/hermes-plugin/skynet-edr"
 
 mkdir -p dist
 cargo build --release --workspace --bins
@@ -15,6 +16,9 @@ if ! command -v nfpm >/dev/null 2>&1; then
   echo "nfpm is required to build deb/rpm/arch packages" >&2
   exit 1
 fi
+
+rm -rf dist/staging/nfpm/hermes-plugin/skynet-edr
+packaging/scripts/stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr "$STAGED_HERMES_PLUGIN"
 
 python3 - "$VERSION" "$CARGO_RELEASE_DIR" <<'PY'
 import re

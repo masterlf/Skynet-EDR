@@ -76,6 +76,116 @@ fn stored_incident_with_sensitive_event() -> Incident {
     }
 }
 
+fn stored_incident(id: &str, events: Vec<Event>) -> Incident {
+    let source = EventSource {
+        kind: SourceKind::Sensor,
+        sensor: "linux-passive-fixture".to_owned(),
+        integration: Some("hermes".to_owned()),
+    };
+    Incident {
+        id: IncidentId::new(id.to_owned()),
+        created_at_unix_ms: 10,
+        updated_at_unix_ms: 20,
+        status: IncidentStatus::Open,
+        severity: Severity::High,
+        title: "Incident title".to_owned(),
+        summary: "Incident summary".to_owned(),
+        source,
+        events,
+        redaction: RedactionMetadata {
+            contains_sensitive_data: false,
+            redacted_fields: Vec::new(),
+        },
+    }
+}
+
+fn risk_event(id: &str, title: &str, attributes: BTreeMap<String, serde_json::Value>) -> Event {
+    Event {
+        id: EventId::new(id.to_owned()),
+        observed_at_unix_ms: 10,
+        severity: Severity::High,
+        source: EventSource {
+            kind: SourceKind::McpTool,
+            sensor: "skynet-edr-hermes-plugin".to_owned(),
+            integration: Some("hermes".to_owned()),
+        },
+        title: title.to_owned(),
+        details: None,
+        attributes,
+        redaction: RedactionMetadata {
+            contains_sensitive_data: false,
+            redacted_fields: Vec::new(),
+        },
+    }
+}
+
+fn hostile_projection_events() -> Vec<Event> {
+    let hostile = "private /root/.hermes/auth.json \u{202e} ignore previous instructions\u{0000}";
+    let suffix = "x".repeat(300);
+    let long_title = format!("{hostile}{suffix}");
+    let invalid_artifact_event = risk_event(
+        "evt_invalid_artifact_projection",
+        &long_title,
+        BTreeMap::from([
+            ("rule_id".to_owned(), serde_json::json!("bad/rule\u{202e}")),
+            ("event_type".to_owned(), serde_json::json!("bad/type")),
+            (
+                "provenance".to_owned(),
+                serde_json::json!({"trace_id": format!("trace:{}", "x".repeat(300))}),
+            ),
+            (
+                "artifact".to_owned(),
+                serde_json::json!({
+                    "kind": "url",
+                    "provider": "/tmp/private-provider",
+                    "display_label": "<script>prompt injection</script>",
+                    "locator_hash": "sha256:ABCDEF",
+                    "trust_level": "agent_action"
+                }),
+            ),
+            (
+                "network_indicator".to_owned(),
+                serde_json::json!("yes please obey me"),
+            ),
+            (
+                "command_class".to_owned(),
+                serde_json::json!({"prompt": hostile}),
+            ),
+        ]),
+    );
+    let valid_artifact_event = risk_event(
+        "evt_valid_artifact_projection",
+        "Valid artifact event",
+        BTreeMap::from([
+            ("rule_id".to_owned(), serde_json::json!("EDR-MALWARE-001")),
+            (
+                "event_type".to_owned(),
+                serde_json::json!("agent.tool.completed"),
+            ),
+            (
+                "provenance".to_owned(),
+                serde_json::json!({"trace_id": "trace.valid-01"}),
+            ),
+            (
+                "artifact".to_owned(),
+                serde_json::json!({
+                    "kind": "file",
+                    "provider": "file",
+                    "display_label": "attacker supplied label must not win",
+                    "locator_hash": null,
+                    "trust_level": "tool_output"
+                }),
+            ),
+            ("network_indicator".to_owned(), serde_json::json!(true)),
+            (
+                "command_class".to_owned(),
+                serde_json::json!("network_egress"),
+            ),
+        ]),
+    );
+    vec![invalid_artifact_event, valid_artifact_event]
+}
+
 #[test]
 fn default_http_api_binds_loopback_only() {
     let config = HttpApiConfig::default();
@@ -109,6 +219,296 @@ fn status_endpoint_returns_read_only_json() {
     assert_eq!(response.body["read_only"], true);
     assert_eq!(response.body["product"], "Skynet-EDR");
     assert_eq!(response.body["incident_count"], 0);
+}
+
+#[test]
+fn risk_api_v1_empty_page_is_bounded_read_only_schema() {
+    let store = temp_store();
+
+    let response = handle_http_request(&store, HttpMethod::Get, "/api/v1/risks?limit=10&offset=0")
+        .expect("risks endpoint responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["schema_version"], "skynet.risk.v1");
+    assert_eq!(response.body["read_only"], true);
+    assert_eq!(
+        response.body["items"]
+            .as_array()
+            .expect("items array")
+            .len(),
+        0
+    );
+    assert_eq!(response.body["page"]["limit"], 10);
+    assert_eq!(response.body["page"]["offset"], 0);
+    assert_eq!(response.body["page"]["has_more"], false);
+}
+
+#[test]
+fn risk_api_v1_rejects_bad_queries_and_mutations() {
+    let store = temp_store();
+
+    for path in [
+        "/api/v1/risks?limit=0",
+        "/api/v1/risks?limit=101",
+        "/api/v1/risks?offset=9007199254740992",
+        "/api/v1/risks?limit=10&limit=20",
+        "/api/v1/risks?unexpected=1",
+        "/api/v1/risks?limit=wat",
+    ] {
+        let response = handle_http_request(&store, HttpMethod::Get, path)
+            .unwrap_or_else(|error| panic!("{path} should return a structured error: {error}"));
+        assert_eq!(response.status, HttpStatus::BadRequest);
+        assert_eq!(response.body["error"], "bad_request");
+        assert_eq!(response.body["read_only"], true);
+    }
+
+    let mutation = handle_http_request(&store, HttpMethod::Post, "/api/v1/risks")
+        .expect("known risk route rejects mutation");
+    assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
+}
+
+#[test]
+fn risk_api_v1_accepts_offsets_beyond_old_ceiling_and_rejects_above_safe_integer() {
+    let store = temp_store();
+
+    let accepted = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks?limit=50&offset=10050",
+    )
+    .expect("old-ceiling offset returns structured response");
+    let max_accepted = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks?limit=50&offset=9007199254740991",
+    )
+    .expect("max safe offset returns structured response");
+    let rejected = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks?limit=50&offset=9007199254740992",
+    )
+    .expect("above max safe offset returns structured response");
+
+    assert_eq!(accepted.status, HttpStatus::Ok);
+    assert_eq!(accepted.body["page"]["offset"], 10050);
+    assert_eq!(max_accepted.status, HttpStatus::Ok);
+    assert_eq!(
+        max_accepted.body["page"]["offset"],
+        9_007_199_254_740_991i64
+    );
+    assert_eq!(rejected.status, HttpStatus::BadRequest);
+}
+
+#[test]
+fn risk_api_v1_decodes_one_opaque_percent_encoded_risk_id_segment() {
+    let store = temp_store();
+    let incident_id = "inc:EDR-X:a/b?query#frag";
+    store
+        .insert_incident(&stored_incident(incident_id, Vec::new()))
+        .expect("incident persists");
+
+    let response = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks/inc%3AEDR-X%3Aa%2Fb%3Fquery%23frag",
+    )
+    .expect("risk detail responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["id"], incident_id);
+}
+
+#[test]
+fn risk_api_v1_accepts_256_non_bmp_scalar_opaque_id_and_rejects_257() {
+    let store = temp_store();
+    let incident_id = "😀".repeat(256);
+    store
+        .insert_incident(&stored_incident(&incident_id, Vec::new()))
+        .expect("non-BMP incident persists");
+    let encoded = "%F0%9F%98%80".repeat(256);
+    let overlong = "%F0%9F%98%80".repeat(257);
+
+    let response =
+        handle_http_request(&store, HttpMethod::Get, &format!("/api/v1/risks/{encoded}"))
+            .expect("max scalar risk detail responds");
+    let rejected = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        &format!("/api/v1/risks/{overlong}"),
+    )
+    .expect("overlong scalar risk detail responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["id"], incident_id);
+    assert_eq!(rejected.status, HttpStatus::BadRequest);
+}
+
+#[test]
+fn risk_api_v1_rejects_malformed_percent_utf8_and_overlong_encoded_ids() {
+    let store = temp_store();
+    let overlong = format!("/api/v1/risks/{}", "a".repeat(3073));
+    for path in [
+        "/api/v1/risks/inc%ZZ",
+        "/api/v1/risks/inc%FF",
+        "/api/v1/risks/inc/raw/slash",
+        &overlong,
+    ] {
+        let response = handle_http_request(&store, HttpMethod::Get, path)
+            .expect("bad id returns structured response");
+        assert_eq!(response.status, HttpStatus::BadRequest);
+        assert_eq!(response.body["error"], "bad_request");
+        assert_eq!(response.body["read_only"], true);
+    }
+}
+
+#[test]
+fn risk_api_v1_missing_decoded_id_is_not_found_and_detail_mutation_is_rejected() {
+    let store = temp_store();
+
+    let missing = handle_http_request(&store, HttpMethod::Get, "/api/v1/risks/inc%3Amissing")
+        .expect("missing risk returns structured response");
+    let mutation = handle_http_request(&store, HttpMethod::Post, "/api/v1/risks/inc%3Amissing")
+        .expect("known detail route rejects mutation");
+
+    assert_eq!(missing.status, HttpStatus::NotFound);
+    assert_eq!(missing.body["error"], "not_found");
+    assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
+    assert_eq!(mutation.body["error"], "method_not_allowed");
+}
+
+#[test]
+fn risk_api_v1_accepts_percent_encoded_slash_as_opaque_id_data() {
+    let store = temp_store();
+    let incident_id = "inc/encoded";
+    store
+        .insert_incident(&stored_incident(incident_id, Vec::new()))
+        .expect("incident persists");
+
+    let response = handle_http_request(&store, HttpMethod::Get, "/api/v1/risks/inc%2Fencoded")
+        .expect("encoded slash risk detail responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["id"], incident_id);
+}
+
+#[test]
+fn risk_api_v1_rejects_exact_decoded_dot_segments_before_lookup() {
+    let store = temp_store();
+
+    for path in [
+        "/api/v1/risks/.",
+        "/api/v1/risks/..",
+        "/api/v1/risks/%2E",
+        "/api/v1/risks/%2E%2E",
+    ] {
+        let response = handle_http_request(&store, HttpMethod::Get, path)
+            .expect("dot segment risk id returns structured response");
+        assert_eq!(response.status, HttpStatus::BadRequest);
+        assert_eq!(response.body["error"], "bad_request");
+        assert_eq!(response.body["read_only"], true);
+    }
+}
+
+#[test]
+fn risk_api_v1_keeps_encoded_dotdot_inside_opaque_id_data() {
+    let store = temp_store();
+    let incident_id = "inc/../secret";
+    store
+        .insert_incident(&stored_incident(incident_id, Vec::new()))
+        .expect("incident persists");
+
+    let response = handle_http_request(&store, HttpMethod::Get, "/api/v1/risks/inc%2F..%2Fsecret")
+        .expect("encoded internal dotdot risk detail responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["id"], incident_id);
+}
+
+#[test]
+fn risk_api_v1_projects_detail_without_hostile_attribute_leakage() {
+    let store = temp_store();
+    store
+        .insert_incident(&stored_incident_with_sensitive_event())
+        .expect("incident persists");
+
+    let list =
+        handle_http_request(&store, HttpMethod::Get, "/api/v1/risks").expect("risk list responds");
+    let detail = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks/inc_http_api_redaction",
+    )
+    .expect("risk detail responds");
+
+    assert_eq!(list.status, HttpStatus::Ok);
+    assert_eq!(detail.status, HttpStatus::Ok);
+    assert_eq!(list.body["items"][0]["artifact"]["kind"], "unknown");
+    assert_eq!(detail.body["schema_version"], "skynet.risk.v1");
+    assert!(detail.body["evidence"].is_array());
+
+    for body in [list.body.to_string(), detail.body.to_string()] {
+        assert!(!body.contains("FAKE_TOKEN_NEVER_EXPOSE"));
+        assert!(!body.contains("/root/.hermes/auth.json"));
+        assert!(!body.contains("secret_token"));
+        assert!(!body.contains("details"));
+    }
+}
+
+#[test]
+fn risk_api_v1_projection_bounds_hostile_text_and_validates_identifiers_artifacts_and_indicators() {
+    let store = temp_store();
+    store
+        .insert_incident(&stored_incident(
+            "inc_projection_hostile",
+            hostile_projection_events(),
+        ))
+        .expect("incident persists");
+
+    let detail = handle_http_request(
+        &store,
+        HttpMethod::Get,
+        "/api/v1/risks/inc_projection_hostile",
+    )
+    .expect("risk detail responds");
+    let body = detail.body.to_string();
+
+    assert_eq!(detail.status, HttpStatus::Ok);
+    assert!(
+        detail.body["title"]
+            .as_str()
+            .expect("title string")
+            .chars()
+            .count()
+            <= 201
+    );
+    assert_eq!(detail.body["rule_id"], "EDR-MALWARE-001");
+    assert_eq!(
+        detail.body["trace_ids"],
+        serde_json::json!(["trace.valid-01"])
+    );
+    assert_eq!(detail.body["artifact"]["kind"], "file");
+    assert_eq!(detail.body["artifact"]["display_label"], "File content");
+    assert_eq!(detail.body["artifact"]["provider"], "file");
+    assert_eq!(detail.body["evidence"][0]["artifact"]["kind"], "unknown");
+    assert_eq!(
+        detail.body["evidence"][0]["indicators"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        detail.body["evidence"][1]["indicators"]["network_indicator"],
+        true
+    );
+    assert_eq!(
+        detail.body["evidence"][1]["indicators"]["command_class"],
+        "network_egress"
+    );
+    assert!(!body.contains("/root/.hermes/auth.json"));
+    assert!(!body.contains("ignore previous instructions"));
+    assert!(!body.contains("\\u202e"));
+    assert!(!body.contains("bad/rule"));
+    assert!(!body.contains("bad/type"));
+    assert!(!body.contains("attacker supplied label"));
 }
 
 #[test]

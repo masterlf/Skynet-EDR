@@ -15,12 +15,14 @@ use std::{
 
 use serde_json::{json, Value};
 use skynet_edr_core::{
-    redact_attributes, Event, EventId, EventSource, LocalStore, RedactionMetadata, Severity,
-    SourceKind,
+    is_routable_incident_identifier, redact_attributes, Event, EventId, EventSource, LocalStore,
+    RedactionMetadata, Severity, SourceKind,
 };
 
 const SENSOR_NAME: &str = "linux-passive-fixture";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
+const MAX_RISK_OFFSET: usize = 9_007_199_254_740_991;
+const MAX_RISK_ID_ENCODED_BYTES: usize = 3_072;
 
 /// Local read-only HTTP API configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +107,8 @@ pub enum HttpMethod {
 pub enum HttpStatus {
     /// Request succeeded.
     Ok,
+    /// Request path or query parameters are invalid.
+    BadRequest,
     /// Route does not exist.
     NotFound,
     /// Method is not allowed for this API.
@@ -119,6 +123,7 @@ impl HttpStatus {
     pub const fn as_u16(self) -> u16 {
         match self {
             Self::Ok => 200,
+            Self::BadRequest => 400,
             Self::NotFound => 404,
             Self::MethodNotAllowed => 405,
             Self::InternalServerError => 500,
@@ -177,20 +182,25 @@ pub fn handle_http_request(
     method: HttpMethod,
     path: &str,
 ) -> Result<HttpApiResponse, HttpApiError> {
+    let (route_path, query) = split_path_query(path);
     let response = match path {
         "/api/status" => route_get(method, || skynet_edr_mcp::status(store)),
         "/api/incidents" => route_get(method, || skynet_edr_mcp::list_incidents(store)),
         "/api/rules" => route_static_get(method, skynet_edr_mcp::list_rules()),
         "/api/sensors" => route_static_get(method, skynet_edr_mcp::list_sensors()),
         "/api/config-drift" => route_get(method, || skynet_edr_mcp::get_config_drift(store)),
-        _ => match path.strip_prefix("/api/incidents/") {
-            Some(incident_id) if !incident_id.is_empty() => {
-                route_get(method, || skynet_edr_mcp::get_incident(store, incident_id))
-            }
-            _ => json_response(
-                HttpStatus::NotFound,
-                json!({"error": "not_found", "read_only": true}),
-            ),
+        _ if route_path == "/api/v1/risks" => route_risk_list(store, method, query),
+        _ => match route_path.strip_prefix("/api/v1/risks/") {
+            Some(risk_id) if !risk_id.is_empty() => route_risk_detail(store, method, risk_id),
+            _ => match path.strip_prefix("/api/incidents/") {
+                Some(incident_id) if !incident_id.is_empty() => {
+                    route_get(method, || skynet_edr_mcp::get_incident(store, incident_id))
+                }
+                _ => json_response(
+                    HttpStatus::NotFound,
+                    json!({"error": "not_found", "read_only": true}),
+                ),
+            },
         },
     };
 
@@ -397,6 +407,115 @@ fn escape_html(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn split_path_query(path: &str) -> (&str, Option<&str>) {
+    match path.split_once('?') {
+        Some((route, query)) => (route, Some(query)),
+        None => (path, None),
+    }
+}
+
+fn route_risk_list(store: &LocalStore, method: HttpMethod, query: Option<&str>) -> HttpApiResponse {
+    if method != HttpMethod::Get {
+        return method_not_allowed_response();
+    }
+    match parse_risk_page(query) {
+        Ok((limit, offset)) => read_response(skynet_edr_mcp::list_risks(store, limit, offset)),
+        Err(message) => json_response(
+            HttpStatus::BadRequest,
+            json!({"error": "bad_request", "message": message, "read_only": true}),
+        ),
+    }
+}
+
+fn parse_risk_page(query: Option<&str>) -> Result<(usize, usize), &'static str> {
+    let mut limit = 50usize;
+    let mut offset = 0usize;
+    let mut seen_limit = false;
+    let mut seen_offset = false;
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').ok_or("malformed query parameter")?;
+            match key {
+                "limit" => {
+                    if seen_limit {
+                        return Err("duplicate limit query parameter");
+                    }
+                    seen_limit = true;
+                    limit = value.parse::<usize>().map_err(|_| "invalid limit")?;
+                }
+                "offset" => {
+                    if seen_offset {
+                        return Err("duplicate offset query parameter");
+                    }
+                    seen_offset = true;
+                    offset = value.parse::<usize>().map_err(|_| "invalid offset")?;
+                }
+                _ => return Err("unknown query parameter"),
+            }
+        }
+    }
+    if !(1..=100).contains(&limit) {
+        return Err("limit out of range");
+    }
+    if offset > MAX_RISK_OFFSET {
+        return Err("offset out of range");
+    }
+    Ok((limit, offset))
+}
+
+fn route_risk_detail(store: &LocalStore, method: HttpMethod, encoded_id: &str) -> HttpApiResponse {
+    if method != HttpMethod::Get {
+        return method_not_allowed_response();
+    }
+    match decode_risk_id_segment(encoded_id) {
+        Ok(risk_id) => read_response(skynet_edr_mcp::get_risk(store, &risk_id)),
+        Err(message) => json_response(
+            HttpStatus::BadRequest,
+            json!({"error": "bad_request", "message": message, "read_only": true}),
+        ),
+    }
+}
+
+fn decode_risk_id_segment(encoded: &str) -> Result<String, &'static str> {
+    if encoded.len() > MAX_RISK_ID_ENCODED_BYTES {
+        return Err("risk id is too long");
+    }
+    if encoded.contains('/') {
+        return Err("risk id must be a single encoded path segment");
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(hex) = bytes.get(index + 1..index + 3) else {
+                return Err("malformed percent encoding");
+            };
+            let high = hex_value(hex[0]).ok_or("malformed percent encoding")?;
+            let low = hex_value(hex[1]).ok_or("malformed percent encoding")?;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let id = String::from_utf8(decoded).map_err(|_| "risk id is not valid UTF-8")?;
+    if !is_routable_incident_identifier(&id) {
+        return Err("risk id violates routable contract");
+    }
+    Ok(id)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn route_get(
