@@ -15,6 +15,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Operator-facing Skynet-EDR runtime mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
@@ -3263,6 +3265,7 @@ impl LocalStore {
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
         let connection = Connection::open(&path)?;
+        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         let store = Self { path, connection };
         store.migrate()?;
         Ok(store)
@@ -3370,6 +3373,9 @@ impl LocalStore {
         )?;
 
         if insert_status != ContinuousIngestStatus::Persisted {
+            if insert_status == ContinuousIngestStatus::Collision {
+                insert_collision_evidence_on_connection(&transaction, source_id, &event)?;
+            }
             transaction.commit()?;
             return Ok(ContinuousIngestResult {
                 status: insert_status,
@@ -3400,6 +3406,10 @@ impl LocalStore {
             .map(canonical_event_to_storage_event)
             .collect::<Vec<_>>();
         let mut opened_incidents = 0;
+        if correlation_truncated {
+            let incident = degraded_correlation_incident(source_id, &event);
+            opened_incidents += insert_continuous_incident_on_connection(&transaction, &incident)?;
+        }
         for sequence_match in matches {
             let incident = sanitize_incident_for_storage(&sequence_match_incident(
                 &sequence_match,
@@ -3436,6 +3446,18 @@ impl LocalStore {
         self.count_rows(
             "ingest.receipt.count",
             "SELECT COUNT(*) FROM ingest_receipts",
+        )
+    }
+
+    /// Count deduplicated durable event-identifier collision evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the `SQLite` count query fails.
+    pub fn count_ingest_collisions(&self) -> StorageResult<usize> {
+        self.count_rows(
+            "ingest.collision.count",
+            "SELECT COUNT(*) FROM ingest_collisions",
         )
     }
 
@@ -3603,6 +3625,13 @@ impl LocalStore {
                 source_id TEXT NOT NULL,
                 committed_at_unix_ms INTEGER NOT NULL,
                 FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE RESTRICT
+             );
+             CREATE TABLE IF NOT EXISTS ingest_collisions (
+                collision_id TEXT PRIMARY KEY NOT NULL,
+                event_fingerprint TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                existing_event_fingerprint TEXT NOT NULL,
+                observed_at_unix_ms INTEGER NOT NULL
              );",
         )?;
         ensure_nullable_column(&self.connection, "events", "event_type", "TEXT")?;
@@ -3701,6 +3730,65 @@ fn ensure_nullable_column(
             "ALTER TABLE {table} ADD COLUMN {column} {column_type}"
         ))?;
     }
+    Ok(())
+}
+
+fn degraded_correlation_incident(source_id: &str, event: &Event) -> Incident {
+    let occurrence_material = format!("{}\0{}", source_id, event.id.as_str());
+    let occurrence_fingerprint = Sha256::digest(occurrence_material.as_bytes());
+    let events = vec![event.clone()];
+    sanitize_incident_for_storage(&Incident {
+        id: IncidentId::new(format!(
+            "inc:continuous-correlation-degraded:{occurrence_fingerprint:x}"
+        )),
+        created_at_unix_ms: event.observed_at_unix_ms,
+        updated_at_unix_ms: event.observed_at_unix_ms,
+        status: IncidentStatus::Open,
+        severity: Severity::High,
+        title: "Continuous correlation degraded".to_owned(),
+        summary: "Indexed correlation candidates exceeded the configured bound; the triggering redacted event was preserved for operator review.".to_owned(),
+        source: event.source.clone(),
+        redaction: incident_redaction_from_events(&events),
+        events,
+    })
+}
+
+fn insert_collision_evidence_on_connection(
+    connection: &Connection,
+    source_id: &str,
+    event: &Event,
+) -> StorageResult<()> {
+    let incoming_payload = serde_json::to_string(event)?;
+    let existing_payload = connection.query_row(
+        "SELECT payload_json FROM events WHERE id = ?1",
+        params![event.id.as_str()],
+        |row| row.get::<_, String>(0),
+    )?;
+    let event_fingerprint = format!("sha256:{:x}", Sha256::digest(incoming_payload.as_bytes()));
+    let existing_event_fingerprint =
+        format!("sha256:{:x}", Sha256::digest(existing_payload.as_bytes()));
+    let source_fingerprint = format!("sha256:{:x}", Sha256::digest(source_id.as_bytes()));
+    let collision_material = format!(
+        "{}\0{}\0{}",
+        event.id.as_str(),
+        source_fingerprint,
+        event_fingerprint
+    );
+    let collision_id = format!("sha256:{:x}", Sha256::digest(collision_material.as_bytes()));
+    connection.execute(
+        "INSERT INTO ingest_collisions (
+            collision_id, event_fingerprint, source_fingerprint,
+            existing_event_fingerprint, observed_at_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(collision_id) DO NOTHING",
+        params![
+            collision_id,
+            event_fingerprint,
+            source_fingerprint,
+            existing_event_fingerprint,
+            sqlite_unix_ms("ingest.collision.observed_at_unix_ms", current_unix_ms()?)?,
+        ],
+    )?;
     Ok(())
 }
 
