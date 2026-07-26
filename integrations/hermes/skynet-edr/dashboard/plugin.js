@@ -561,11 +561,15 @@
   function DefinitionBlock(props) {
     return h("section", { className: "rounded-lg border bg-muted/30 p-3" },
       h("h4", { className: "mb-2 text-sm font-semibold" }, props.title),
-      h("dl", { className: "grid gap-2 text-sm" },
+      h("dl", { className: "grid text-sm", style: { rowGap: "0.375rem" } },
         props.rows.map(function (row) {
-          return h("div", { key: row[0], className: "grid grid-cols-[minmax(7rem,0.7fr)_minmax(0,1fr)] gap-2" },
-            h("dt", { className: "text-muted-foreground" }, row[0]),
-            h("dd", { className: "m-0 break-words" }, row[1])
+          return h("div", {
+            key: row[0],
+            className: "grid",
+            style: { gridTemplateColumns: "7rem minmax(0, 1fr)", alignItems: "baseline", columnGap: "0.75rem" },
+          },
+            h("dt", { className: "text-muted-foreground", style: { whiteSpace: "nowrap" } }, row[0]),
+            h("dd", { className: "m-0", style: { minWidth: 0, overflowWrap: "anywhere" } }, row[1])
           );
         })
       )
