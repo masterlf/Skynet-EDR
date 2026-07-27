@@ -138,6 +138,27 @@ fn fast_writable_open_requires_a_current_pre_migrated_schema() {
 }
 
 #[test]
+fn startup_migration_refuses_a_newer_schema_without_downgrading_it() {
+    let db_path = temp_path("future-schema.sqlite");
+    let raw = Connection::open(&db_path).expect("raw sqlite opens");
+    raw.pragma_update(None, "user_version", 2)
+        .expect("future schema marker writes");
+    drop(raw);
+
+    let Err(error) = LocalStore::open(&db_path) else {
+        panic!("older binary must reject a newer schema");
+    };
+    assert!(error.to_string().contains("expected 1, found 2"));
+    let actual = Connection::open(&db_path)
+        .expect("inspection connection opens")
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .expect("future schema marker reads");
+    assert_eq!(actual, 2, "failed startup must not downgrade the marker");
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
 fn late_event_correlates_incrementally_inside_derived_window() {
     let db_path = temp_path("late.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");

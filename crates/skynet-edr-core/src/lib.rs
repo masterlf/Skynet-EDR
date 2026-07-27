@@ -3635,6 +3635,15 @@ impl LocalStore {
     }
 
     fn migrate(&self) -> StorageResult<()> {
+        let actual = self
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        if actual > LOCAL_STORE_SCHEMA_VERSION {
+            return Err(StorageError::SchemaVersionMismatch {
+                expected: LOCAL_STORE_SCHEMA_VERSION,
+                actual,
+            });
+        }
         self.connection.execute_batch(
             "PRAGMA wal_checkpoint(TRUNCATE);
              PRAGMA journal_mode = DELETE;
