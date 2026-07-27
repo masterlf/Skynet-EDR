@@ -289,6 +289,36 @@ fn socket_startup_rejects_symlink_and_regular_file_but_recovers_owned_stale_sock
 }
 
 #[test]
+fn published_socket_has_intended_mode_ownership_and_no_private_alias() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let root = temp_path("socket-publication");
+    fs::create_dir_all(&root).expect("root created");
+    let socket_path = root.join("ingest.sock");
+    let mut config = config(socket_path.clone(), vec![1_234]);
+    config.socket_gid = Some(nix::unistd::Gid::effective().as_raw());
+
+    let listener = bind_ingest_listener(&config).expect("secured socket publishes");
+    let metadata = fs::symlink_metadata(&socket_path).expect("published socket metadata");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o660);
+    assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
+    assert_eq!(metadata.gid(), nix::unistd::Gid::effective().as_raw());
+    assert!(UnixStream::connect(&socket_path).is_ok());
+    assert_eq!(
+        fs::read_dir(&root)
+            .expect("root reads")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("entries read")
+            .len(),
+        1,
+        "private publication socket must be removed"
+    );
+
+    drop(listener);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn accept_loop_drop_reasons_are_operator_visible() {
     let health = IngestionHealth::default();
     health.record_capacity_rejection();

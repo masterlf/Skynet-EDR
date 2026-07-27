@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     os::unix::{
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -448,13 +448,67 @@ pub fn bind_ingest_listener(config: &UnixIngestConfig) -> io::Result<UnixListene
         Err(error) => return Err(error),
     }
 
-    let listener = UnixListener::bind(path)?;
-    if let Err(error) = secure_bound_socket(path, config.socket_gid) {
+    let (listener, private_dir, private_path) = bind_private_socket(parent)?;
+    if let Err(error) = secure_bound_socket(&private_path, config.socket_gid) {
+        drop(listener);
+        cleanup_private_socket(&private_dir, &private_path);
+        return Err(error);
+    }
+    if let Err(error) = publish_secured_socket(&private_path, path) {
+        drop(listener);
+        cleanup_private_socket(&private_dir, &private_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::remove_dir(&private_dir) {
         drop(listener);
         let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(&private_dir);
         return Err(error);
     }
     Ok(listener)
+}
+
+fn bind_private_socket(parent: &Path) -> io::Result<(UnixListener, PathBuf, PathBuf)> {
+    static PRIVATE_SOCKET_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    for _ in 0..16 {
+        let nonce = PRIVATE_SOCKET_NONCE.fetch_add(1, Ordering::Relaxed);
+        let private_dir = parent.join(format!(".i{nonce:x}"));
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&private_dir) {
+            Ok(()) => {
+                let private_path = private_dir.join("s");
+                match UnixListener::bind(&private_path) {
+                    Ok(listener) => return Ok((listener, private_dir, private_path)),
+                    Err(error) => {
+                        let _ = fs::remove_dir_all(&private_dir);
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate private ingest socket directory",
+    ))
+}
+
+fn publish_secured_socket(private_path: &Path, final_path: &Path) -> io::Result<()> {
+    fs::hard_link(private_path, final_path)?;
+    if let Err(error) = fs::remove_file(private_path) {
+        let _ = fs::remove_file(final_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn cleanup_private_socket(private_dir: &Path, private_path: &Path) {
+    let _ = fs::remove_file(private_path);
+    let _ = fs::remove_dir_all(private_dir);
 }
 
 fn secure_bound_socket(path: &Path, socket_gid: Option<u32>) -> io::Result<()> {
@@ -690,4 +744,42 @@ fn write_ack(stream: &mut UnixStream, value: &serde_json::Value) -> io::Result<(
     }
     encoded.push(b'\n');
     stream.write_all(&encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_failure_preserves_secured_private_socket_and_existing_target() {
+        let root = std::env::temp_dir().join(format!(
+            "skynet-edr-socket-publication-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).expect("test root created");
+        let private_path = root.join("private.sock");
+        let final_path = root.join("ingest.sock");
+        let listener = UnixListener::bind(&private_path).expect("private listener binds");
+        secure_bound_socket(&private_path, Some(Gid::effective().as_raw()))
+            .expect("private listener secured");
+        fs::write(&final_path, "do-not-replace").expect("publication target created");
+
+        let error = publish_secured_socket(&private_path, &final_path)
+            .expect_err("publication must not replace an existing path");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&final_path).expect("existing target remains readable"),
+            "do-not-replace"
+        );
+        let metadata = fs::symlink_metadata(&private_path).expect("private socket remains");
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o660);
+        assert_eq!(metadata.uid(), Uid::effective().as_raw());
+        assert_eq!(metadata.gid(), Gid::effective().as_raw());
+
+        drop(listener);
+        let _ = fs::remove_dir_all(root);
+    }
 }
