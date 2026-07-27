@@ -126,9 +126,8 @@ fn fast_writable_open_requires_a_current_pre_migrated_schema() {
     let db_path = temp_path("fast-open-schema.sqlite");
     drop(Connection::open(&db_path).expect("raw sqlite opens"));
 
-    let error = match LocalStore::open_existing_writable(&db_path) {
-        Ok(_) => panic!("unmigrated schema must fail closed"),
-        Err(error) => error,
+    let Err(error) = LocalStore::open_existing_writable(&db_path) else {
+        panic!("unmigrated schema must fail closed");
     };
     assert!(error.to_string().contains("schema version"), "{error}");
 

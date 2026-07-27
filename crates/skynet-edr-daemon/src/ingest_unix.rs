@@ -487,7 +487,7 @@ fn bind_private_socket(parent: &Path) -> io::Result<(UnixListener, PathBuf, Path
                     }
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }
