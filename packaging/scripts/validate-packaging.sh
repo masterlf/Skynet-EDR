@@ -199,7 +199,7 @@ fi
 grep -qx 'c7ad23af619abd84e3c475b5503a8af8f7696b19:crates/skynet-edr-core/tests/hermes_event_ingestion.rs:curl-auth-header:32' .gitleaksignore
 
 for action in init autobuild analyze upload-sarif; do
-  grep -q "github/codeql-action/${action}@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4.37.2" .github/workflows/codeql.yml .github/workflows/security.yml
+  grep -q "github/codeql-action/${action}@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3" .github/workflows/codeql.yml .github/workflows/security.yml
 done
 grep -q 'trufflesecurity/trufflehog@f2cd191b97098913a07522227d2b5e40e57252f4' .github/workflows/security.yml
 grep -q 'aquasecurity/trivy-action@c07df6fec6fa692e6fd1200d50aaa1fdd66f03c8' .github/workflows/security.yml
