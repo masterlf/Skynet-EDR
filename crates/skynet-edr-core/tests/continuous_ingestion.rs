@@ -297,6 +297,71 @@ fn candidate_overflow_persists_evidence_and_reports_degraded_correlation() {
 }
 
 #[test]
+fn hot_trace_overflow_evaluates_trigger_and_newest_bounded_sequence() {
+    let db_path = temp_path("hot-trace-overflow.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let rules = built_in_ai_agent_sequence_rules();
+    for index in 0..8 {
+        let old = canonical_event(
+            &format!("evt_hot_trace_old_{index}"),
+            "agent.content.ingested",
+            1_781_600_000_000 + index,
+            "trace_hot_overflow",
+            serde_json::json!({
+                "instruction_authority": false,
+                "contains_instructional_attack": false
+            }),
+        );
+        store
+            .commit_continuous_event("uid:1000", &old, &rules, 10_000)
+            .expect("old event commits");
+    }
+    let prompt = canonical_event(
+        "evt_hot_trace_recent_prompt",
+        "agent.content.ingested",
+        1_781_600_000_100,
+        "trace_hot_overflow",
+        serde_json::json!({
+            "instruction_authority": false,
+            "contains_instructional_attack": true
+        }),
+    );
+    store
+        .commit_continuous_event("uid:1000", &prompt, &rules, 10_000)
+        .expect("recent prompt commits");
+    let action = canonical_event(
+        "evt_hot_trace_trigger",
+        "agent.tool.requested",
+        1_781_600_000_101,
+        "trace_hot_overflow",
+        serde_json::json!({"network_indicator": true, "sensitive_access": true}),
+    );
+
+    let result = store
+        .commit_continuous_event("uid:1000", &action, &rules, 2)
+        .expect("bounded hot trace commits");
+
+    assert!(result.correlation_truncated);
+    assert_eq!(result.candidate_events, 2);
+    assert_eq!(
+        result.opened_incidents, 2,
+        "degraded evidence and the real recent EDR-PI-001 match must both persist"
+    );
+    let serialized = serde_json::to_string(&store.list_incidents().expect("incidents list"))
+        .expect("incidents serialize");
+    assert!(serialized.contains("Continuous correlation degraded"));
+    assert!(serialized.contains("AI-agent sequence rule EDR-PI-001 matched"));
+
+    let replay = store
+        .commit_continuous_event("uid:1000", &action, &rules, 2)
+        .expect("hot trace replay remains idempotent");
+    assert_eq!(replay.status, ContinuousIngestStatus::Duplicate);
+    assert_eq!(store.count_incidents().expect("incident count"), 2);
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
 fn malicious_sequence_overflow_fails_closed_without_leaking_hostile_payload() {
     let db_path = temp_path("malicious-overflow.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");

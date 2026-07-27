@@ -314,7 +314,7 @@ pub struct ContinuousIngestResult {
     pub opened_incidents: usize,
     /// Number of indexed events evaluated for correlation.
     pub candidate_events: usize,
-    /// Correlation was skipped because the bounded candidate set overflowed.
+    /// Correlation used a bounded recent subset because the candidate set overflowed.
     pub correlation_truncated: bool,
     /// Maximum window derived from the validated active rules.
     pub max_rule_window_ms: u64,
@@ -3434,11 +3434,12 @@ impl LocalStore {
         )?;
         let correlation_truncated = candidates.len() > candidate_limit;
         candidates.truncate(candidate_limit);
-        let matches = if correlation_truncated {
-            Vec::new()
-        } else {
-            correlate_sequence_rules(rules, &candidates)?
-        };
+        candidates.sort_by(|left, right| {
+            left.observed_at_unix_ms
+                .cmp(&right.observed_at_unix_ms)
+                .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
+        });
+        let matches = correlate_sequence_rules(rules, &candidates)?;
         let stored_events = candidates
             .iter()
             .cloned()
@@ -3787,7 +3788,7 @@ fn degraded_correlation_incident(source_id: &str, event: &Event) -> Incident {
         status: IncidentStatus::Open,
         severity: Severity::High,
         title: "Continuous correlation degraded".to_owned(),
-        summary: "Indexed correlation candidates exceeded the configured bound; the triggering redacted event was preserved for operator review.".to_owned(),
+        summary: "Indexed correlation candidates exceeded the configured bound; the triggering event and newest bounded redacted subset were evaluated and preserved for operator review.".to_owned(),
         source: event.source.clone(),
         redaction: incident_redaction_from_events(&events),
         events,
@@ -3896,7 +3897,8 @@ fn load_continuous_candidates(
            AND ((?4 IS NOT NULL AND trace_id = ?4)
              OR (?5 IS NOT NULL AND session_id = ?5)
              OR id = ?6)
-         ORDER BY observed_at_unix_ms ASC, id ASC
+         ORDER BY CASE WHEN id = ?6 THEN 0 ELSE 1 END ASC,
+                  observed_at_unix_ms DESC, id DESC
          LIMIT ?7",
     )?;
     let stored_events = collect_payload_rows::<Event, _>(
