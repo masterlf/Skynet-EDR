@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const LOCAL_STORE_SCHEMA_VERSION: i64 = 1;
 
 /// Operator-facing Skynet-EDR runtime mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3170,6 +3171,13 @@ pub enum StorageError {
     Io(std::io::Error),
     /// Existing database header indicates a non-rollback journal mode read-only paths reject.
     UnsupportedReadOnlyJournalMode,
+    /// A fast writable connection found a database that startup has not migrated.
+    SchemaVersionMismatch {
+        /// Schema version required by this binary.
+        expected: i64,
+        /// Schema version recorded by the database.
+        actual: i64,
+    },
     /// A timestamp does not fit `SQLite`'s signed integer representation.
     IntegerOutOfRange {
         /// Name of the timestamp field being persisted.
@@ -3188,6 +3196,10 @@ impl std::fmt::Display for StorageError {
             Self::UnsupportedReadOnlyJournalMode => write!(
                 formatter,
                 "unsupported SQLite journal mode for read-only local store"
+            ),
+            Self::SchemaVersionMismatch { expected, actual } => write!(
+                formatter,
+                "local store schema version mismatch: expected {expected}, found {actual}"
             ),
             Self::IntegerOutOfRange { field, value } => {
                 write!(
@@ -3269,6 +3281,33 @@ impl LocalStore {
         let store = Self { path, connection };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Open an existing, startup-migrated store without rerunning schema migration.
+    ///
+    /// This constructor is intended for bounded hot-path writers after [`Self::open`]
+    /// has completed during process startup. It opens without `CREATE`, applies
+    /// connection-local safety settings, and fails closed unless the persisted schema
+    /// version matches this binary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the database cannot be opened writable or its
+    /// schema version is not current.
+    pub fn open_existing_writable(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        let actual =
+            connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        if actual != LOCAL_STORE_SCHEMA_VERSION {
+            return Err(StorageError::SchemaVersionMismatch {
+                expected: LOCAL_STORE_SCHEMA_VERSION,
+                actual,
+            });
+        }
+        Ok(Self { path, connection })
     }
 
     /// Open an existing local `SQLite` store for read-only queries only.
@@ -3649,6 +3688,8 @@ impl LocalStore {
                 ON events(ingest_source_id, session_id, observed_at_unix_ms, id);",
         )?;
         self.normalize_legacy_incident_ids()?;
+        self.connection
+            .pragma_update(None, "user_version", LOCAL_STORE_SCHEMA_VERSION)?;
         Ok(())
     }
 

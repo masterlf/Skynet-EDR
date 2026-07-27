@@ -513,7 +513,7 @@ fn commit_event_and_ack(
     event: &CanonicalEventEnvelope,
 ) -> io::Result<()> {
     health.record_event_received(uid);
-    let Ok(store) = LocalStore::open(db_path) else {
+    let Ok(store) = LocalStore::open_existing_writable(db_path) else {
         health.storage_errors.fetch_add(1, Ordering::Relaxed);
         health.record_source_error(uid, "storage");
         return write_ack(

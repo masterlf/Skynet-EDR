@@ -122,6 +122,23 @@ fn replay_is_immutable_and_returns_duplicate_without_overwrite() {
 }
 
 #[test]
+fn fast_writable_open_requires_a_current_pre_migrated_schema() {
+    let db_path = temp_path("fast-open-schema.sqlite");
+    drop(Connection::open(&db_path).expect("raw sqlite opens"));
+
+    let error = match LocalStore::open_existing_writable(&db_path) {
+        Ok(_) => panic!("unmigrated schema must fail closed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("schema version"), "{error}");
+
+    drop(LocalStore::open(&db_path).expect("startup migration succeeds"));
+    drop(LocalStore::open_existing_writable(&db_path).expect("current schema opens quickly"));
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
 fn late_event_correlates_incrementally_inside_derived_window() {
     let db_path = temp_path("late.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");

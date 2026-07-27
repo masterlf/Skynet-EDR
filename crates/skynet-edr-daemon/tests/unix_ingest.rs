@@ -85,6 +85,7 @@ fn exchange_with_health(
 #[test]
 fn authorized_frame_is_acked_only_after_atomic_visibility_and_replay_is_duplicate() {
     let db_path = temp_path("commit.sqlite");
+    drop(LocalStore::open(&db_path).expect("startup migration succeeds"));
     let config = config(temp_path("commit.sock"), vec![1_234]);
     let mut event: serde_json::Value =
         serde_json::from_str(CANONICAL_EVENT).expect("fixture parses");
@@ -112,8 +113,50 @@ fn authorized_frame_is_acked_only_after_atomic_visibility_and_replay_is_duplicat
 }
 
 #[test]
+fn repeated_frames_do_not_rerun_legacy_incident_normalization() {
+    let db_path = temp_path("no-per-frame-migration.sqlite");
+    drop(LocalStore::open(&db_path).expect("startup migration succeeds"));
+    let raw = rusqlite::Connection::open(&db_path).expect("inspection connection opens");
+    raw.execute(
+        "INSERT INTO incidents (
+            id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
+         ) VALUES ('.', 1, 1, 'open', 'high', 'legacy', 'not-json')",
+        [],
+    )
+    .expect("hostile legacy row inserted after startup migration");
+    drop(raw);
+    let config = config(temp_path("no-per-frame-migration.sock"), vec![1_234]);
+
+    for index in 0..2 {
+        let mut event: serde_json::Value =
+            serde_json::from_str(CANONICAL_EVENT).expect("fixture parses");
+        event["event_id"] = serde_json::json!(format!("evt_no_remigration_{index}"));
+        let ack = exchange(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&event).expect("event serializes")),
+        );
+        assert!(ack.contains(r#""status":"persisted""#), "{ack}");
+    }
+    let raw = rusqlite::Connection::open(&db_path).expect("inspection connection reopens");
+    assert_eq!(
+        raw.query_row(
+            "SELECT payload_json FROM incidents WHERE id = '.'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("legacy row remains untouched"),
+        "not-json"
+    );
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
 fn collision_ack_is_explicit_only_after_durable_evidence() {
     let db_path = temp_path("collision.sqlite");
+    drop(LocalStore::open(&db_path).expect("startup migration succeeds"));
     let config = config(temp_path("collision.sock"), vec![1_234, 2_345]);
     let mut event: serde_json::Value =
         serde_json::from_str(CANONICAL_EVENT).expect("fixture parses");
@@ -260,6 +303,7 @@ fn accept_loop_drop_reasons_are_operator_visible() {
 #[test]
 fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
     let db_path = temp_path("health.sqlite");
+    drop(LocalStore::open(&db_path).expect("startup migration succeeds"));
     let config = config(temp_path("health.sock"), vec![1_234]);
     let health = IngestionHealth::default();
     health.record_listener_started();
