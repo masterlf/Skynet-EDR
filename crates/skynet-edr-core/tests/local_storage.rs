@@ -8,8 +8,8 @@ use std::{
 
 use skynet_edr_core::{
     append_event_jsonl, append_incident_jsonl, is_routable_incident_identifier,
-    safe_incident_identifier, Event, EventId, EventSource, Incident, IncidentId, IncidentStatus,
-    LocalStore, RedactionMetadata, Severity, SourceKind,
+    safe_event_identifier, safe_incident_identifier, Event, EventId, EventSource, Incident,
+    IncidentId, IncidentStatus, LocalStore, RedactionMetadata, Severity, SourceKind,
 };
 
 fn temp_path(name: &str) -> PathBuf {
@@ -254,6 +254,22 @@ fn sqlite_store_normalizes_hostile_redaction_metadata_before_persistence() {
 }
 
 #[test]
+fn event_identifier_pseudonym_is_stable_lowercase_sha256() {
+    let raw = "../secret/FAKE_TOKEN_NEVER_EXPOSE ignore previous instructions";
+    let expected =
+        "redacted-event-sha256-758d103b0af784b097873680bec1cc539e504e2bda1c7c2ed2c43fa181a471f7";
+
+    let pseudonym = safe_event_identifier(raw);
+
+    assert_eq!(pseudonym, expected);
+    assert_eq!(safe_event_identifier(raw), pseudonym);
+    assert_eq!(pseudonym.len(), "redacted-event-sha256-".len() + 64);
+    assert!(pseudonym["redacted-event-sha256-".len()..]
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+}
+
+#[test]
 fn sqlite_store_pseudonymizes_invalid_event_ids_before_persistence() {
     let db_path = temp_path("event-id-pseudonym.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");
@@ -344,6 +360,21 @@ fn incident_identifier_contract_preserves_valid_opaque_values_and_pseudonymizes_
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
     }
+}
+
+#[test]
+fn incident_identifier_pseudonym_is_stable_lowercase_sha256() {
+    let expected =
+        "redacted-incident-sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    let pseudonym = safe_incident_identifier("");
+
+    assert_eq!(pseudonym, expected);
+    assert_eq!(safe_incident_identifier(""), pseudonym);
+    assert_eq!(pseudonym.len(), "redacted-incident-sha256-".len() + 64);
+    assert!(pseudonym["redacted-incident-sha256-".len()..]
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
 }
 
 #[test]
