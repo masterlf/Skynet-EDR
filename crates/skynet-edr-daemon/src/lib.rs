@@ -692,7 +692,7 @@ pub fn build_manual_linux_lab_workflow(plan: &LinuxLabPlan) -> Result<String, Li
 }
 
 fn blank(value: Option<&str>) -> bool {
-    value.map_or(true, |value| value.trim().is_empty())
+    value.is_none_or(|value| value.trim().is_empty())
 }
 
 fn is_controlled_sink_label(label: &str) -> bool {

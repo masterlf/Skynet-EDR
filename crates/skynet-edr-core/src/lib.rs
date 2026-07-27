@@ -939,7 +939,7 @@ pub fn redact_text(input: &str) -> Redacted<String> {
             block_was_redacted = true;
             if output
                 .last()
-                .map_or(true, |previous| previous != SECRET_REPLACEMENT)
+                .is_none_or(|previous| previous != SECRET_REPLACEMENT)
             {
                 output.push(SECRET_REPLACEMENT.to_owned());
                 fields.push(redaction_field(
@@ -1998,13 +1998,14 @@ fn attribute_matches(
     predicate
         .equals
         .as_deref()
-        .map_or(true, |expected| value.as_str() == Some(expected))
-        && predicate.contains.as_deref().map_or(true, |needle| {
-            value.as_str().is_some_and(|text| text.contains(needle))
-        })
+        .is_none_or(|expected| value.as_str() == Some(expected))
+        && predicate
+            .contains
+            .as_deref()
+            .is_none_or(|needle| value.as_str().is_some_and(|text| text.contains(needle)))
         && predicate
             .equals_bool
-            .map_or(true, |expected| value.as_bool() == Some(expected))
+            .is_none_or(|expected| value.as_bool() == Some(expected))
 }
 
 fn event_join_key(event: &CanonicalEventEnvelope, join: SequenceJoin) -> Option<String> {
@@ -2217,14 +2218,28 @@ pub fn is_safe_event_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-'))
 }
 
+fn sha256_lower_hex(value: &[u8]) -> String {
+    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let digest = Sha256::digest(value);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 /// Return a safe event identifier, pseudonymizing invalid legacy raw values.
 #[must_use]
 pub fn safe_event_identifier(value: &str) -> String {
     if is_safe_event_identifier(value) {
         return value.to_owned();
     }
-    let digest = Sha256::digest(value.as_bytes());
-    format!("redacted-event-sha256-{digest:x}")
+    format!(
+        "redacted-event-sha256-{}",
+        sha256_lower_hex(value.as_bytes())
+    )
 }
 
 /// Stable platform-independent incident identifier.
@@ -2258,8 +2273,10 @@ pub fn safe_incident_identifier(value: &str) -> String {
     if is_routable_incident_identifier(value) {
         return value.to_owned();
     }
-    let digest = Sha256::digest(value.as_bytes());
-    format!("redacted-incident-sha256-{digest:x}")
+    format!(
+        "redacted-incident-sha256-{}",
+        sha256_lower_hex(value.as_bytes())
+    )
 }
 
 /// Platform-independent security event payload.
@@ -3080,7 +3097,7 @@ fn is_sensitive_secret_access_event(event: &Event) -> bool {
             .attributes
             .get("operation")
             .and_then(serde_json::Value::as_str)
-            .map_or(true, |operation| matches!(operation, "read" | "access"))
+            .is_none_or(|operation| matches!(operation, "read" | "access"))
 }
 
 fn is_network_egress_event(event: &Event) -> bool {
@@ -3786,11 +3803,11 @@ fn ensure_nullable_column(
 
 fn degraded_correlation_incident(source_id: &str, event: &Event) -> Incident {
     let occurrence_material = format!("{}\0{}", source_id, event.id.as_str());
-    let occurrence_fingerprint = Sha256::digest(occurrence_material.as_bytes());
+    let occurrence_fingerprint = sha256_lower_hex(occurrence_material.as_bytes());
     let events = vec![event.clone()];
     sanitize_incident_for_storage(&Incident {
         id: IncidentId::new(format!(
-            "inc:continuous-correlation-degraded:{occurrence_fingerprint:x}"
+            "inc:continuous-correlation-degraded:{occurrence_fingerprint}"
         )),
         created_at_unix_ms: event.observed_at_unix_ms,
         updated_at_unix_ms: event.observed_at_unix_ms,
@@ -3815,15 +3832,15 @@ fn insert_collision_evidence_on_connection(
         params![event.id.as_str()],
         |row| row.get::<_, String>(0),
     )?;
-    let event_fingerprint = format!("sha256:{:x}", Sha256::digest(incoming_payload.as_bytes()));
+    let event_fingerprint = format!("sha256:{}", sha256_lower_hex(incoming_payload.as_bytes()));
     let existing_event_fingerprint =
-        format!("sha256:{:x}", Sha256::digest(existing_payload.as_bytes()));
-    let source_fingerprint = format!("sha256:{:x}", Sha256::digest(source_id.as_bytes()));
+        format!("sha256:{}", sha256_lower_hex(existing_payload.as_bytes()));
+    let source_fingerprint = format!("sha256:{}", sha256_lower_hex(source_id.as_bytes()));
     // Bound evidence to one row per colliding event identifier and authenticated
     // source. Payload variants retain the first committed fingerprints rather than
     // allowing an authorized producer to grow this table without bound per ID.
     let collision_material = format!("{}\0{}", event.id.as_str(), source_fingerprint);
-    let collision_id = format!("sha256:{:x}", Sha256::digest(collision_material.as_bytes()));
+    let collision_id = format!("sha256:{}", sha256_lower_hex(collision_material.as_bytes()));
     connection.execute(
         "INSERT INTO ingest_collisions (
             collision_id, event_fingerprint, source_fingerprint,
