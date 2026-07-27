@@ -55,13 +55,28 @@ grep -q 'StateDirectoryMode=0750' packaging/systemd/skynet-edr.service
 grep -q 'CacheDirectoryMode=0750' packaging/systemd/skynet-edr.service
 grep -q 'LogsDirectoryMode=0750' packaging/systemd/skynet-edr.service
 grep -q 'ProtectSystem=strict' packaging/systemd/skynet-edr.service
+grep -q 'ProtectHome=true' packaging/systemd/skynet-edr.service
+if grep -q 'ProtectHome=read-only' packaging/systemd/skynet-edr.service; then
+  echo "daemon must not receive read access to user homes" >&2
+  exit 1
+fi
 grep -q 'IPAddressDeny=any' packaging/systemd/skynet-edr.service
 grep -q 'IPAddressAllow=localhost' packaging/systemd/skynet-edr.service
 grep -q 'ExecStart=/usr/bin/skynet-edr-daemon run --config /etc/skynet-edr/config.toml' packaging/systemd/skynet-edr.service
 
 grep -q '^u skynet-edr ' packaging/sysusers/skynet-edr.conf
+grep -q '^g skynet-edr-ingest ' packaging/sysusers/skynet-edr.conf
+grep -q '^m skynet-edr skynet-edr-ingest$' packaging/sysusers/skynet-edr.conf
 grep -q '^d /var/lib/skynet-edr 0750 skynet-edr skynet-edr -' packaging/tmpfiles/skynet-edr.conf
 grep -q '^d /etc/skynet-edr 0750 root skynet-edr -' packaging/tmpfiles/skynet-edr.conf
+grep -q '^d /run/skynet-edr-ingest 0750 skynet-edr skynet-edr-ingest -' packaging/tmpfiles/skynet-edr.conf
+
+grep -q '^\[ingest\]' packaging/config/config.toml
+grep -q '^socket = "/run/skynet-edr-ingest/ingest.sock"' packaging/config/config.toml
+grep -q '^socket_group = "skynet-edr-ingest"' packaging/config/config.toml
+grep -q '^allowed_uids = \[\]' packaging/config/config.toml
+grep -q '^allow_root = false' packaging/config/config.toml
+grep -q '^max_frame_bytes = 262144' packaging/config/config.toml
 
 grep -q 'skynet-edr-daemon' packaging/nfpm.yaml
 grep -q 'type: config|noreplace' packaging/nfpm.yaml
@@ -122,6 +137,14 @@ grep -q 'pre_tool_call' integrations/hermes/skynet-edr/__init__.py
 grep -q 'post_tool_call' integrations/hermes/skynet-edr/__init__.py
 grep -q 'skynet.event.v0' integrations/hermes/skynet-edr/__init__.py
 grep -q 'skynet-edr-plugin.log' integrations/hermes/skynet-edr/README.md
+grep -q 'events-v1.jsonl' integrations/hermes/skynet-edr/README.md
+grep -q 'SKYNET_EDR_INGEST_SOCKET' integrations/hermes/skynet-edr/README.md
+grep -q 'events-v1.jsonl' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'PLUGIN_SPOOL="$PLUGIN_STATE/events-v1.jsonl"' packaging/scripts/vm-smoke.sh
+if grep -q 'PLUGIN_SPOOL="$PLUGIN_STATE/events.jsonl"' packaging/scripts/vm-smoke.sh; then
+  echo "VM smoke must not open the historical Hermes events.jsonl spool" >&2
+  exit 1
+fi
 
 grep -q 'systemd-sysusers' packaging/scripts/package-postinstall.sh
 grep -q 'systemd-tmpfiles' packaging/scripts/package-postinstall.sh

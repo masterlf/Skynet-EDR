@@ -13,20 +13,33 @@ import ipaddress
 import json
 import logging
 import os
+import queue
 import re
+import socket
 import stat
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - continuous ingestion is Linux-first
+    fcntl = None
 
 PLUGIN_NAME = "skynet-edr"
 PLUGIN_VERSION = "0.4.0"
 SCHEMA_VERSION = "skynet.event.v0"
 DEFAULT_MAX_FIELD_CHARS = 4096
 DEFAULT_MAX_LOG_BYTES = 1_048_576
+DEFAULT_EVENT_QUEUE_SIZE = 1024
+DEFAULT_FALLBACK_MAX_BYTES = 64 * 1024 * 1024
+MAX_FALLBACK_MAX_BYTES = 256 * 1024 * 1024
+MAX_INGEST_FRAME_BYTES = 262_144
+DEFAULT_INGEST_SOCKET = "/run/skynet-edr-ingest/ingest.sock"
 
 _SECRET_RE = re.compile(
     r"(?i)(authorization\s*:\s*bearer\s+\S+|x-api-key\s*[:=]\s*\S+|api[_-]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
@@ -73,6 +86,28 @@ _logger_lock = threading.Lock()
 _session_trace_id = f"hermes-local-{uuid.uuid4().hex}"
 _counter = 0
 _logger: logging.Logger | None = None
+
+
+def _initial_queue_size() -> int:
+    try:
+        value = int(os.environ.get("SKYNET_EDR_EVENT_QUEUE_SIZE", DEFAULT_EVENT_QUEUE_SIZE))
+    except (TypeError, ValueError):
+        return DEFAULT_EVENT_QUEUE_SIZE
+    return min(65_536, max(1, value))
+
+
+_event_queue: queue.Queue[str] = queue.Queue(maxsize=_initial_queue_size())
+_worker_lock = threading.Lock()
+_worker_started = False
+_worker_stop = threading.Event()
+_worker_thread: threading.Thread | None = None
+_transport_counters = {
+    "queue_drops": 0,
+    "socket_failures": 0,
+    "fallback_full": 0,
+    "fallback_records": 0,
+}
+_last_reported_transport_counters = dict(_transport_counters)
 
 
 def register(ctx: Any) -> None:
@@ -279,12 +314,251 @@ def _write_event(
     if artifact is not None:
         event["artifact"] = artifact
     line = json.dumps(event, separators=(",", ":"), sort_keys=True)
-    spool = _spool_path()
-    _ensure_private_dir(spool.parent)
+    _ensure_worker()
+    try:
+        _event_queue.put_nowait(line)
+    except queue.Full:
+        with _lock:
+            _transport_counters["queue_drops"] += 1
+
+
+def _ensure_worker() -> None:
+    global _worker_started, _worker_thread
+    if _worker_started:
+        return
+    with _worker_lock:
+        if _worker_started:
+            return
+        _worker_thread = threading.Thread(
+            target=_transport_worker, name="skynet-edr-forwarder", daemon=True
+        )
+        _worker_thread.start()
+        _worker_started = True
+
+
+def _transport_worker() -> None:
+    idle_ticks = 0
+    while not _worker_stop.is_set():
+        try:
+            line = _event_queue.get(timeout=0.05)
+        except queue.Empty:
+            idle_ticks += 1
+            if idle_ticks >= 20:
+                _replay_fallback(max_records=16)
+                _report_transport_counters()
+                _send_health_report()
+                idle_ticks = 0
+            continue
+        idle_ticks = 0
+        try:
+            _replay_fallback(max_records=4)
+            if _fallback_has_pending():
+                _append_fallback(line)
+            else:
+                status = _send_frame(line)
+                if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
+                    _append_fallback(line)
+        finally:
+            _event_queue.task_done()
+            _report_transport_counters()
+            _send_health_report()
+
+
+def _report_transport_counters() -> None:
+    global _last_reported_transport_counters
     with _lock:
-        with _open_private_append(spool) as handle:
-            handle.write(line + "\n")
-    _setup_logging().info("wrote_event event_id=%s event_type=%s severity=%s", event_id, event_type, severity)
+        snapshot = dict(_transport_counters)
+        if snapshot == _last_reported_transport_counters or not any(snapshot.values()):
+            return
+        _last_reported_transport_counters = snapshot
+    try:
+        _setup_logging().warning(
+            "transport_counters queue_drops=%d socket_failures=%d fallback_full=%d fallback_records=%d",
+            snapshot["queue_drops"],
+            snapshot["socket_failures"],
+            snapshot["fallback_full"],
+            snapshot["fallback_records"],
+        )
+    except OSError:
+        pass
+
+
+def _send_frame(line: str) -> str:
+    payload = line.encode("utf-8")
+    if not payload or len(payload) > MAX_INGEST_FRAME_BYTES:
+        return "rejected_permanent"
+    try:
+        request = json.loads(line)
+        event_id = request["event_id"]
+        if not isinstance(event_id, str) or not event_id:
+            return "rejected_permanent"
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return "rejected_permanent"
+    socket_path = os.environ.get("SKYNET_EDR_INGEST_SOCKET", DEFAULT_INGEST_SOCKET)
+    timeout = min(2.0, max(0.01, _safe_positive_int_env("SKYNET_EDR_SOCKET_TIMEOUT_MS", 250) / 1000))
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(socket_path)
+            client.sendall(len(payload).to_bytes(4, "big") + payload)
+            ack = bytearray()
+            while len(ack) <= 4096:
+                chunk = client.recv(min(1024, 4097 - len(ack)))
+                if not chunk:
+                    break
+                ack.extend(chunk)
+                if b"\n" in chunk:
+                    break
+        if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+            return "retry_later"
+        response = json.loads(bytes(ack[:-1]))
+        status = response.get("status")
+        if (
+            response.get("version") == 1
+            and response.get("event_id") == event_id
+            and status in {"persisted", "duplicate", "collision", "rejected_permanent"}
+        ):
+            return status
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    with _lock:
+        _transport_counters["socket_failures"] += 1
+    return "retry_later"
+
+
+def _send_health_report() -> bool:
+    path = _spool_path()
+    checkpoint_path = _checkpoint_path()
+    try:
+        with _spool_state_lock():
+            size = path.stat().st_size if path.exists() else 0
+            try:
+                checkpoint = min(_read_checkpoint(checkpoint_path), size)
+            except (OSError, UnicodeDecodeError, ValueError):
+                checkpoint = 0
+            backlog = size - checkpoint
+            backlog_age_ms = None
+            if backlog > 0:
+                backlog_age_ms = max(0, int((time.time() - path.stat().st_mtime) * 1000))
+        with _lock:
+            counters = dict(_transport_counters)
+        # Cumulative counters remain visible for audit, but current transport health must
+        # recover after a transient failure once the durable backlog is fully drained.
+        degraded = backlog > 0
+        payload = json.dumps(
+            {
+                "version": 1,
+                "message_type": "producer_health",
+                "checkpoint_bytes": checkpoint,
+                "backlog_bytes": backlog,
+                "backlog_age_ms": backlog_age_ms,
+                "events_dropped_total": counters["queue_drops"] + counters["fallback_full"],
+                "events_malformed_total": 0,
+                "transport_state": "degraded" if degraded else "available",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if not payload or len(payload) > 4096:
+            return False
+        socket_path = os.environ.get("SKYNET_EDR_INGEST_SOCKET", DEFAULT_INGEST_SOCKET)
+        timeout = min(
+            2.0,
+            max(0.01, _safe_positive_int_env("SKYNET_EDR_SOCKET_TIMEOUT_MS", 250) / 1000),
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(socket_path)
+            client.sendall(len(payload).to_bytes(4, "big") + payload)
+            ack = bytearray()
+            while len(ack) <= 4096:
+                chunk = client.recv(min(1024, 4097 - len(ack)))
+                if not chunk:
+                    break
+                ack.extend(chunk)
+                if b"\n" in chunk:
+                    break
+        if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+            return False
+        response = json.loads(bytes(ack[:-1]))
+        return response.get("version") == 1 and response.get("status") == "health_recorded"
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _append_fallback(line: str) -> bool:
+    encoded_bytes = len(line.encode("utf-8")) + 1
+    if encoded_bytes > MAX_INGEST_FRAME_BYTES + 1:
+        return False
+    path = _spool_path()
+    _ensure_private_dir(path.parent)
+    configured_cap = _safe_positive_int_env("SKYNET_EDR_FALLBACK_MAX_BYTES", DEFAULT_FALLBACK_MAX_BYTES)
+    cap = min(configured_cap, MAX_FALLBACK_MAX_BYTES)
+    with _spool_state_lock():
+        try:
+            current_size = path.stat().st_size if path.exists() else 0
+            try:
+                checkpoint = min(_read_checkpoint(_checkpoint_path()), current_size)
+            except (OSError, UnicodeDecodeError, ValueError):
+                checkpoint = 0
+            pending_size = current_size - checkpoint
+            if pending_size + encoded_bytes > cap:
+                with _lock:
+                    _transport_counters["fallback_full"] += 1
+                return False
+            if checkpoint > 0 and current_size + encoded_bytes > cap:
+                _compact_fallback_prefix(path, checkpoint)
+            with _open_private_append(path) as handle:
+                handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            _fsync_parent(path)
+            with _lock:
+                _transport_counters["fallback_records"] += 1
+            return True
+        except OSError:
+            return False
+
+
+def _replay_fallback(*, max_records: int) -> int:
+    path = _spool_path()
+    with _spool_state_lock():
+        if not path.exists():
+            return 0
+        checkpoint = _checkpoint_path()
+        try:
+            offset = _read_checkpoint(checkpoint)
+            with _open_private_read(path) as handle:
+                size = os.fstat(handle.fileno()).st_size
+                if offset > size:
+                    offset = 0
+                    _write_checkpoint(checkpoint, 0)
+                handle.seek(offset)
+                advanced = 0
+                for _ in range(max_records):
+                    line = handle.readline(MAX_INGEST_FRAME_BYTES + 2)
+                    if not line or not line.endswith(b"\n") or len(line) > MAX_INGEST_FRAME_BYTES + 1:
+                        break
+                    status = _send_frame(line[:-1].decode("utf-8"))
+                    if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
+                        break
+                    offset = handle.tell()
+                    _write_checkpoint(checkpoint, offset)
+                    advanced += 1
+                return advanced
+        except (OSError, UnicodeDecodeError, ValueError):
+            return 0
+
+
+def _fallback_has_pending() -> bool:
+    path = _spool_path()
+    with _spool_state_lock():
+        try:
+            with _open_private_read(path) as handle:
+                size = os.fstat(handle.fileno()).st_size
+            return _read_checkpoint(_checkpoint_path()) < size
+        except (OSError, ValueError):
+            return path.exists()
 
 
 def _setup_logging() -> logging.Logger:
@@ -323,7 +597,13 @@ def _state_dir() -> Path:
 
 
 def _spool_path() -> Path:
-    return Path(os.environ.get("SKYNET_EDR_SPOOL_PATH", str(_state_dir() / "events.jsonl"))).expanduser()
+    return Path(os.environ.get("SKYNET_EDR_SPOOL_PATH", str(_state_dir() / "events-v1.jsonl"))).expanduser()
+
+
+def _checkpoint_path() -> Path:
+    return Path(
+        os.environ.get("SKYNET_EDR_CHECKPOINT_PATH", str(_state_dir() / "events-v1.offset"))
+    ).expanduser()
 
 
 def _log_path() -> Path:
@@ -332,20 +612,142 @@ def _log_path() -> Path:
 
 def _ensure_private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
     try:
-        path.chmod(stat.S_IRWXU)
-    except OSError:
-        pass
+        metadata = os.fstat(fd)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise OSError("refusing unsafe private state directory")
+        os.fchmod(fd, stat.S_IRWXU)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _spool_state_lock():
+    if fcntl is None:
+        raise OSError("process-shared fallback locking is unavailable")
+    spool = _spool_path()
+    path = spool.with_name(f".{spool.name}.lock")
+    _ensure_private_dir(path.parent)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise OSError("refusing unsafe fallback lock target")
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _fsync_parent(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path.parent, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _open_private_append(path: Path):
-    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR)
+    flags = (
+        os.O_APPEND
+        | os.O_CREAT
+        | os.O_WRONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    fd = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
     try:
-        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("refusing non-regular private append target")
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         os.close(fd)
         raise
     return os.fdopen(fd, "a", encoding="utf-8")
+
+
+def _open_private_read(path: Path):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("refusing non-regular private replay target")
+        return os.fdopen(fd, "rb")
+    except OSError:
+        os.close(fd)
+        raise
+
+
+def _read_checkpoint(path: Path) -> int:
+    try:
+        with _open_private_read(path) as handle:
+            raw = handle.read(65)
+    except FileNotFoundError:
+        return 0
+    if len(raw) > 64:
+        raise ValueError("checkpoint is oversized")
+    value = raw.decode("ascii").strip()
+    offset = int(value)
+    if offset < 0:
+        raise ValueError("negative checkpoint")
+    return offset
+
+
+def _write_checkpoint(path: Path, offset: int) -> None:
+    _ensure_private_dir(path.parent)
+    temporary = path.with_name(
+        f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+    )
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temporary, flags, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(str(offset))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_parent(path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _compact_fallback_prefix(path: Path, offset: int) -> None:
+    temporary = path.with_name(
+        f".{path.name}.compact-{os.getpid()}-{threading.get_ident()}"
+    )
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    output_fd = os.open(temporary, flags, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with _open_private_read(path) as source, os.fdopen(output_fd, "wb") as output:
+            source.seek(offset)
+            while chunk := source.read(65_536):
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        # Reset first: a crash before replacement can only cause safe duplicate replay.
+        _write_checkpoint(_checkpoint_path(), 0)
+        os.replace(temporary, path)
+        _fsync_parent(path)
+    except BaseException:
+        try:
+            os.close(output_fd)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _rotate_log_if_needed(path: Path) -> None:

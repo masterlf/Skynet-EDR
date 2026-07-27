@@ -16,14 +16,18 @@ modify model/tool execution.
 
 ## Default output
 
-By default the plugin writes user-local files:
+The hook path serializes into a bounded in-memory queue only. A producer-owned
+worker sends length-prefixed canonical events to the daemon AF_UNIX socket. If
+the daemon is unavailable, the worker writes a bounded, private, versioned
+fallback and advances its checkpoint only after a terminal daemon ACK:
 
 ```text
-~/.local/state/skynet-edr/hermes/events.jsonl
+~/.local/state/skynet-edr/hermes/events-v1.jsonl
+~/.local/state/skynet-edr/hermes/events-v1.offset
 ~/.local/state/skynet-edr/hermes/skynet-edr-plugin.log
 ```
 
-Both the spool and log are created with user-only permissions where supported.
+The fallback, checkpoint, and log are user-private where supported.
 
 ## Environment variables
 
@@ -31,7 +35,12 @@ Both the spool and log are created with user-only permissions where supported.
 |---|---|
 | `SKYNET_EDR_HERMES_PLUGIN_ENABLED=0` | Disable emission without uninstalling the plugin. |
 | `SKYNET_EDR_STATE_DIR` | Override the user-local state directory. |
-| `SKYNET_EDR_SPOOL_PATH` | Override JSONL event spool path. |
+| `SKYNET_EDR_INGEST_SOCKET` | Override the AF_UNIX ingest socket. |
+| `SKYNET_EDR_SOCKET_TIMEOUT_MS` | Bound connect/write/ACK time in the worker. |
+| `SKYNET_EDR_EVENT_QUEUE_SIZE` | Bound the in-memory handoff queue. |
+| `SKYNET_EDR_SPOOL_PATH` | Override the versioned fallback JSONL path. |
+| `SKYNET_EDR_CHECKPOINT_PATH` | Override the fallback replay checkpoint. |
+| `SKYNET_EDR_FALLBACK_MAX_BYTES` | Bound fallback storage (hard ceiling: 256 MiB). |
 | `SKYNET_EDR_LOG_PATH` | Override sanitized plugin log path. |
 | `SKYNET_EDR_TENANT` | Tenant/workspace label in event provenance. |
 | `SKYNET_EDR_MAX_FIELD_CHARS` | Bound safe preview strings. |
@@ -40,7 +49,10 @@ Both the spool and log are created with user-only permissions where supported.
 
 ## Security posture
 
-- No outbound network.
+- No outbound network; transport is local AF_UNIX only.
+- Hook callbacks perform no socket or file I/O. Queue-full behavior drops the
+  newest record rather than blocking Hermes. The producer worker writes aggregate
+  queue/socket/fallback counters to the sanitized operational log.
 - No LLM calls from the plugin.
 - No inline blocking in v0.4.
 - Raw tool parameters and raw tool output are omitted; only lengths and
@@ -60,17 +72,15 @@ Install with `skynet-edr-install-hermes-plugin`; it copies telemetry and Web Das
 
 Both Risk Explorer surfaces display only validated `skynet.risk.v1` redacted projections from Skynet-EDR. Risk titles/summaries and evidence titles are deterministic labels generated from allowlisted rule IDs, event types, and scalar metadata; stored incident titles/summaries and stored event titles are not projected. Artifact labels are fixed by typed artifact kind, and arbitrary stored attributes are not displayed. Hostile values are rendered only as React text: there is no raw HTML, Markdown, active link, `innerHTML`, or direct URL/path rendering. The UI fails closed with generic errors when identity, enums, bounds, pagination, read-only flags, or deterministic labels do not match the expected schema.
 
-## Ingesting into Skynet-EDR
+## Continuous ingestion authorization
 
-Manual ingestion:
+The packaged daemon never reads producer home directories. To authorize a
+Hermes user, add that account to `skynet-edr-ingest` for socket DAC access and
+add its numeric UID to `ingest.allowed_uids` in `/etc/skynet-edr/config.toml`.
+Restart the user's session after changing supplementary groups, then restart the
+daemon. Root is denied unless `ingest.allow_root = true` is explicitly reviewed.
 
-```bash
-skynet-edr events ingest-spool \
-  --db /var/lib/skynet-edr/skynet.sqlite \
-  --spool ~/.local/state/skynet-edr/hermes/events.jsonl \
-  --checkpoint ~/.local/state/skynet-edr/hermes/events.offset
-```
-
-Daemon polling can use the same paths in `/etc/skynet-edr/config.toml` under
-`[spool]`, provided the daemon user can read the user-local spool. Keep this an
-explicit operator decision; do not grant broad home-directory access blindly.
+The legacy `skynet-edr events ingest-spool` command remains available for
+explicit manual import. The daemon does not poll the plugin's historical
+`events.jsonl`; continuous fallback uses only `events-v1.jsonl` and its
+producer-owned checkpoint.

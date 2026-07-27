@@ -3,6 +3,15 @@
 //! The scanner is intentionally read-only and root-scoped. Tests exercise fake
 //! fixtures so the daemon never needs privileged access or live Hermes state.
 
+#[cfg(target_os = "linux")]
+mod ingest_unix;
+
+#[cfg(target_os = "linux")]
+pub use ingest_unix::{
+    bind_ingest_listener, peer_uid, process_ingest_connection, IngestionHealth,
+    IngestionHealthSnapshot, UnixIngestConfig,
+};
+
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap},
     fmt::Write as _,

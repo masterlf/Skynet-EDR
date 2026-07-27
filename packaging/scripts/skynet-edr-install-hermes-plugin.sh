@@ -51,7 +51,8 @@ install -d -m 0700 "$STATE_DIR"
 
 echo "Installed Skynet-EDR Hermes plugin to $TARGET"
 echo "Installed Skynet-EDR Desktop plugin to $DESKTOP_TARGET"
-echo "Default event spool: ${SKYNET_EDR_SPOOL_PATH:-$STATE_DIR/events.jsonl}"
+echo "Fallback event spool: ${SKYNET_EDR_SPOOL_PATH:-$STATE_DIR/events-v1.jsonl}"
+echo "Ingest socket:        ${SKYNET_EDR_INGEST_SOCKET:-/run/skynet-edr-ingest/ingest.sock}"
 echo "Default plugin log:  ${SKYNET_EDR_LOG_PATH:-$STATE_DIR/skynet-edr-plugin.log}"
 
 if [ "$ENABLE" -eq 1 ] && command -v hermes >/dev/null 2>&1; then

@@ -32,6 +32,7 @@ Packaged installs should create this layout:
 /var/lib/skynet-edr/skynet.sqlite
 /var/log/skynet-edr/
 /run/skynet-edr/
+/run/skynet-edr-ingest/
 /usr/lib/systemd/system/skynet-edr.service
 /usr/lib/sysusers.d/skynet-edr.conf
 /usr/lib/tmpfiles.d/skynet-edr.conf
@@ -42,6 +43,7 @@ A dedicated locked service account is used:
 ```text
 user:  skynet-edr
 group: skynet-edr
+ingress group: skynet-edr-ingest
 home:  /var/lib/skynet-edr
 shell: /usr/sbin/nologin or equivalent
 ```
@@ -56,6 +58,7 @@ Default permissions:
 /var/lib/skynet-edr/              skynet-edr:skynet-edr 0750
 /var/log/skynet-edr/              skynet-edr:skynet-edr 0750
 /run/skynet-edr/                  skynet-edr:skynet-edr 0750
+/run/skynet-edr-ingest/           skynet-edr:skynet-edr-ingest 0750
 /usr/bin/skynet-edr*              root:root 0755
 ```
 
@@ -153,25 +156,35 @@ skynet-edr-install-hermes-plugin
 hermes plugins enable skynet-edr  # if Hermes requires explicit opt-in
 ```
 
-Restart Hermes sessions after installation. The plugin writes sanitized logs and
-canonical event JSONL by default under:
+Authorize the Hermes producer explicitly, then restart its login session and
+the daemon (replace `1000` with the reviewed Hermes user's numeric UID):
+
+```bash
+sudo usermod -aG skynet-edr-ingest "$USER"
+# Edit /etc/skynet-edr/config.toml: allowed_uids = [1000]
+sudo systemctl restart skynet-edr
+```
+
+The plugin worker sends to `/run/skynet-edr-ingest/ingest.sock`. During daemon
+outages it writes a private versioned fallback under:
 
 ```text
 ~/.local/state/skynet-edr/hermes/skynet-edr-plugin.log
-~/.local/state/skynet-edr/hermes/events.jsonl
+~/.local/state/skynet-edr/hermes/events-v1.jsonl
+~/.local/state/skynet-edr/hermes/events-v1.offset
 ```
 
-Manual ingestion example:
+Legacy manual ingestion remains available for an explicitly selected spool:
 
 ```bash
 skynet-edr events ingest-spool \
   --db /var/lib/skynet-edr/skynet.sqlite \
-  --spool ~/.local/state/skynet-edr/hermes/events.jsonl \
-  --checkpoint ~/.local/state/skynet-edr/hermes/events.offset
+  --spool ~/.local/state/skynet-edr/hermes/events-v1.jsonl \
+  --checkpoint ~/.local/state/skynet-edr/hermes/manual-import.offset
 ```
 
 See [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) for the hook model,
-logging guarantees, environment variables, and daemon polling caveats.
+logging guarantees, and environment variables. Use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations) for the authoritative enrollment, socket/UID boundary, health counters, fallback policy, canary, restart, and rollback runbook.
 
 ## Install from `.rpm` on RHEL-compatible Linux or Fedora
 
@@ -381,4 +394,4 @@ Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default
 
 ## Current limitation
 
-The repository has a daemon skeleton but not a production long-running service loop yet. Packaging assets are intentionally conservative and should remain passive/read-only until the daemon runtime and sensor privilege model are implemented and tested.
+The packaged daemon now has a passive long-running loop, a loopback read-only API, and authenticated bounded AF_UNIX ingestion. It still has no privileged sensor or guard-mode enforcement path. Continuous ingestion is Linux-only, the ingestion accept thread is not independently supervised, and the shipped Hermes producer leaves several implemented canonical rules dark; use the [coverage matrix](DETECTIONS.md#rule-to-producer-coverage-matrix) rather than inferring coverage from rule presence.
