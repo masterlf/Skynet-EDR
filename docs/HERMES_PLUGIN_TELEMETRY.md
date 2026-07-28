@@ -22,7 +22,7 @@ authenticated daemon transaction (event + correlation + receipt)
 local events, incidents, API, MCP visibility
 ```
 
-The same authenticated socket accepts strict, bounded `producer_health` control frames. Version 2 adds only an allowlisted runtime role (`gateway`, `dashboard`, `worker`, or `unknown`) and a 64-byte lowercase alphanumeric/hyphen process-instance identifier to the version-1 checkpoint/backlog counters and fixed transport state. Kernel DAC and `SO_PEERCRED` remain authoritative; role and instance are attribution within an already-authorized UID, never authentication. Legacy version-1 frames remain observable but cannot satisfy an explicitly required role. Paths, labels, event payloads, commands, PIDs, and secrets are neither accepted nor exposed.
+The same authenticated socket accepts strict, bounded `producer_health` control frames. Version 2 adds only an allowlisted runtime role (`gateway`, `dashboard`, `worker`, or `unknown`) and a 64-byte lowercase alphanumeric/hyphen process-instance identifier to the version-1 checkpoint/backlog counters and fixed transport state. Kernel DAC and `SO_PEERCRED` remain the authorization boundary. Role and instance are authorized-UID self-reported operational attribution, never authentication or process attestation: same-UID compromise, a malicious root process in the shared trust domain, or a global/mistaken role assignment can forge them. A correctly configured per-unit dashboard role cannot satisfy a required reported gateway role, but this is enrollment evidence rather than security-grade role attestation. Legacy version-1 frames remain observable separately and cannot satisfy an explicitly required reported role. Paths, labels, event payloads, commands, PIDs, and secrets are neither accepted nor exposed.
 
 ## Installed files
 
@@ -156,7 +156,7 @@ allowed_uids = [1000] # replace with the reviewed producer UID
 allow_root = false
 ```
 
-The worker replays only its producer-owned `events-v1.jsonl`, in order, and advances `events-v1.offset` only after a versioned terminal ACK for the matching event ID. The daemon never polls producer homes or the historical `events.jsonl`. Queue, socket, and fallback failures are bounded but can drop newest telemetry; they do not block Hermes. For enrollment, counter semantics, backlog measurement, failure/restart behavior, the harmless canary, and rollback, use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
+The worker sends an immediate health frame when the enabled plugin registers, before waiting for hook activity, then sends bounded periodic heartbeats and reports after delivery work. It replays only its producer-owned `events-v1.jsonl`, in order, and advances `events-v1.offset` only after a versioned terminal ACK for the matching event ID. The daemon never polls producer homes or the historical `events.jsonl`. Queue, socket, and fallback failures are bounded but can drop newest telemetry; they do not block Hermes. For enrollment, counter semantics, backlog measurement, failure/restart behavior, the harmless canary, and rollback, use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
 
 ## Security boundaries
 

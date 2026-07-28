@@ -27,6 +27,7 @@ use skynet_edr_core::{
 };
 
 const MAX_HEALTH_SOURCES: usize = 64;
+const DEFAULT_STALE_SOURCE_RETENTION: Duration = Duration::from_mins(5);
 
 /// Fixed runtime roles accepted by the attributed producer-health protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -89,7 +90,7 @@ pub struct UnixIngestConfig {
     /// Maximum indexed correlation candidates per event.
     pub candidate_limit: usize,
     /// Optional fixed roles that must have a fresh attributed heartbeat.
-    pub required_roles: Vec<ProducerRole>,
+    pub required_reported_roles: Vec<ProducerRole>,
 }
 
 /// Bounded aggregate ingestion counters shared with the read-only status projection.
@@ -113,8 +114,9 @@ pub struct IngestionHealth {
     listener_live: AtomicBool,
     last_event_received_at_unix_ms: AtomicU64,
     last_event_committed_at_unix_ms: AtomicU64,
-    required_roles: Vec<ProducerRole>,
-    sources: Mutex<BTreeMap<(u32, ProducerRole), SourceHealth>>,
+    required_reported_roles: Vec<ProducerRole>,
+    stale_source_retention: Duration,
+    sources: Mutex<BTreeMap<SourceKey, SourceHealth>>,
 }
 
 #[derive(Debug, Default)]
@@ -135,6 +137,8 @@ struct SourceHealth {
     last_error_category: Option<&'static str>,
     last_error_at_unix_ms: Option<u64>,
 }
+
+type SourceKey = (u32, ProducerRole, Option<String>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProducerTransportState {
@@ -259,14 +263,26 @@ pub struct IngestionHealthSnapshot {
 
 impl Default for IngestionHealth {
     fn default() -> Self {
-        Self::with_required_roles(Vec::new())
+        Self::with_required_reported_roles(Vec::new())
     }
 }
 
 impl IngestionHealth {
-    /// Create process-lifetime health state with optional required runtime roles.
+    /// Create process-lifetime health state with optional required reported roles.
     #[must_use]
-    pub fn with_required_roles(required_roles: Vec<ProducerRole>) -> Self {
+    pub fn with_required_reported_roles(required_reported_roles: Vec<ProducerRole>) -> Self {
+        Self::with_required_reported_roles_and_retention(
+            required_reported_roles,
+            DEFAULT_STALE_SOURCE_RETENTION,
+        )
+    }
+
+    /// Create health state with explicit stale-source retention for deterministic tests.
+    #[must_use]
+    pub fn with_required_reported_roles_and_retention(
+        required_reported_roles: Vec<ProducerRole>,
+        stale_source_retention: Duration,
+    ) -> Self {
         Self {
             accepted: AtomicU64::new(0),
             unauthorized: AtomicU64::new(0),
@@ -286,7 +302,8 @@ impl IngestionHealth {
             listener_live: AtomicBool::new(false),
             last_event_received_at_unix_ms: AtomicU64::new(0),
             last_event_committed_at_unix_ms: AtomicU64::new(0),
-            required_roles,
+            required_reported_roles,
+            stale_source_retention,
             sources: Mutex::new(BTreeMap::new()),
         }
     }
@@ -346,28 +363,37 @@ impl IngestionHealth {
         let snapshot = self.snapshot();
         let now = unix_ms_now();
         let stale_after_ms = u64::try_from(stale_after.as_millis()).unwrap_or(u64::MAX);
-        let sources = self
+        let mut sources = self
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        evict_stale_sources(&mut sources, now, self.stale_source_retention);
         let mut source_values = Vec::with_capacity(sources.len());
         let mut producer_count = 0usize;
+        let mut fresh_producer_count = 0usize;
         let mut producer_degraded = false;
         let mut any_fresh_heartbeat = false;
-        for ((uid, role), source) in sources.iter() {
-            let (value, has_report, is_degraded, fresh_heartbeat) =
-                source_status_json(*uid, *role, source, now, stale_after_ms);
+        for ((uid, role, instance_id), source) in sources.iter() {
+            let (value, has_report, is_degraded, fresh_heartbeat) = source_status_json(
+                *uid,
+                *role,
+                instance_id.as_deref(),
+                source,
+                now,
+                stale_after_ms,
+            );
             producer_count += usize::from(has_report);
+            fresh_producer_count += usize::from(fresh_heartbeat);
             producer_degraded |= is_degraded;
             any_fresh_heartbeat |= fresh_heartbeat;
             source_values.push(value);
         }
-        let mut required_values = Vec::with_capacity(self.required_roles.len());
+        let mut required_values = Vec::with_capacity(self.required_reported_roles.len());
         let mut required_degraded = false;
-        for required in &self.required_roles {
+        for required in &self.required_reported_roles {
             let mut present = false;
             let mut fresh = false;
-            for ((_, role), source) in sources.iter() {
+            for ((_, role, _), source) in sources.iter() {
                 if role != required || source.producer_reported_at_unix_ms.is_none() {
                     continue;
                 }
@@ -397,12 +423,13 @@ impl IngestionHealth {
         let recently_degraded =
             last_degraded != 0 && now.saturating_sub(last_degraded) <= stale_after_ms;
         let degraded = !listener_live
-            || producer_count == 0
+            || fresh_producer_count == 0
             || producer_degraded
             || required_degraded
             || recently_degraded;
         json!({
             "state": if degraded { "degraded" } else { "healthy" },
+            "role_identity_assurance": "authorized_uid_self_reported",
             "listener_live": listener_live,
             "transport_heartbeat_state": if any_fresh_heartbeat { "fresh" } else if producer_count > 0 { "stale" } else { "not_observed" },
             "hook_event_state": match last_received {
@@ -415,7 +442,7 @@ impl IngestionHealth {
             "last_event_received_age_ms": last_received.map(|at| now.saturating_sub(at)),
             "last_event_committed_at_unix_ms": last_committed,
             "last_event_committed_age_ms": last_committed.map(|at| now.saturating_sub(at)),
-            "required_roles": required_values,
+            "required_reported_roles": required_values,
             "connections_accepted_total": snapshot.connections_accepted_total,
             "connections_unauthorized_total": snapshot.connections_unauthorized_total,
             "connections_capacity_rejected_total": snapshot.connections_capacity_rejected_total,
@@ -439,7 +466,7 @@ impl IngestionHealth {
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = (uid, ProducerRole::Legacy);
+        let key = (uid, ProducerRole::Legacy, None);
         if sources.contains_key(&key) || sources.len() < MAX_HEALTH_SOURCES {
             let source = sources.entry(key).or_default();
             source.last_error_category = Some(category);
@@ -463,7 +490,7 @@ impl IngestionHealth {
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = (uid, ProducerRole::Legacy);
+        let key = (uid, ProducerRole::Legacy, None);
         if sources.contains_key(&key) || sources.len() < MAX_HEALTH_SOURCES {
             sources
                 .entry(key)
@@ -477,7 +504,7 @@ impl IngestionHealth {
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = (uid, ProducerRole::Legacy);
+        let key = (uid, ProducerRole::Legacy, None);
         if !sources.contains_key(&key) && sources.len() >= MAX_HEALTH_SOURCES {
             if status == ContinuousIngestStatus::Persisted {
                 self.last_event_committed_at_unix_ms
@@ -507,24 +534,21 @@ impl IngestionHealth {
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = (uid, report.role);
+        let now = unix_ms_now();
+        evict_stale_sources(&mut sources, now, self.stale_source_retention);
+        let key = (uid, report.role, report.instance_id.clone());
         if !sources.contains_key(&key) && sources.len() >= MAX_HEALTH_SOURCES {
             return false;
         }
         let source = sources.entry(key).or_default();
-        if source.instance_id != report.instance_id {
-            *source = SourceHealth {
-                instance_id: report.instance_id.clone(),
-                ..SourceHealth::default()
-            };
-        }
+        source.instance_id.clone_from(&report.instance_id);
         source.producer_checkpoint_bytes = Some(report.checkpoint_bytes);
         source.backlog_bytes = Some(report.backlog_bytes);
         source.backlog_age_ms = report.backlog_age_ms;
         source.events_dropped_total = report.events_dropped_total;
         source.producer_events_malformed_total = report.events_malformed_total;
         source.transport_state = Some(report.transport_state);
-        source.producer_reported_at_unix_ms = Some(unix_ms_now());
+        source.producer_reported_at_unix_ms = Some(now);
         true
     }
 
@@ -551,9 +575,33 @@ fn unix_ms_now() -> u64 {
         })
 }
 
+fn source_last_activity(source: &SourceHealth) -> Option<u64> {
+    [
+        source.producer_reported_at_unix_ms,
+        source.last_event_received_at_unix_ms,
+        source.last_event_committed_at_unix_ms,
+        source.last_error_at_unix_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+
+fn evict_stale_sources(
+    sources: &mut BTreeMap<SourceKey, SourceHealth>,
+    now: u64,
+    retention: Duration,
+) {
+    let retention_ms = u64::try_from(retention.as_millis()).unwrap_or(u64::MAX);
+    sources.retain(|_, source| {
+        source_last_activity(source).is_none_or(|at| now.saturating_sub(at) <= retention_ms)
+    });
+}
+
 fn source_status_json(
     uid: u32,
     role: ProducerRole,
+    instance_id: Option<&str>,
     source: &SourceHealth,
     now: u64,
     stale_after_ms: u64,
@@ -562,11 +610,14 @@ fn source_status_json(
     let stale = source
         .producer_reported_at_unix_ms
         .is_some_and(|reported| now.saturating_sub(reported) > stale_after_ms);
-    let transport_state = match source.transport_state {
-        Some(ProducerTransportState::Available) if !stale => "available",
-        Some(ProducerTransportState::Available) => "stale",
-        Some(ProducerTransportState::Degraded) => "degraded",
-        None => "unknown",
+    let transport_state = if stale {
+        "stale"
+    } else {
+        match source.transport_state {
+            Some(ProducerTransportState::Available) => "available",
+            Some(ProducerTransportState::Degraded) => "degraded",
+            None => "unknown",
+        }
     };
     let recent_degrading_error = source.last_error_category.is_some_and(|category| {
         is_degrading_error(category)
@@ -575,11 +626,11 @@ fn source_status_json(
                 .is_some_and(|at| now.saturating_sub(at) <= stale_after_ms)
     });
     let degraded = has_report
-        && (stale
-            || source.transport_state == Some(ProducerTransportState::Degraded)
+        && !stale
+        && (source.transport_state == Some(ProducerTransportState::Degraded)
             || source.backlog_bytes.unwrap_or(0) > 0
             || recent_degrading_error);
-    let source_id = source.instance_id.as_ref().map_or_else(
+    let source_id = instance_id.map_or_else(
         || format!("uid:{uid}"),
         |instance| format!("uid:{uid}:{}:{instance}", role.as_str()),
     );
@@ -599,6 +650,7 @@ fn source_status_json(
         "events_collision_total": source.events_collision_total,
         "last_error_category": source.last_error_category,
         "last_error_at_unix_ms": source.last_error_at_unix_ms,
+        "last_error_age_ms": source.last_error_at_unix_ms.map(|at| now.saturating_sub(at)),
         "producer_reported_at_unix_ms": source.producer_reported_at_unix_ms,
         "producer_report_age_ms": source.producer_reported_at_unix_ms.map(|at| now.saturating_sub(at)),
         "transport_state": transport_state,

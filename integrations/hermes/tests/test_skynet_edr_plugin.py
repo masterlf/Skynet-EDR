@@ -499,6 +499,32 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         )
         self.assertTrue((self.state_dir / "skynet-edr-plugin.log").exists())
 
+    def test_register_starts_one_worker_and_immediately_attempts_hermetic_health(self):
+        configured_socket = Path(os.environ["SKYNET_EDR_INGEST_SOCKET"])
+        self.assertFalse(configured_socket.exists())
+        attempted = threading.Event()
+
+        def health_attempt():
+            attempted.set()
+            return False
+
+        ctx = FakeContext()
+        with patch.object(self.plugin, "_send_health_report", side_effect=health_attempt) as send:
+            self.plugin.register(ctx)
+            first_worker = self.plugin._worker_thread
+            self.plugin.register(ctx)
+            self.assertTrue(attempted.wait(0.5), "registration must send health before waiting")
+            self.assertIs(first_worker, self.plugin._worker_thread)
+            self.assertIsNotNone(first_worker)
+            self.assertTrue(first_worker.is_alive())
+            time.sleep(0.05)
+            self.assertEqual(send.call_count, 1)
+
+    def test_disabled_registration_does_not_start_worker(self):
+        with patch.dict(os.environ, {"SKYNET_EDR_HERMES_PLUGIN_ENABLED": "0"}, clear=False):
+            self.plugin.register(FakeContext())
+        self.assertIsNone(self.plugin._worker_thread)
+
     def test_pre_tool_call_emits_redacted_network_event_without_raw_secret_or_path(self):
         ctx = FakeContext()
         self.plugin.register(ctx)

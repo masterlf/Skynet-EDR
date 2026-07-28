@@ -119,6 +119,8 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_llm_call", _safe_hook(_pre_llm_call))
     ctx.register_hook("pre_tool_call", _safe_hook(_pre_tool_call))
     ctx.register_hook("post_tool_call", _safe_hook(_post_tool_call))
+    if _enabled():
+        _ensure_worker()
 
 
 def _safe_hook(handler):
@@ -338,6 +340,7 @@ def _ensure_worker() -> None:
 
 
 def _transport_worker() -> None:
+    _send_health_report()
     idle_ticks = 0
     while not _worker_stop.is_set():
         try:

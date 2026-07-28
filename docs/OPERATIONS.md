@@ -68,13 +68,36 @@ socket = "/run/skynet-edr-ingest/ingest.sock"
 socket_group = "skynet-edr-ingest"
 allowed_uids = [1000] # reviewed numeric producer UID; do not copy blindly
 allow_root = false
-required_roles = ["gateway"] # optional; omit/[] preserves generic compatibility
+required_reported_roles = ["gateway"] # operational self-report gate; omit/[] is generic
 max_frame_bytes = 262144
 max_connections = 16
 read_timeout_ms = 1000
 write_timeout_ms = 1000
 candidate_limit = 2048
 ```
+
+Assign attribution per unit, never through `systemctl --user set-environment` or another global user-manager environment. First identify the exact reviewed unit names. Then create separate drop-ins:
+
+```bash
+systemctl --user edit <gateway-unit>
+# [Service]
+# Environment=HERMES_RUNTIME_ROLE=gateway
+
+systemctl --user edit <dashboard-unit>
+# [Service]
+# Environment=HERMES_RUNTIME_ROLE=dashboard
+
+systemctl --user daemon-reload
+```
+
+After change approval, restart only those two reviewed units in the approved window. A deliberately configured `SKYNET_EDR_RUNTIME_INSTANCE` may remain stable; otherwise the generated fallback instance changes when its process restarts. Do not require an unconditional instance change. Verify fresh status after restart:
+
+```bash
+systemctl --user restart <gateway-unit> <dashboard-unit> # approved targeted restart only
+curl --fail --silent http://127.0.0.1:8787/api/status
+```
+
+A correctly configured per-unit dashboard role cannot satisfy the required reported gateway role. This is operational enrollment evidence only: `runtime_role` and `instance_id` are self-reported by a kernel-authorized UID. A same-UID compromise, a root process in the current shared trust domain, or a mistaken/global role assignment can forge attribution. `role_identity_assurance="authorized_uid_self_reported"` states this boundary; it is not security-grade process or role attestation.
 
 Restart the producer's login session so its supplementary groups are refreshed, then restart the daemon and each reviewed Hermes gateway/dashboard service during an approved maintenance window. Installing plugin bytes is not proof that an already-running process loaded them, and the plugin installer intentionally does not restart its parent or any service. Use the deployment's normal service manager (for example, after confirming the exact unit names with `systemctl --user list-units 'hermes*'`, restart only the reviewed units). This runbook documents those actions; it does not authorize an unattended service restart.
 
@@ -91,13 +114,13 @@ Expected packaged ownership/modes are `skynet-edr:skynet-edr-ingest 750` for the
 
 ### Health, counters, and backlog lag
 
-When the local read-only API is enabled, `GET /api/status` includes an `ingestion` object. `state` is `disabled` when no listener was started, `healthy` only while the listener is live, every observed producer has a fresh available transport report with no backlog or degrading condition, and every configured `required_roles` entry is fresh. It is `degraded` otherwise. A dashboard heartbeat cannot satisfy a required gateway role, even under the same authenticated UID. Storage errors, frame timeouts, correlation overflow, capacity rejection, listener/peer-credential errors, stale reports, producer transport degradation, and non-zero backlog all degrade the state.
+When the local read-only API is enabled, `GET /api/status` includes an `ingestion` object. `state` is `disabled` when no listener was started. Active state is `healthy` only while the listener is live, at least one producer heartbeat is fresh, every configured `required_reported_roles` entry has at least one fresh/available/no-backlog instance, no fresh producer reports degraded transport or backlog, and no recent daemon degradation is active. It is `degraded` otherwise. Stale optional/transient `worker` or `unknown` instances remain visible during retention but do not poison health while a required gateway instance is fresh. With no configured requirements, no producers or all-stale producers remains degraded. Storage errors, frame timeouts, correlation overflow, capacity rejection, listener/peer-credential errors, producer transport degradation, and non-zero backlog degrade the state.
 
 ```bash
 curl --fail --silent http://127.0.0.1:8787/api/status
 ```
 
-The object exposes bounded process-lifetime aggregates plus at most 64 source entries keyed by kernel-authenticated numeric UID, fixed runtime role, and bounded non-sensitive process instance:
+The object exposes bounded process-lifetime aggregates plus at most 64 complete source identities keyed by kernel-authenticated numeric UID, fixed self-reported runtime role, and bounded non-sensitive process instance. Legacy v1 reporting remains a separate `(UID, legacy)` identity. All source identities inactive for five minutes are evicted lazily before projection or version-2 producer-health insertion, so normal process restarts cannot consume the 64 slots forever; the map and retention state reset on daemon restart:
 
 - connections: accepted, unauthorized, capacity-rejected, listener errors, and peer-credential errors;
 - frames: received, oversized, invalid, and timed out;

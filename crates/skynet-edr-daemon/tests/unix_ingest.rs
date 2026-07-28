@@ -43,7 +43,7 @@ fn config(socket_path: PathBuf, allowed_uids: Vec<u32>) -> UnixIngestConfig {
         read_timeout: Duration::from_millis(100),
         write_timeout: Duration::from_millis(100),
         candidate_limit: 10_000,
-        required_roles: Vec::new(),
+        required_reported_roles: Vec::new(),
     }
 }
 
@@ -500,23 +500,28 @@ fn hostile_health_report_is_rejected_without_label_or_payload_leakage() {
 }
 
 #[test]
-fn same_uid_roles_are_distinct_and_only_gateway_satisfies_required_gateway() {
+fn same_uid_roles_and_instances_are_distinct_and_required_gateway_is_self_reported() {
     let db_path = temp_path("runtime-roles.sqlite");
     let config = config(temp_path("runtime-roles.sock"), vec![1_234]);
-    let health = IngestionHealth::with_required_roles(vec![ProducerRole::Gateway]);
+    let health = IngestionHealth::with_required_reported_roles(vec![ProducerRole::Gateway]);
     health.record_listener_started();
 
-    let dashboard = health_report(2, Some("dashboard"), Some("dash-a1"));
-    exchange_with_health(
-        1_234,
-        &config,
-        &db_path,
-        &frame(&serde_json::to_vec(&dashboard).unwrap()),
-        &health,
-    );
+    for instance in ["dash-a1", "dash-a2"] {
+        let dashboard = health_report(2, Some("dashboard"), Some(instance));
+        exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&dashboard).unwrap()),
+            &health,
+        );
+    }
     let dashboard_only = health.status_json(Duration::from_secs(30));
     assert_eq!(dashboard_only["state"], "degraded");
-    assert_eq!(dashboard_only["required_roles"][0]["state"], "absent");
+    assert_eq!(
+        dashboard_only["required_reported_roles"][0]["state"],
+        "absent"
+    );
 
     let gateway = health_report(2, Some("gateway"), Some("gate-a1"));
     exchange_with_health(
@@ -528,19 +533,26 @@ fn same_uid_roles_are_distinct_and_only_gateway_satisfies_required_gateway() {
     );
     let enrolled = health.status_json(Duration::from_secs(30));
     assert_eq!(enrolled["state"], "healthy");
-    assert_eq!(enrolled["required_roles"][0]["state"], "fresh");
-    assert_eq!(enrolled["sources"].as_array().unwrap().len(), 2);
-    assert_ne!(
-        enrolled["sources"][0]["source_id"],
-        enrolled["sources"][1]["source_id"]
+    assert_eq!(
+        enrolled["role_identity_assurance"],
+        "authorized_uid_self_reported"
     );
+    assert_eq!(enrolled["required_reported_roles"][0]["state"], "fresh");
+    assert_eq!(enrolled["sources"].as_array().unwrap().len(), 3);
+    let source_ids = enrolled["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| source["source_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(source_ids.len(), 3);
 }
 
 #[test]
 fn legacy_health_is_observable_but_cannot_satisfy_explicit_role() {
     let db_path = temp_path("legacy-role.sqlite");
     let config = config(temp_path("legacy-role.sock"), vec![1_234]);
-    let health = IngestionHealth::with_required_roles(vec![ProducerRole::Gateway]);
+    let health = IngestionHealth::with_required_reported_roles(vec![ProducerRole::Gateway]);
     health.record_listener_started();
     let legacy = health_report(1, None, None);
     let ack = exchange_with_health(
@@ -554,14 +566,14 @@ fn legacy_health_is_observable_but_cannot_satisfy_explicit_role() {
     let status = health.status_json(Duration::from_secs(30));
     assert_eq!(status["state"], "degraded");
     assert_eq!(status["sources"][0]["runtime_role"], "legacy");
-    assert_eq!(status["required_roles"][0]["state"], "absent");
+    assert_eq!(status["required_reported_roles"][0]["state"], "absent");
 }
 
 #[test]
 fn heartbeat_and_hook_event_freshness_are_separate_and_required_role_stales() {
     let db_path = temp_path("freshness.sqlite");
     let config = config(temp_path("freshness.sock"), vec![1_234]);
-    let health = IngestionHealth::with_required_roles(vec![ProducerRole::Gateway]);
+    let health = IngestionHealth::with_required_reported_roles(vec![ProducerRole::Gateway]);
     health.record_listener_started();
     let gateway = health_report(2, Some("gateway"), Some("gate-a1"));
     exchange_with_health(
@@ -578,13 +590,13 @@ fn heartbeat_and_hook_event_freshness_are_separate_and_required_role_stales() {
     thread::sleep(Duration::from_millis(2));
     let stale = health.status_json(Duration::ZERO);
     assert_eq!(stale["state"], "degraded");
-    assert_eq!(stale["required_roles"][0]["state"], "stale");
+    assert_eq!(stale["required_reported_roles"][0]["state"], "stale");
     assert_eq!(stale["transport_heartbeat_state"], "stale");
     assert_eq!(stale["hook_event_state"], "not_observed");
 }
 
 #[test]
-fn hostile_v2_attribution_is_rejected_and_instance_replacement_is_bounded() {
+fn hostile_v2_attribution_is_rejected_and_instances_remain_independent() {
     let db_path = temp_path("v2-bounds.sqlite");
     let config = config(temp_path("v2-bounds.sock"), vec![1_234]);
     let health = IngestionHealth::default();
@@ -613,20 +625,21 @@ fn hostile_v2_attribution_is_rejected_and_instance_replacement_is_bounded() {
         );
     }
     let status = health.status_json(Duration::from_secs(30));
-    assert_eq!(status["sources"].as_array().unwrap().len(), 1);
-    assert_eq!(status["sources"][0]["instance_id"], "gate-new");
+    assert_eq!(status["sources"].as_array().unwrap().len(), 2);
+    assert!(status.to_string().contains("gate-old"));
+    assert!(status.to_string().contains("gate-new"));
     assert!(!status.to_string().contains("cmdline"));
 }
 
 #[test]
-fn source_cap_rejects_new_sources_but_allows_instance_replacement() {
+fn source_cap_applies_to_complete_identities_and_existing_identity_can_refresh() {
     let db_path = temp_path("source-cap.sqlite");
-    let config = config(temp_path("source-cap.sock"), (1_000..1_070).collect());
+    let config = config(temp_path("source-cap.sock"), vec![1_000]);
     let health = IngestionHealth::default();
-    for uid in 1_000..1_064 {
-        let report = health_report(2, Some("worker"), Some("worker-a1"));
+    for index in 0..64 {
+        let report = health_report(2, Some("worker"), Some(&format!("worker-{index}")));
         let ack = exchange_with_health(
-            uid,
+            1_000,
             &config,
             &db_path,
             &frame(&serde_json::to_vec(&report).unwrap()),
@@ -636,7 +649,7 @@ fn source_cap_rejects_new_sources_but_allows_instance_replacement() {
     }
     let overflow = health_report(2, Some("gateway"), Some("gate-overflow"));
     let rejected = exchange_with_health(
-        1_069,
+        1_000,
         &config,
         &db_path,
         &frame(&serde_json::to_vec(&overflow).unwrap()),
@@ -646,21 +659,97 @@ fn source_cap_rejects_new_sources_but_allows_instance_replacement() {
         rejected.contains(r#""reason":"source_capacity""#),
         "{rejected}"
     );
-    let replacement = health_report(2, Some("worker"), Some("worker-a2"));
+
+    let existing = health_report(2, Some("worker"), Some("worker-0"));
     let accepted = exchange_with_health(
         1_000,
         &config,
         &db_path,
-        &frame(&serde_json::to_vec(&replacement).unwrap()),
+        &frame(&serde_json::to_vec(&existing).unwrap()),
         &health,
     );
     assert!(
         accepted.contains(r#""status":"health_recorded""#),
         "{accepted}"
     );
+    assert_eq!(
+        health.status_json(Duration::from_secs(30))["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn stale_optional_instance_stays_visible_without_poisoning_fresh_required_gateway() {
+    let db_path = temp_path("optional-stale.sqlite");
+    let config = config(temp_path("optional-stale.sock"), vec![1_234]);
+    let health = IngestionHealth::with_required_reported_roles_and_retention(
+        vec![ProducerRole::Gateway],
+        Duration::from_millis(50),
+    );
+    health.record_listener_started();
+    let mut worker = health_report(2, Some("worker"), Some("worker-old"));
+    worker["transport_state"] = serde_json::json!("degraded");
+    worker["backlog_bytes"] = serde_json::json!(1);
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&worker).unwrap()),
+        &health,
+    );
+    thread::sleep(Duration::from_millis(3));
+    let gateway = health_report(2, Some("gateway"), Some("gateway-live"));
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&gateway).unwrap()),
+        &health,
+    );
+
+    let status = health.status_json(Duration::from_millis(1));
+    assert_eq!(status["state"], "healthy");
+    assert_eq!(status["required_reported_roles"][0]["state"], "fresh");
+    assert_eq!(status["sources"].as_array().unwrap().len(), 2);
+    assert!(status["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["transport_state"] == "stale"));
+}
+
+#[test]
+fn stale_identity_retention_evicts_before_capacity_is_consumed_forever() {
+    let db_path = temp_path("source-eviction.sqlite");
+    let config = config(temp_path("source-eviction.sock"), vec![1_234]);
+    let health = IngestionHealth::with_required_reported_roles_and_retention(
+        Vec::new(),
+        Duration::from_millis(1),
+    );
+    let old = health_report(2, Some("worker"), Some("worker-old"));
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&old).unwrap()),
+        &health,
+    );
+    thread::sleep(Duration::from_millis(3));
+    let current = health_report(2, Some("worker"), Some("worker-current"));
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&current).unwrap()),
+        &health,
+    );
+
     let status = health.status_json(Duration::from_secs(30));
-    assert_eq!(status["sources"].as_array().unwrap().len(), 64);
-    assert_eq!(status["sources"][0]["instance_id"], "worker-a2");
+    assert_eq!(status["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(status["sources"][0]["instance_id"], "worker-current");
 }
 
 #[test]

@@ -66,7 +66,12 @@ else
 fi
 
 echo "Plugin bytes are installed, but that does not prove a running Hermes process loaded them."
-echo "This installer does not restart the current process or any Hermes service."
-echo "Restart each reviewed gateway/dashboard service in an approved window, then verify:"
-echo "  curl --fail --silent http://127.0.0.1:8787/api/status"
-echo "Confirm the expected runtime_role is fresh and its instance_id changed after restart."
+echo "This installer does not edit units, reload systemd, restart the current process, or restart services."
+echo "Configure attribution per reviewed user unit; never use a global user-manager environment:"
+echo "  systemctl --user edit <gateway-unit>    # [Service] Environment=HERMES_RUNTIME_ROLE=gateway"
+echo "  systemctl --user edit <dashboard-unit>  # [Service] Environment=HERMES_RUNTIME_ROLE=dashboard"
+echo "Set daemon ingest.required_reported_roles=[\"gateway\"] for the operational gate."
+echo "Then, in an approved window: systemctl --user daemon-reload and restart only the reviewed units."
+echo "Verify fresh status: curl --fail --silent http://127.0.0.1:8787/api/status"
+echo "Generated fallback instances change on process restart; configured SKYNET_EDR_RUNTIME_INSTANCE may remain stable."
+echo "Role/instance are authorized-UID self-reports, not process attestation; same-UID compromise can forge them."

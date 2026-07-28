@@ -301,15 +301,16 @@ test('IIFE registers exactly skynet-edr and only uses authenticated scoped JSON 
 test('status validator accepts bounded runtime health and rejects hostile attribution', async () => {
   const valid = structuredClone(canonicalStatus);
   valid.ingestion = {
-    state: 'healthy', listener_live: true, transport_heartbeat_state: 'fresh',
+    state: 'healthy', role_identity_assurance: 'authorized_uid_self_reported', listener_live: true, transport_heartbeat_state: 'fresh',
     hook_event_state: 'not_observed', hook_event_freshness_affects_state: false,
     last_event_received_at_unix_ms: null, last_event_received_age_ms: null,
     last_event_committed_at_unix_ms: null, last_event_committed_age_ms: null,
-    required_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
+    required_reported_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
     sources: [{
       source_id: 'uid:1000:gateway:gate-a1', authenticated_uid: 1000,
       runtime_role: 'gateway', instance_id: 'gate-a1', producer_reported_at_unix_ms: 1,
-      producer_report_age_ms: 0, transport_state: 'available',
+      producer_report_age_ms: 0, transport_state: 'available', backlog_bytes: 0,
+      last_error_category: null, last_error_at_unix_ms: null, last_error_age_ms: null,
     }],
   };
   let harness = createHarness({
@@ -318,7 +319,12 @@ test('status validator accepts bounded runtime health and rejects hostile attrib
   });
   harness.render();
   await harness.flushEffects();
-  assert.match(textOf(harness.render()), /Passive projection online/);
+  const healthyText = textOf(harness.render());
+  assert.match(healthyText, /Passive projection online/);
+  assert.match(healthyText, /Telemetry healthy/);
+  assert.match(healthyText, /Listener live/);
+  assert.match(healthyText, /Required reported roles gateway: fresh/);
+  assert.match(healthyText, /Authorized-UID self-reported attribution/);
 
   const hostile = structuredClone(valid);
   hostile.ingestion.sources[0].instance_id = '/proc/self/cmdline';
@@ -330,6 +336,86 @@ test('status validator accepts bounded runtime health and rejects hostile attrib
   await harness.flushEffects();
   assert.match(textOf(harness.render()), /Backend unavailable/);
   assert.doesNotMatch(textOf(harness.render()), /cmdline/);
+});
+
+test('status validator rejects contradictory healthy ingestion objects', async () => {
+  const base = structuredClone(canonicalStatus);
+  base.ingestion = {
+    state: 'healthy', role_identity_assurance: 'authorized_uid_self_reported',
+    listener_live: true, transport_heartbeat_state: 'fresh',
+    hook_event_state: 'not_observed', hook_event_freshness_affects_state: false,
+    last_event_received_at_unix_ms: null, last_event_received_age_ms: null,
+    last_event_committed_at_unix_ms: null, last_event_committed_age_ms: null,
+    required_reported_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
+    sources: [{
+      source_id: 'uid:1000:gateway:gate-a1', authenticated_uid: 1000,
+      runtime_role: 'gateway', instance_id: 'gate-a1', producer_reported_at_unix_ms: 1,
+      producer_report_age_ms: 0, transport_state: 'available', backlog_bytes: 0,
+      last_error_category: null, last_error_at_unix_ms: null, last_error_age_ms: null,
+    }],
+  };
+  const contradictions = [
+    (value) => { value.ingestion.listener_live = false; },
+    (value) => { value.ingestion.transport_heartbeat_state = 'stale'; },
+    (value) => { value.ingestion.required_reported_roles[0].state = 'absent'; },
+    (value) => { value.ingestion.sources[0].transport_state = 'degraded'; },
+    (value) => {
+      value.ingestion.sources[0].last_error_category = 'storage';
+      value.ingestion.sources[0].last_error_at_unix_ms = 1;
+      value.ingestion.sources[0].last_error_age_ms = 0;
+    },
+    (value) => { value.ingestion.role_identity_assurance = 'attested'; },
+  ];
+  for (const contradict of contradictions) {
+    const value = structuredClone(base);
+    contradict(value);
+    const harness = createHarness({
+      '/api/plugins/skynet-edr/status': value,
+      '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    });
+    harness.render();
+    await harness.flushEffects();
+    assert.match(textOf(harness.render()), /Backend unavailable/);
+  }
+
+  const degraded = structuredClone(base);
+  degraded.ingestion.state = 'degraded';
+  degraded.ingestion.listener_live = false;
+  const degradedHarness = createHarness({
+    '/api/plugins/skynet-edr/status': degraded,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  degradedHarness.render();
+  await degradedHarness.flushEffects();
+  assert.match(textOf(degradedHarness.render()), /Passive projection online/);
+});
+
+test('disabled ingestion schema is exact and visibly separate from backend availability', async () => {
+  const disabled = structuredClone(canonicalStatus);
+  disabled.ingestion = {
+    state: 'disabled', role_identity_assurance: 'authorized_uid_self_reported',
+    listener_live: false, sources: [],
+  };
+  let harness = createHarness({
+    '/api/plugins/skynet-edr/status': disabled,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  const text = textOf(harness.render());
+  assert.match(text, /Passive projection online/);
+  assert.match(text, /Telemetry disabled/);
+  assert.match(text, /Listener stopped/);
+
+  const extra = structuredClone(disabled);
+  extra.ingestion.transport_heartbeat_state = 'not_observed';
+  harness = createHarness({
+    '/api/plugins/skynet-edr/status': extra,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  assert.match(textOf(harness.render()), /Backend unavailable/);
 });
 
 test('renders loading, empty and generic fail-closed error states', async () => {
