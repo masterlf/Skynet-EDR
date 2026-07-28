@@ -76,7 +76,7 @@ The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, 
 
 The Desktop plugin is a read-only UI client for `/skynet-edr/risks`. It uses the backend `ctx.rest('/risks?...')` and `ctx.rest('/risks/<encoded-id>')`, polls no faster than every 10 seconds, renders text only, and does not auto-link URLs or render HTML.
 
-Telemetry events now include optional safe artifact metadata when derivable. Labels are fixed/coarse (`URL content`, `File content`, `Terminal output`), provider values are allowlisted, and locator hashes are computed only from isolated safe locators such as URLs without credentials/query/fragment. Invalid URL ports suppress only the locator hash; the passive telemetry event is still emitted. Raw tool parameters are not persisted: `attributes.params_preview` is either a fixed redaction marker for known sensitive patterns or `[OMITTED:tool_params]`. Command text, prompts, message bodies, full URLs, repository names, local paths, and secrets are not stored as artifact labels. During ingestion, `attributes.artifact` is a reserved synthetic key: only the validated top-level artifact may populate stored artifact metadata.
+Telemetry events now include optional safe artifact metadata when derivable. Labels are fixed/coarse (`URL content`, `File content`, `Terminal output`), provider values are allowlisted, and locator hashes are computed only from isolated safe locators such as URLs without credentials/query/fragment. Invalid URL ports suppress only the locator hash; the passive telemetry event is still emitted. Raw tool parameters are not persisted: newly emitted `attributes.params_preview` is always `[OMITTED:tool_params]`. When bounded classification detects a sensitive pattern, redaction metadata records that fixed omission without exposing a reason-specific preview marker. Command text, prompts, message bodies, full URLs, repository names, local paths, and secrets are not stored as artifact labels. Canonical attribute keys are fail-closed before legacy persistence: they are 1–128-byte ASCII identifiers (`[A-Za-z0-9][A-Za-z0-9_-]*`), may not contain content changed by redaction, and the complete attribute payload must already be a fixed point of storage sanitization. Sensitive names are accepted only with an already-redacted value and coherent Secret metadata. Redaction paths use exactly one `attributes.` prefix plus one such top-level key. Duplicate, dotted, repeated-prefix, overlong, control-bearing, or synthetic-attribute redaction targets are rejected rather than renamed. During ingestion, `attributes.artifact` is a reserved synthetic key: only the validated top-level artifact may populate stored artifact metadata.
 
 ## Default user-local outputs
 
@@ -124,9 +124,11 @@ The v0.4 plugin records indicators, not verdicts. Tool parameters and results ar
 common egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and `ncat`.
 For those recognized network operations, the plugin sets `direct_ip=true` when
 it validates an explicit IPv4 destination host in an HTTP(S) URL, `/dev/tcp`, or
-a simple `curl`, `wget`, `nc`, or `ncat` invocation, then emits
-`agent.network.egress`; an IPv4 literal elsewhere in a URL path or payload does
-not qualify. Generic network egress is not enough for `EDR-NET-001`. Unknown tool names are classified
+a simple `curl`, `wget`, `nc`, or `ncat` invocation. Only direct-IP process-class
+operations emit `agent.network.egress`; messaging delivery and file-class
+operations remain `agent.tool.requested`. An IPv4 literal elsewhere in a URL
+path or payload does not qualify. Generic network egress is not enough for
+`EDR-NET-001`. Unknown tool names are classified
 as MCP tools and emit `agent.mcp.tool.requested`, allowing `EDR-MCP-001` to consume
 the packaged telemetry. The plugin does not yet fully classify IPv6 literals or
 indirect egress inside arbitrary Python, SDK, cloud-client,
@@ -165,8 +167,9 @@ The worker sends an immediate health frame when the enabled plugin registers, be
 - No outbound network from the plugin.
 - No LLM calls from the plugin.
 - No raw tool parameters or raw tool output in telemetry.
-- Sensitive parameter previews are replaced as whole fields before writing;
-  otherwise parameter previews are omitted with `[OMITTED:tool_params]`.
+- Newly emitted parameter previews are always the fixed
+  `[OMITTED:tool_params]` marker; sensitive-pattern metadata records that
+  omission without exposing raw values or reason-specific preview markers.
 - Hook exceptions are logged and swallowed so Hermes remains usable.
 - Events are canonical `skynet.event.v0` records and are treated as hostile input
   by Skynet-EDR ingestion.

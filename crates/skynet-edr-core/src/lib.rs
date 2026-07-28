@@ -4,7 +4,7 @@
 //! types without coupling event or incident handling to privileged OS APIs.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -17,6 +17,15 @@ use sha2::{Digest, Sha256};
 
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const LOCAL_STORE_SCHEMA_VERSION: i64 = 1;
+const MAX_CANONICAL_ATTRIBUTE_KEY_BYTES: usize = 128;
+const SYNTHETIC_CANONICAL_ATTRIBUTES: [&str; 6] = [
+    "schema_version",
+    "event_type",
+    "trust_level",
+    "provenance",
+    "artifact",
+    "received_at_unix_ms",
+];
 
 /// Exact indexed trace-candidate statement used by continuous ingestion.
 pub const CONTINUOUS_TRACE_CANDIDATE_SQL: &str =
@@ -511,8 +520,34 @@ impl CanonicalEventEnvelope {
                 "redaction metadata is inconsistent with redacted_fields".to_owned(),
             ));
         }
+        for key in self.attributes.keys() {
+            validate_canonical_attribute_key(key)?;
+        }
+        let mut redacted_paths = BTreeSet::new();
         for field in &self.redaction.redacted_fields {
+            if !redacted_paths.insert(field.path.as_str()) {
+                return Err(CanonicalEventError::Validation(
+                    "duplicate redaction field paths are forbidden".to_owned(),
+                ));
+            }
             self.validate_redacted_field(field)?;
+        }
+        if redact_attributes(&self.attributes).value != self.attributes {
+            return Err(CanonicalEventError::Validation(
+                "canonical attributes must already be safe under storage sanitization".to_owned(),
+            ));
+        }
+        for key in self.attributes.keys().filter(|key| is_sensitive_key(key)) {
+            let path = format!("attributes.{key}");
+            if !self.redaction.redacted_fields.iter().any(|field| {
+                field.path == path
+                    && field.reason == RedactionReason::Secret
+                    && field.replacement == SECRET_REPLACEMENT
+            }) {
+                return Err(CanonicalEventError::Validation(format!(
+                    "sensitive canonical attribute {key} requires coherent secret redaction metadata"
+                )));
+            }
         }
         Ok(())
     }
@@ -528,6 +563,19 @@ impl CanonicalEventEnvelope {
                 "redaction replacement must not be empty".to_owned(),
             ));
         }
+        let expected_replacement = if field.path == "attributes.params_preview"
+            && field.reason == RedactionReason::Policy
+        {
+            "[OMITTED:tool_params]"
+        } else {
+            replacement_for_reason(field.reason)
+        };
+        if field.replacement != expected_replacement {
+            return Err(CanonicalEventError::Validation(format!(
+                "redaction field {} does not use its canonical replacement",
+                field.path
+            )));
+        }
         match field.path.as_str() {
             "details" => match &self.details {
                 Some(details) if details == &field.replacement => Ok(()),
@@ -537,7 +585,16 @@ impl CanonicalEventEnvelope {
                 ))),
             },
             path if path.starts_with("attributes.") => {
-                let key = path.trim_start_matches("attributes.");
+                let key = path
+                    .strip_prefix("attributes.")
+                    .expect("match guard checked prefix");
+                validate_canonical_attribute_key(key)?;
+                if SYNTHETIC_CANONICAL_ATTRIBUTES.contains(&key) {
+                    return Err(CanonicalEventError::Validation(format!(
+                        "redaction field {} targets a synthetic storage attribute",
+                        field.path
+                    )));
+                }
                 match self.attributes.get(key) {
                     Some(serde_json::Value::String(value)) if value == &field.replacement => Ok(()),
                     Some(_) | None => Err(CanonicalEventError::Validation(format!(
@@ -552,6 +609,30 @@ impl CanonicalEventEnvelope {
             ))),
         }
     }
+}
+
+fn validate_canonical_attribute_key(key: &str) -> Result<(), CanonicalEventError> {
+    let mut bytes = key.bytes();
+    let Some(first) = bytes.next() else {
+        return Err(CanonicalEventError::Validation(
+            "canonical attribute keys must not be empty".to_owned(),
+        ));
+    };
+    if key.len() > MAX_CANONICAL_ATTRIBUTE_KEY_BYTES
+        || !first.is_ascii_alphanumeric()
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(CanonicalEventError::Validation(
+            "canonical attribute keys must use bounded unambiguous ASCII safe-key syntax"
+                .to_owned(),
+        ));
+    }
+    if redact_text(key).value != key {
+        return Err(CanonicalEventError::Validation(
+            "canonical attribute keys must not contain sensitive content".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_artifact_provenance(artifact: &ArtifactProvenance) -> Result<(), CanonicalEventError> {
@@ -5390,38 +5471,82 @@ fn sqlite_usize(field: &'static str, value: usize) -> StorageResult<i64> {
 
 fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
     let mut sanitized = incident.clone();
-    let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
+    let incoming_fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
+    let mut generated_fields = Vec::new();
 
     sanitized.id = IncidentId::new(safe_incident_identifier(sanitized.id.as_str()));
-    sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
-    sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut fields);
-    sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
+    sanitized.title = redact_text_field(&sanitized.title, "title", &mut generated_fields);
+    sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut generated_fields);
+    sanitized.source =
+        sanitize_source_for_storage(&sanitized.source, "source", &mut generated_fields);
     sanitized.events = sanitized
         .events
         .iter()
         .map(sanitize_event_for_storage)
         .collect();
+
+    let retained_fields = incoming_fields
+        .into_iter()
+        .filter(|field| {
+            !field.path.starts_with("events[")
+                && incident_redaction_field_matches(&sanitized, field)
+        })
+        .collect();
+    let fields = merge_redaction_fields(retained_fields, generated_fields);
+    let fields = merge_redaction_fields(
+        fields,
+        incident_redaction_from_events(&sanitized.events).redacted_fields,
+    );
     sanitized.redaction = metadata_from_fields(fields);
     sanitized
 }
 
 fn sanitize_event_for_storage(event: &Event) -> Event {
     let mut sanitized = event.clone();
-    let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
+    let incoming_fields = normalize_event_redaction_fields(&sanitized.redaction.redacted_fields);
+    let mut generated_fields = Vec::new();
 
     sanitized.id = EventId::new(safe_event_identifier(sanitized.id.as_str()));
-    sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
+    sanitized.title = redact_text_field(&sanitized.title, "title", &mut generated_fields);
     sanitized.details = sanitized
         .details
         .as_deref()
-        .map(|details| redact_text_field(details, "details", &mut fields));
-    sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
+        .map(|details| redact_text_field(details, "details", &mut generated_fields));
+    sanitized.source =
+        sanitize_source_for_storage(&sanitized.source, "source", &mut generated_fields);
 
     let attributes = redact_attributes(&sanitized.attributes);
     sanitized.attributes = attributes.value;
-    fields.extend(attributes.metadata.redacted_fields);
-    sanitized.redaction = metadata_from_fields(fields);
+    generated_fields.extend(attributes.metadata.redacted_fields);
+
+    let retained_fields = incoming_fields
+        .into_iter()
+        .filter(|field| event_redaction_field_matches(&sanitized, field))
+        .collect();
+    sanitized.redaction =
+        metadata_from_fields(merge_redaction_fields(retained_fields, generated_fields));
     sanitized
+}
+
+fn normalize_event_redaction_fields(fields: &[RedactedField]) -> Vec<RedactedField> {
+    fields
+        .iter()
+        .map(|field| {
+            let replacement = if field.path == "attributes.params_preview"
+                && field.reason == RedactionReason::Policy
+                && field.replacement == "[OMITTED:tool_params]"
+            {
+                "[OMITTED:tool_params]"
+            } else {
+                replacement_for_reason(field.reason)
+            };
+            RedactedField {
+                path: redact_text(&field.path).value,
+                reason: field.reason,
+                replacement: replacement.to_owned(),
+            }
+        })
+        .collect()
 }
 
 fn normalize_redaction_fields(fields: &[RedactedField]) -> Vec<RedactedField> {
@@ -5433,6 +5558,96 @@ fn normalize_redaction_fields(fields: &[RedactedField]) -> Vec<RedactedField> {
             replacement: replacement_for_reason(field.reason).to_owned(),
         })
         .collect()
+}
+
+fn event_redaction_field_matches(event: &Event, field: &RedactedField) -> bool {
+    let value = match field.path.as_str() {
+        "title" => Some(event.title.as_str()),
+        "details" => event.details.as_deref(),
+        "source.sensor" => Some(event.source.sensor.as_str()),
+        "source.integration" => event.source.integration.as_deref(),
+        path => {
+            let Some(path) = path.strip_prefix("attributes.") else {
+                return false;
+            };
+            event_attribute_string_at_path(event, path)
+        }
+    };
+    value == Some(field.replacement.as_str())
+}
+
+fn event_attribute_string_at_path<'a>(event: &'a Event, path: &str) -> Option<&'a str> {
+    let mut value: Option<&serde_json::Value> = None;
+    for (position, segment) in path.split('.').enumerate() {
+        let name_end = segment.find('[').unwrap_or(segment.len());
+        let name = &segment[..name_end];
+        if validate_canonical_attribute_key(name).is_err()
+            || (position == 0 && SYNTHETIC_CANONICAL_ATTRIBUTES.contains(&name))
+        {
+            return None;
+        }
+        value = Some(if position == 0 {
+            event.attributes.get(name)?
+        } else {
+            value?.as_object()?.get(name)?
+        });
+
+        let mut indexes = &segment[name_end..];
+        while !indexes.is_empty() {
+            let remainder = indexes.strip_prefix('[')?;
+            let end = remainder.find(']')?;
+            let index = remainder[..end].parse::<usize>().ok()?;
+            value = Some(value?.as_array()?.get(index)?);
+            indexes = &remainder[end + 1..];
+        }
+    }
+    value?.as_str()
+}
+
+fn incident_redaction_field_matches(incident: &Incident, field: &RedactedField) -> bool {
+    let value = match field.path.as_str() {
+        "title" => Some(incident.title.as_str()),
+        "summary" => Some(incident.summary.as_str()),
+        "source.sensor" => Some(incident.source.sensor.as_str()),
+        "source.integration" => incident.source.integration.as_deref(),
+        _ => None,
+    };
+    value == Some(field.replacement.as_str())
+}
+
+fn merge_redaction_fields(
+    incoming: Vec<RedactedField>,
+    generated: Vec<RedactedField>,
+) -> Vec<RedactedField> {
+    let mut merged = deterministic_redaction_fields(incoming);
+    for (path, field) in deterministic_redaction_fields(generated) {
+        merged.insert(path, field);
+    }
+    merged.into_values().collect()
+}
+
+fn deterministic_redaction_fields(fields: Vec<RedactedField>) -> BTreeMap<String, RedactedField> {
+    let mut selected = BTreeMap::new();
+    for field in fields {
+        match selected.get(&field.path) {
+            Some(current)
+                if redaction_field_priority(current) <= redaction_field_priority(&field) => {}
+            Some(_) | None => {
+                selected.insert(field.path.clone(), field);
+            }
+        }
+    }
+    selected
+}
+
+fn redaction_field_priority(field: &RedactedField) -> (u8, &str) {
+    let reason = match field.reason {
+        RedactionReason::Secret => 0,
+        RedactionReason::LocalContext => 1,
+        RedactionReason::PersonalData => 2,
+        RedactionReason::Policy => 3,
+    };
+    (reason, field.replacement.as_str())
 }
 
 fn replacement_for_reason(reason: RedactionReason) -> &'static str {
