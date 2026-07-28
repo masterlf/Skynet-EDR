@@ -1128,6 +1128,30 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                 touched.append("result.__str__")
                 return "FAKE_HOSTILE_RESULT_TUPLE_38"
 
+        class HostileResultString(str):
+            def __new__(cls):
+                return str.__new__(cls, "FAKE_HOSTILE_RESULT_STRING_38")
+
+            def __str__(self):
+                touched.append("result_string.__str__")
+                raise AssertionError("hostile string.__str__ executed")
+
+            def __len__(self):
+                touched.append("result_string.__len__")
+                raise AssertionError("hostile string.__len__ executed")
+
+            def __iter__(self):
+                touched.append("result_string.__iter__")
+                raise AssertionError("hostile string.__iter__ executed")
+
+            def __getitem__(self, _key):
+                touched.append("result_string.__getitem__")
+                raise AssertionError("hostile string.__getitem__ executed")
+
+            def encode(self, *_args, **_kwargs):
+                touched.append("result_string.encode")
+                raise AssertionError("hostile string.encode executed")
+
         ctx = FakeContext()
         self.plugin.register(ctx)
         raw_marker = "SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE"
@@ -1162,6 +1186,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         hostile_tuple_event = emit(
             {"output": HostileResultTuple((raw_marker, "FAKE_HOSTILE_RESULT_TUPLE_38"))}
         )
+        hostile_string_event = emit(HostileResultString())
 
         self.assertFalse(depth4["attributes"]["classification_truncated"])
         self.assertTrue(depth4["attributes"]["malware_indicator"])
@@ -1188,6 +1213,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertTrue(hostile_event["attributes"]["classification_truncated"])
         self.assertTrue(hostile_tuple_event["attributes"]["classification_truncated"])
         self.assertFalse(hostile_tuple_event["attributes"]["malware_indicator"])
+        self.assertTrue(hostile_string_event["attributes"]["classification_truncated"])
+        self.assertEqual(hostile_string_event["attributes"]["result_examined_chars"], 0)
+        self.assertFalse(hostile_string_event["attributes"]["malware_indicator"])
         self.assertFalse(hostile.called)
         self.assertEqual(touched, [])
 
@@ -1240,6 +1268,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                 "FAKE_UNSUPPORTED_RESULT_38",
                 "FAKE_HOSTILE_RESULT_STR_38",
                 "FAKE_HOSTILE_RESULT_TUPLE_38",
+                "FAKE_HOSTILE_RESULT_STRING_38",
                 "FAKE_38",
             ]:
                 self.assertNotIn(forbidden, serialized)
