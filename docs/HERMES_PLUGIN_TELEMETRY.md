@@ -22,7 +22,7 @@ authenticated daemon transaction (event + correlation + receipt)
 local events, incidents, API, MCP visibility
 ```
 
-The same authenticated socket accepts a strict, bounded `producer_health` version-1 control frame. It contains only checkpoint/backlog byte metrics, backlog age, malformed/dropped counters, and a fixed transport state. The daemon combines this with listener liveness, commit outcomes, and fixed error categories for the read-only `/api/status` projection; paths, labels, event payloads, commands, and secrets are neither accepted nor exposed.
+The same authenticated socket accepts strict, bounded `producer_health` control frames. Version 2 adds only an allowlisted runtime role (`gateway`, `dashboard`, `worker`, or `unknown`) and a 64-byte lowercase alphanumeric/hyphen process-instance identifier to the version-1 checkpoint/backlog counters and fixed transport state. Kernel DAC and `SO_PEERCRED` remain the authorization boundary. Role and instance are authorized-UID self-reported operational attribution, never authentication or process attestation: same-UID compromise, a malicious root process in the shared trust domain, or a global/mistaken role assignment can forge them. A correctly configured per-unit dashboard role cannot satisfy a required reported gateway role, but this is enrollment evidence rather than security-grade role attestation. Legacy version-1 frames remain observable separately and cannot satisfy an explicitly required reported role. Paths, labels, event payloads, commands, PIDs, and secrets are neither accepted nor exposed.
 
 ## Installed files
 
@@ -52,7 +52,7 @@ This copies the plugin into:
 ~/.hermes/desktop-plugins/skynet-edr/plugin.js
 ```
 
-If Hermes uses opt-in plugins, enable it and restart Hermes/gateway so the Python backend is mounted. The Desktop renderer can hot-reload the disk plugin, but the backend allow-list and gateway process still need their normal Hermes reload/restart path:
+If Hermes uses opt-in plugins, enable it and restart every reviewed Hermes gateway/dashboard runtime so the Python backend is mounted. Installing bytes is not enrollment proof: an already-running process continues using the code it loaded previously. The installer deliberately does not restart its parent or any service. The Desktop renderer can hot-reload the disk plugin, but the backend allow-list and Python hook process still need their normal approved reload/restart path:
 
 ```bash
 hermes plugins enable skynet-edr
@@ -112,6 +112,8 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 | `SKYNET_EDR_TENANT` | Tenant/workspace label. |
 | `SKYNET_EDR_MAX_FIELD_CHARS` | Bound safe preview field size. |
 | `SKYNET_EDR_MAX_LOG_BYTES` | Rotate sanitized log above this size. |
+| `HERMES_RUNTIME_ROLE` | Fixed runtime role: `gateway`, `dashboard`, `worker`, or `unknown`; any other value fails safely to `unknown`. |
+| `SKYNET_EDR_RUNTIME_INSTANCE` | Optional non-sensitive lowercase alphanumeric/hyphen instance ID (1–64 bytes); invalid values use a process-local random identifier. |
 | `HERMES_SESSION_ID` / `HERMES_SESSION` | Optional Hermes-provided trace/session ID used for event correlation; absent these, the plugin generates a process-local UUID fallback. |
 
 ## Detection limits
@@ -154,7 +156,7 @@ allowed_uids = [1000] # replace with the reviewed producer UID
 allow_root = false
 ```
 
-The worker replays only its producer-owned `events-v1.jsonl`, in order, and advances `events-v1.offset` only after a versioned terminal ACK for the matching event ID. The daemon never polls producer homes or the historical `events.jsonl`. Queue, socket, and fallback failures are bounded but can drop newest telemetry; they do not block Hermes. For enrollment, counter semantics, backlog measurement, failure/restart behavior, the harmless canary, and rollback, use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
+The worker sends an immediate health frame when the enabled plugin registers, before waiting for hook activity, then sends bounded periodic heartbeats and reports after delivery work. It replays only its producer-owned `events-v1.jsonl`, in order, and advances `events-v1.offset` only after a versioned terminal ACK for the matching event ID. The daemon never polls producer homes or the historical `events.jsonl`. Queue, socket, and fallback failures are bounded but can drop newest telemetry; they do not block Hermes. For enrollment, counter semantics, backlog measurement, failure/restart behavior, the harmless canary, and rollback, use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
 
 ## Security boundaries
 

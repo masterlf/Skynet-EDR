@@ -293,10 +293,97 @@
     return data;
   }
 
+  function validateIngestionStatus(data) {
+    if (!isPlainObject(data) || !Array.isArray(data.sources) || data.sources.length > 64) failContract();
+    if (data.role_identity_assurance !== "authorized_uid_self_reported") failContract();
+    if (data.state === "disabled") {
+      const keys = Object.keys(data).sort();
+      if (keys.join(",") !== "listener_live,role_identity_assurance,sources,state") failContract();
+      if (data.listener_live !== false || data.sources.length !== 0) failContract();
+      return;
+    }
+    if (!["healthy", "degraded"].includes(data.state) || typeof data.listener_live !== "boolean") failContract();
+    if (!["fresh", "stale", "not_observed"].includes(data.transport_heartbeat_state)) failContract();
+    if (!["fresh", "stale", "not_observed"].includes(data.hook_event_state) || data.hook_event_freshness_affects_state !== false) failContract();
+    [
+      "last_event_received_at_unix_ms", "last_event_received_age_ms",
+      "last_event_committed_at_unix_ms", "last_event_committed_age_ms",
+    ].forEach(function (key) {
+      if (data[key] !== null && !boundedSafeInteger(data[key])) failContract();
+    });
+    if (!Array.isArray(data.required_reported_roles) || data.required_reported_roles.length > 3) failContract();
+    const roles = new Set();
+    data.required_reported_roles.forEach(function (required) {
+      if (!isPlainObject(required) || !["gateway", "dashboard", "worker"].includes(required.runtime_role)) failContract();
+      if (!["fresh", "stale", "absent"].includes(required.state) || roles.has(required.runtime_role)) failContract();
+      roles.add(required.runtime_role);
+    });
+    const sourceIds = new Set();
+    let contradictorySource = false;
+    let anyReported = false;
+    let anyFresh = false;
+    const roleReports = new Map();
+    data.sources.forEach(function (source) {
+      if (!isPlainObject(source) || !Number.isInteger(source.authenticated_uid) || source.authenticated_uid < 0 || source.authenticated_uid > 4294967295) failContract();
+      if (typeof source.source_id !== "string" || source.source_id.length > 160 || !/^[a-z0-9:-]+$/.test(source.source_id) || sourceIds.has(source.source_id)) failContract();
+      if (!["gateway", "dashboard", "worker", "unknown", "legacy"].includes(source.runtime_role)) failContract();
+      if (source.runtime_role === "legacy") {
+        if (source.instance_id !== null) failContract();
+      } else if (typeof source.instance_id !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(source.instance_id)) failContract();
+      if (source.producer_reported_at_unix_ms !== null && !boundedSafeInteger(source.producer_reported_at_unix_ms)) failContract();
+      if (source.producer_report_age_ms !== null && !boundedSafeInteger(source.producer_report_age_ms)) failContract();
+      if ((source.producer_reported_at_unix_ms === null) !== (source.producer_report_age_ms === null)) failContract();
+      if (!["available", "degraded", "stale", "unknown"].includes(source.transport_state)) failContract();
+      if (source.backlog_bytes !== null && !boundedSafeInteger(source.backlog_bytes)) failContract();
+      const errorCategories = ["frame_timeout", "storage", "transaction", "malformed_frame", "frame_size"];
+      if (source.last_error_category === null) {
+        if (source.last_error_at_unix_ms !== null || source.last_error_age_ms !== null) failContract();
+      } else if (!errorCategories.includes(source.last_error_category)
+          || !boundedSafeInteger(source.last_error_at_unix_ms)
+          || !boundedSafeInteger(source.last_error_age_ms)) {
+        failContract();
+      }
+      const recentSourceError = ["frame_timeout", "storage", "transaction"].includes(source.last_error_category)
+        && source.last_error_age_ms <= 30000;
+      const reported = source.producer_report_age_ms !== null;
+      const fresh = reported && source.producer_report_age_ms <= 30000;
+      if ((source.transport_state === "stale") !== (reported && !fresh)) failContract();
+      if (!reported && source.transport_state !== "unknown") failContract();
+      if (fresh && !["available", "degraded"].includes(source.transport_state)) failContract();
+      anyReported ||= reported;
+      anyFresh ||= fresh;
+      if (reported) {
+        const reports = roleReports.get(source.runtime_role) || [];
+        reports.push({ fresh: fresh, available: source.transport_state === "available" && source.backlog_bytes === 0 });
+        roleReports.set(source.runtime_role, reports);
+      }
+      contradictorySource ||= fresh && (source.transport_state === "degraded" || source.backlog_bytes > 0 || recentSourceError);
+      sourceIds.add(source.source_id);
+    });
+    const expectedHeartbeat = anyFresh ? "fresh" : (anyReported ? "stale" : "not_observed");
+    if (data.transport_heartbeat_state !== expectedHeartbeat) failContract();
+    data.required_reported_roles.forEach(function (required) {
+      const reports = roleReports.get(required.runtime_role) || [];
+      const expected = reports.some(function (report) { return report.fresh && report.available; })
+        ? "fresh" : (reports.length > 0 ? "stale" : "absent");
+      if (required.state !== expected) failContract();
+    });
+    const eventExpected = data.last_event_received_age_ms === null
+      ? "not_observed" : (data.last_event_received_age_ms <= 30000 ? "fresh" : "stale");
+    if (data.hook_event_state !== eventExpected) failContract();
+    const requiredDegraded = data.required_reported_roles.some(function (required) { return required.state !== "fresh"; });
+    const healthyCoherent = data.listener_live === true
+      && data.transport_heartbeat_state === "fresh"
+      && !requiredDegraded
+      && !contradictorySource;
+    if (data.state === "healthy" && !healthyCoherent) failContract();
+  }
+
   function validateStatus(data) {
     if (!isPlainObject(data) || data.read_only !== true) failContract();
     if (data.product !== "Skynet-EDR" || data.binary !== "skynet-edr" || data.run_mode !== "passive" || data.server !== "skynet-edr-mcp" || data.tool_count !== 6) failContract();
     if (!boundedSafeInteger(data.incident_count) || !boundedSafeInteger(data.event_count)) failContract();
+    if (hasKey(data, "ingestion")) validateIngestionStatus(data.ingestion);
     return data;
   }
 
@@ -692,6 +779,32 @@
     return "Passive projection online";
   }
 
+  function IngestionHealthPanel(props) {
+    const ingestion = props.ingestion;
+    if (!ingestion) return null;
+    const disabled = ingestion.state === "disabled";
+    const required = disabled || ingestion.required_reported_roles.length === 0
+      ? "none configured"
+      : ingestion.required_reported_roles.map(function (role) { return role.runtime_role + ": " + role.state; }).join(", ");
+    const rows = [
+      ["Listener", ingestion.listener_live ? "live" : "stopped"],
+      ["Transport", disabled ? "disabled" : ingestion.transport_heartbeat_state],
+      ["Required reported roles", required],
+      ["Hook freshness", disabled ? "disabled" : ingestion.hook_event_state],
+      ["Role assurance", "Authorized-UID self-reported attribution"],
+    ];
+    return h("section", { role: "status", "aria-live": "polite", className: "rounded-lg border bg-card p-3" },
+      h("h3", { className: "text-sm font-semibold" }, "Telemetry " + ingestion.state),
+      h("dl", { className: "mt-2 grid gap-1 text-sm" }, rows.map(function (row) {
+        return h("div", { key: row[0], className: "flex flex-wrap gap-2" },
+          h("dt", { className: "text-muted-foreground" }, row[0]),
+          h("dd", null, row[1])
+        );
+      })),
+      h("p", { className: "mt-2 text-xs text-muted-foreground" }, "Runtime role and instance are operational attribution reported by an authorized UID, not process attestation; same-UID compromise or mistaken global assignment can forge them.")
+    );
+  }
+
   function RiskExplorer() {
     const [selectedId, setSelectedId] = useState(null);
     const [navigation, setNavigation] = useState(function () { return { offset: 0, history: [] }; });
@@ -804,6 +917,7 @@
         ),
         h(Button, { type: "button", variant: "outline", onClick: refreshAll, disabled: refreshing, "aria-label": "Refresh Risk Explorer" }, refreshing ? "Refreshing…" : "Refresh")
       ),
+      health.data && health.data.ingestion ? h(IngestionHealthPanel, { ingestion: health.data.ingestion }) : null,
       risks.data ? h(Pagination, { page: risks.data.page, historyLength: navigation.history.length, onPrevious: goPrevious, onNext: goNext }) : null,
       h(FilterBar, {
         search: search,

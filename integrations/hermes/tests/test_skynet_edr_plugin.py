@@ -168,7 +168,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_HERMES_PLUGIN_ENABLED", None)
         os.environ.pop("SKYNET_EDR_FALLBACK_MAX_BYTES", None)
         os.environ.pop("SKYNET_EDR_CHECKPOINT_PATH", None)
-        os.environ.pop("SKYNET_EDR_INGEST_SOCKET", None)
+        os.environ["SKYNET_EDR_INGEST_SOCKET"] = str(self.state_dir / "missing-ingest.sock")
         self.plugin = load_plugin()
         logger = logging.getLogger("skynet_edr_hermes_plugin")
         for handler in list(logger.handlers):
@@ -323,6 +323,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         body = json.loads(fake.sent[4:])
         self.assertEqual(declared, len(fake.sent) - 4)
         self.assertEqual(body["message_type"], "producer_health")
+        self.assertEqual(body["version"], 2)
+        self.assertIn(body["runtime_role"], {"gateway", "dashboard", "worker", "unknown"})
+        self.assertRegex(body["instance_id"], r"^[a-z0-9][a-z0-9-]{0,63}$")
         self.assertEqual(body["checkpoint_bytes"], 4)
         self.assertEqual(body["backlog_bytes"], fallback.stat().st_size - 4)
         self.assertEqual(body["transport_state"], "degraded")
@@ -340,6 +343,35 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(recovered_body["backlog_bytes"], 0)
         self.assertEqual(recovered_body["transport_state"], "available")
         self.assertEqual(recovered_body["events_dropped_total"], 2)
+
+    def test_runtime_role_derivation_is_allowlisted_and_hostile_overrides_fall_back(self):
+        cases = {
+            "gateway": "gateway",
+            "dashboard": "dashboard",
+            "worker": "worker",
+            "unknown": "unknown",
+            "../../root/secret": "unknown",
+            "GATEWAY": "unknown",
+            "gateway-command --token=fake": "unknown",
+        }
+        for configured, expected in cases.items():
+            with self.subTest(configured=configured), patch.dict(
+                os.environ, {"HERMES_RUNTIME_ROLE": configured}, clear=False
+            ):
+                self.assertEqual(self.plugin._runtime_role(), expected)
+
+    def test_runtime_instance_override_is_bounded_and_never_uses_paths(self):
+        with patch.dict(
+            os.environ, {"SKYNET_EDR_RUNTIME_INSTANCE": "gateway-blue-01"}, clear=False
+        ):
+            self.assertEqual(self.plugin._runtime_instance_id(), "gateway-blue-01")
+        for hostile in ["/proc/self/cmdline", "x" * 65, "UPPER", "a b", "../secret"]:
+            with self.subTest(hostile=hostile), patch.dict(
+                os.environ, {"SKYNET_EDR_RUNTIME_INSTANCE": hostile}, clear=False
+            ):
+                instance = self.plugin._runtime_instance_id()
+                self.assertRegex(instance, r"^[a-z0-9][a-z0-9-]{0,63}$")
+                self.assertNotIn(hostile, instance)
 
     def test_fallback_state_lock_serializes_processes(self):
         context = multiprocessing.get_context("spawn")
@@ -466,6 +498,32 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             {"on_session_start", "on_session_end", "pre_llm_call", "pre_tool_call", "post_tool_call"},
         )
         self.assertTrue((self.state_dir / "skynet-edr-plugin.log").exists())
+
+    def test_register_starts_one_worker_and_immediately_attempts_hermetic_health(self):
+        configured_socket = Path(os.environ["SKYNET_EDR_INGEST_SOCKET"])
+        self.assertFalse(configured_socket.exists())
+        attempted = threading.Event()
+
+        def health_attempt():
+            attempted.set()
+            return False
+
+        ctx = FakeContext()
+        with patch.object(self.plugin, "_send_health_report", side_effect=health_attempt) as send:
+            self.plugin.register(ctx)
+            first_worker = self.plugin._worker_thread
+            self.plugin.register(ctx)
+            self.assertTrue(attempted.wait(0.5), "registration must send health before waiting")
+            self.assertIs(first_worker, self.plugin._worker_thread)
+            self.assertIsNotNone(first_worker)
+            self.assertTrue(first_worker.is_alive())
+            time.sleep(0.05)
+            self.assertEqual(send.call_count, 1)
+
+    def test_disabled_registration_does_not_start_worker(self):
+        with patch.dict(os.environ, {"SKYNET_EDR_HERMES_PLUGIN_ENABLED": "0"}, clear=False):
+            self.plugin.register(FakeContext())
+        self.assertIsNone(self.plugin._worker_thread)
 
     def test_pre_tool_call_emits_redacted_network_event_without_raw_secret_or_path(self):
         ctx = FakeContext()

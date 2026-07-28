@@ -19,6 +19,9 @@ socket = "/run/skynet-edr-ingest/ingest.sock"
 socket_group = "skynet-edr-ingest"
 allowed_uids = []
 allow_root = false
+# Optional enrollment contract. Empty preserves generic/legacy behavior. Hermes
+# deployments that require interactive hook coverage should use ["gateway"].
+required_reported_roles = []
 max_frame_bytes = 262144
 max_connections = 16
 read_timeout_ms = 1000

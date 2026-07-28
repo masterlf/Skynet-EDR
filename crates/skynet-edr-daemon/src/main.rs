@@ -1,6 +1,7 @@
 //! Minimal daemon entry point for Skynet-EDR.
 
 use std::{
+    collections::BTreeSet,
     env, fs, io,
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
@@ -17,7 +18,7 @@ use std::{
 use skynet_edr_core::{ingest_canonical_jsonl_spool, LocalStore, ProductInfo};
 use skynet_edr_daemon::{
     bind_ingest_listener, handle_console_request, handle_http_request, peer_uid,
-    process_ingest_connection, HttpMethod, IngestionHealth, UnixIngestConfig,
+    process_ingest_connection, HttpMethod, IngestionHealth, ProducerRole, UnixIngestConfig,
 };
 
 static ACTIVE_INGESTION_HEALTH: OnceLock<Arc<IngestionHealth>> = OnceLock::new();
@@ -139,7 +140,9 @@ fn start_ingestion_if_enabled(
         DaemonCliError::new(format!("failed to bind Unix ingestion listener: {error}"))
     })?;
     let db_path = config.http_store_path();
-    let health = Arc::new(IngestionHealth::default());
+    let health = Arc::new(IngestionHealth::with_required_reported_roles(
+        ingest.required_reported_roles.clone(),
+    ));
     health.record_listener_started();
     let _ = ACTIVE_INGESTION_HEALTH.set(Arc::clone(&health));
     let active = Arc::new(AtomicUsize::new(0));
@@ -284,7 +287,12 @@ fn write_http_connection_response(
                 let ingestion = if let Some(health) = ACTIVE_INGESTION_HEALTH.get() {
                     health.status_json(Duration::from_secs(30))
                 } else {
-                    serde_json::json!({"state":"disabled","listener_live":false,"sources":[]})
+                    serde_json::json!({
+                        "state":"disabled",
+                        "role_identity_assurance":"authorized_uid_self_reported",
+                        "listener_live":false,
+                        "sources":[]
+                    })
                 };
                 object.insert("ingestion".to_owned(), ingestion);
             }
@@ -404,14 +412,16 @@ impl DaemonConfig {
         let mut ingest_read_timeout_ms = 2_000;
         let mut ingest_write_timeout_ms = 2_000;
         let mut ingest_candidate_limit = 10_000;
+        let mut ingest_required_reported_roles = Vec::new();
         let mut section = String::new();
-        let mut in_multiline_array = false;
+        let mut seen_ingest_keys = BTreeSet::new();
+        let mut ignored_multiline_start: Option<usize> = None;
 
         for (index, raw_line) in content.lines().enumerate() {
             let line = strip_comment(raw_line).trim();
-            if in_multiline_array {
+            if ignored_multiline_start.is_some() {
                 if line.ends_with(']') {
-                    in_multiline_array = false;
+                    ignored_multiline_start = None;
                 }
                 continue;
             }
@@ -431,8 +441,26 @@ impl DaemonConfig {
             };
             let key = key.trim();
             let value = value.trim();
-            if value.starts_with('[') && !value.ends_with(']') {
-                in_multiline_array = true;
+            if section == "ingest" && !seen_ingest_keys.insert(key.to_owned()) {
+                return Err(DaemonCliError::new(format!(
+                    "invalid daemon config line {}: duplicate ingest.{key}",
+                    index + 1
+                )));
+            }
+            if section != "ingest" && key == "required_reported_roles" {
+                let qualified = if section.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{section}.{key}")
+                };
+                return Err(DaemonCliError::new(format!(
+                    "invalid daemon config line {}: {qualified} is only valid as ingest.required_reported_roles",
+                    index + 1
+                )));
+            }
+            if section != "ingest" && value.starts_with('[') && !value.ends_with(']') {
+                ignored_multiline_start = Some(index + 1);
+                continue;
             }
 
             match (section.as_str(), key) {
@@ -487,8 +515,23 @@ impl DaemonConfig {
                 ("ingest", "candidate_limit") => {
                     ingest_candidate_limit = parse_usize(value, index, "ingest.candidate_limit")?;
                 }
+                ("ingest", "required_reported_roles") => {
+                    ingest_required_reported_roles = parse_role_array(value, index)?;
+                }
+                ("ingest", _) => {
+                    return Err(DaemonCliError::new(format!(
+                        "invalid daemon config line {}: unknown ingest.{key}",
+                        index + 1
+                    )));
+                }
                 _ => {}
             }
+        }
+
+        if let Some(line) = ignored_multiline_start {
+            return Err(DaemonCliError::new(format!(
+                "invalid daemon config line {line}: unterminated multiline array"
+            )));
         }
 
         if spool_enabled {
@@ -524,6 +567,7 @@ impl DaemonConfig {
                 read_timeout: Duration::from_millis(ingest_read_timeout_ms),
                 write_timeout: Duration::from_millis(ingest_write_timeout_ms),
                 candidate_limit: ingest_candidate_limit,
+                required_reported_roles: ingest_required_reported_roles,
             });
         }
 
@@ -679,6 +723,41 @@ fn parse_u32_array(value: &str, index: usize, field: &str) -> Result<Vec<u32>, D
         .collect()
 }
 
+fn parse_role_array(value: &str, index: usize) -> Result<Vec<ProducerRole>, DaemonCliError> {
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| {
+            DaemonCliError::new(format!(
+                "invalid daemon config line {}: ingest.required_reported_roles must be a single-line string array",
+                index + 1
+            ))
+        })?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut roles = Vec::new();
+    for item in inner.split(',') {
+        let value = parse_string(item.trim(), index)?;
+        let role = ProducerRole::parse(&value)
+            .filter(|role| *role != ProducerRole::Unknown)
+            .ok_or_else(|| {
+                DaemonCliError::new(format!(
+                    "invalid daemon config line {}: ingest.required_reported_roles contains unsupported policy role",
+                    index + 1
+                ))
+            })?;
+        if roles.contains(&role) {
+            return Err(DaemonCliError::new(format!(
+                "invalid daemon config line {}: ingest.required_reported_roles contains a duplicate",
+                index + 1
+            )));
+        }
+        roles.push(role);
+    }
+    Ok(roles)
+}
+
 #[derive(Debug)]
 struct DaemonCliError {
     message: String,
@@ -732,6 +811,80 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn required_reported_roles_are_optional_allowlisted_and_deduplicated() {
+        let defaulted = DaemonConfig::parse(
+            "mode = \"passive\"\n[ingest]\nenabled = true\nallowed_uids = [1000]\n",
+        )
+        .expect("generic config remains backward compatible");
+        assert!(defaulted.ingest.unwrap().required_reported_roles.is_empty());
+
+        let required = DaemonConfig::parse(
+            "mode = \"passive\"\n[ingest]\nenabled = true\nallowed_uids = [1000]\nrequired_reported_roles = [\"gateway\", \"dashboard\"]\n",
+        )
+        .expect("fixed policy roles parse");
+        assert_eq!(
+            required.ingest.unwrap().required_reported_roles,
+            vec![ProducerRole::Gateway, ProducerRole::Dashboard]
+        );
+
+        for hostile in [
+            "required_reported_roles = [\"../../gateway\"]",
+            "required_reported_roles = [\"gateway\", \"gateway\"]",
+            "required_reported_roles = [gateway]",
+            "required_reported_roles = [\"unknown\"]",
+            "required_reported_roles = [\"legacy\"]",
+            "required_reported_roles = [\"gateway\"] trailing",
+            "required_reported_roles = [\"gateway\",",
+        ] {
+            let content = format!(
+                "mode = \"passive\"\n[ingest]\nenabled = true\nallowed_uids = [1000]\n{hostile}\n"
+            );
+            assert!(DaemonConfig::parse(&content).is_err(), "accepted {hostile}");
+        }
+    }
+
+    #[test]
+    fn ingest_security_configuration_rejects_typos_wrong_sections_and_duplicates() {
+        let cases = [
+            (
+                "required_reported_role = [\"gateway\"]",
+                "ingest.required_reported_role",
+                4,
+            ),
+            ("required_roles = [\"gateway\"]", "ingest.required_roles", 4),
+            ("mystery = true", "ingest.mystery", 4),
+            (
+                "[http_api]\nrequired_reported_roles = [\"gateway\"]",
+                "http_api.required_reported_roles",
+                5,
+            ),
+            (
+                "required_reported_roles = [\"gateway\"]\nrequired_reported_roles = []",
+                "duplicate ingest.required_reported_roles",
+                5,
+            ),
+            (
+                "allow_root = false\nallow_root = true",
+                "duplicate ingest.allow_root",
+                5,
+            ),
+        ];
+        for (body, evidence, line) in cases {
+            let content = format!("mode = \"passive\"\n[ingest]\nenabled = true\n{body}\n");
+            let error = DaemonConfig::parse(&content).expect_err("security typo must fail closed");
+            let message = error.to_string();
+            assert!(
+                message.contains(evidence),
+                "missing {evidence:?} in {message:?}"
+            );
+            assert!(
+                message.contains(&format!("line {line}")),
+                "missing line {line} in {message:?}"
+            );
+        }
+    }
 
     #[test]
     fn http_listener_fails_closed_for_missing_database_without_creating_files() {

@@ -68,6 +68,7 @@ socket = "/run/skynet-edr-ingest/ingest.sock"
 socket_group = "skynet-edr-ingest"
 allowed_uids = [1000] # reviewed numeric producer UID; do not copy blindly
 allow_root = false
+required_reported_roles = ["gateway"] # operational self-report gate; omit/[] is generic
 max_frame_bytes = 262144
 max_connections = 16
 read_timeout_ms = 1000
@@ -75,7 +76,30 @@ write_timeout_ms = 1000
 candidate_limit = 2048
 ```
 
-Restart the producer's login session so its supplementary groups are refreshed, then restart the daemon during an approved maintenance window. This runbook documents those actions; it does not authorize an unattended service restart.
+Assign attribution per unit, never through `systemctl --user set-environment` or another global user-manager environment. First identify the exact reviewed unit names. Then create separate drop-ins:
+
+```bash
+systemctl --user edit <gateway-unit>
+# [Service]
+# Environment=HERMES_RUNTIME_ROLE=gateway
+
+systemctl --user edit <dashboard-unit>
+# [Service]
+# Environment=HERMES_RUNTIME_ROLE=dashboard
+
+systemctl --user daemon-reload
+```
+
+After change approval, restart only those two reviewed units in the approved window. A deliberately configured `SKYNET_EDR_RUNTIME_INSTANCE` may remain stable; otherwise the generated fallback instance changes when its process restarts. Do not require an unconditional instance change. Verify fresh status after restart:
+
+```bash
+systemctl --user restart <gateway-unit> <dashboard-unit> # approved targeted restart only
+curl --fail --silent http://127.0.0.1:8787/api/status
+```
+
+A correctly configured per-unit dashboard role cannot satisfy the required reported gateway role. This is operational enrollment evidence only: `runtime_role` and `instance_id` are self-reported by a kernel-authorized UID. A same-UID compromise, a root process in the current shared trust domain, or a mistaken/global role assignment can forge attribution. `role_identity_assurance="authorized_uid_self_reported"` states this boundary; it is not security-grade process or role attestation.
+
+Restart the producer's login session so its supplementary groups are refreshed, then restart the daemon and each reviewed Hermes gateway/dashboard service during an approved maintenance window. Installing plugin bytes is not proof that an already-running process loaded them, and the plugin installer intentionally does not restart its parent or any service. Use the deployment's normal service manager (for example, after confirming the exact unit names with `systemctl --user list-units 'hermes*'`, restart only the reviewed units). This runbook documents those actions; it does not authorize an unattended service restart.
 
 Verify the effective boundary without reading producer data:
 
@@ -90,20 +114,21 @@ Expected packaged ownership/modes are `skynet-edr:skynet-edr-ingest 750` for the
 
 ### Health, counters, and backlog lag
 
-When the local read-only API is enabled, `GET /api/status` includes an `ingestion` object. `state` is `disabled` when no listener was started, `healthy` only while the listener is live and every observed producer has a fresh available transport report with no backlog or degrading condition, and `degraded` otherwise. Storage errors, frame timeouts, correlation overflow, capacity rejection, listener/peer-credential errors, stale reports, producer transport degradation, and non-zero backlog all degrade the state.
+When the local read-only API is enabled, `GET /api/status` includes an `ingestion` object. `state` is `disabled` when no listener was started. Active state is `healthy` only while the listener is live, at least one producer heartbeat is fresh, every configured `required_reported_roles` entry has at least one fresh/available/no-backlog instance, no fresh producer reports degraded transport or backlog, and no recent daemon degradation is active. It is `degraded` otherwise. Stale optional/transient `worker` or `unknown` instances remain visible during retention but do not poison health while a required gateway instance is fresh. With no configured requirements, no producers or all-stale producers remains degraded. Storage errors, frame timeouts, correlation overflow, capacity rejection, listener/peer-credential errors, producer transport degradation, and non-zero backlog degrade the state.
 
 ```bash
 curl --fail --silent http://127.0.0.1:8787/api/status
 ```
 
-The object exposes bounded process-lifetime aggregates plus a source-aware `sources` array keyed only by the kernel-authenticated numeric UID:
+The object exposes bounded process-lifetime aggregates plus at most 64 complete source identities keyed by kernel-authenticated numeric UID, fixed self-reported runtime role, and bounded non-sensitive process instance. Legacy v1 reporting remains a separate `(UID, legacy)` identity. All source identities inactive for five minutes are evicted lazily before projection or version-2 producer-health insertion, so normal process restarts cannot consume the 64 slots forever; the map and retention state reset on daemon restart:
 
 - connections: accepted, unauthorized, capacity-rejected, listener errors, and peer-credential errors;
 - frames: received, oversized, invalid, and timed out;
 - outcomes: persisted, duplicate, event-ID collision, correlation overflow, and storage errors;
-- listener liveness and, per source, last event received/committed timestamps, producer checkpoint bytes, pending backlog bytes/age, malformed/dropped/duplicate/collision totals, fixed-category last error plus timestamp, producer-report timestamp, and transport state (`available`, `degraded`, `stale`, or `unknown`).
+- listener liveness, required-role enrollment state, producer heartbeat timestamp/age and transport state (`available`, `degraded`, `stale`, or `unknown`), plus checkpoint/backlog and fixed counters;
+- separate daemon-observed last accepted and last committed hook-event timestamps/ages. `hook_event_state` is `fresh`, `stale`, or `not_observed` from daemon receive time; it is not inferred from heartbeat traffic. `hook_event_freshness_affects_state=false` is explicit: an idle runtime with no expected user activity is not degraded solely because no hook event has occurred. Operators must compare event ages with known activity when investigating telemetry coverage.
 
-The authenticated producer sends a strict version-1 control frame periodically and after delivery work. Unknown fields, labels, paths, payloads, commands, and strings outside the fixed transport enum are rejected. `/api/status` never projects socket/spool paths, event content, command text, or secrets. A report is stale 30 seconds after the daemon received it. Transient daemon errors degrade current state for the same 30-second health window; the cumulative counters and fixed-category last-error fields remain visible after current state recovers. Runtime counters, source entries, liveness, and timestamps reset on daemon restart; durable events, receipts, incidents, collision fingerprints, producer fallback, and its checkpoint do not. Until a producer reports again after restart its transport is `unknown`, so status cannot claim end-to-end health.
+The authenticated producer sends a strict version-2 control frame periodically and after delivery work. Legacy version-1 reports remain visible as `legacy`, but never satisfy a configured required role. Unknown fields, labels, paths, payloads, commands, and strings outside the fixed transport enum are rejected. `/api/status` never projects socket/spool paths, event content, command text, or secrets. A report is stale 30 seconds after the daemon received it. Transient daemon errors degrade current state for the same 30-second health window; the cumulative counters and fixed-category last-error fields remain visible after current state recovers. Runtime counters, source entries, liveness, and timestamps reset on daemon restart; durable events, receipts, incidents, collision fingerprints, producer fallback, and its checkpoint do not. Until a producer reports again after restart its transport is `unknown`, so status cannot claim end-to-end health.
 
 The Hermes producer writes process-lifetime transport counter snapshots to its sanitized log only when values change:
 

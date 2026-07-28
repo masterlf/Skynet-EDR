@@ -9,7 +9,7 @@ mod ingest_unix;
 #[cfg(target_os = "linux")]
 pub use ingest_unix::{
     bind_ingest_listener, peer_uid, process_ingest_connection, IngestionHealth,
-    IngestionHealthSnapshot, UnixIngestConfig,
+    IngestionHealthSnapshot, ProducerRole, UnixIngestConfig,
 };
 
 use std::{
