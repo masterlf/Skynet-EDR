@@ -26,6 +26,47 @@ use skynet_edr_core::{
     ContinuousIngestStatus, LocalStore,
 };
 
+const MAX_HEALTH_SOURCES: usize = 64;
+
+/// Fixed runtime roles accepted by the attributed producer-health protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProducerRole {
+    /// Hermes dashboard/API runtime.
+    Dashboard,
+    /// Hermes gateway runtime where interactive hooks are normally expected.
+    Gateway,
+    /// Hermes background worker runtime.
+    Worker,
+    /// Safe fallback when Hermes does not expose a known runtime role.
+    Unknown,
+    /// Backward-compatible version-1 producer with no runtime attribution.
+    Legacy,
+}
+
+impl ProducerRole {
+    /// Parse a protocol/config role from the fixed vocabulary.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dashboard" => Some(Self::Dashboard),
+            "gateway" => Some(Self::Gateway),
+            "worker" => Some(Self::Worker),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Gateway => "gateway",
+            Self::Worker => "worker",
+            Self::Unknown => "unknown",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
 /// Runtime bounds and authorization policy for the Unix ingestion listener.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnixIngestConfig {
@@ -47,10 +88,12 @@ pub struct UnixIngestConfig {
     pub write_timeout: Duration,
     /// Maximum indexed correlation candidates per event.
     pub candidate_limit: usize,
+    /// Optional fixed roles that must have a fresh attributed heartbeat.
+    pub required_roles: Vec<ProducerRole>,
 }
 
 /// Bounded aggregate ingestion counters shared with the read-only status projection.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct IngestionHealth {
     accepted: AtomicU64,
     unauthorized: AtomicU64,
@@ -68,11 +111,15 @@ pub struct IngestionHealth {
     storage_errors: AtomicU64,
     last_degraded_at_unix_ms: AtomicU64,
     listener_live: AtomicBool,
-    sources: Mutex<BTreeMap<u32, SourceHealth>>,
+    last_event_received_at_unix_ms: AtomicU64,
+    last_event_committed_at_unix_ms: AtomicU64,
+    required_roles: Vec<ProducerRole>,
+    sources: Mutex<BTreeMap<(u32, ProducerRole), SourceHealth>>,
 }
 
 #[derive(Debug, Default)]
 struct SourceHealth {
+    instance_id: Option<String>,
     last_event_received_at_unix_ms: Option<u64>,
     last_event_committed_at_unix_ms: Option<u64>,
     producer_checkpoint_bytes: Option<u64>,
@@ -97,6 +144,8 @@ enum ProducerTransportState {
 
 #[derive(Debug)]
 struct ProducerHealthReport {
+    role: ProducerRole,
+    instance_id: Option<String>,
     checkpoint_bytes: u64,
     backlog_bytes: u64,
     backlog_age_ms: Option<u64>,
@@ -107,7 +156,7 @@ struct ProducerHealthReport {
 
 fn parse_producer_health(value: &serde_json::Value) -> Option<ProducerHealthReport> {
     let object = value.as_object()?;
-    let allowed = [
+    let common = [
         "version",
         "message_type",
         "checkpoint_bytes",
@@ -117,14 +166,33 @@ fn parse_producer_health(value: &serde_json::Value) -> Option<ProducerHealthRepo
         "events_malformed_total",
         "transport_state",
     ];
-    if object.len() != allowed.len() || object.keys().any(|key| !allowed.contains(&key.as_str())) {
+    let version = object.get("version")?.as_u64()?;
+    if object.get("message_type")?.as_str()? != "producer_health" {
         return None;
     }
-    if object.get("version")?.as_u64()? != 1
-        || object.get("message_type")?.as_str()? != "producer_health"
-    {
-        return None;
-    }
+    let (role, instance_id) = match version {
+        1 if object.len() == common.len()
+            && object.keys().all(|key| common.contains(&key.as_str())) =>
+        {
+            (ProducerRole::Legacy, None)
+        }
+        2 => {
+            let mut allowed = common.to_vec();
+            allowed.extend(["runtime_role", "instance_id"]);
+            if object.len() != allowed.len()
+                || object.keys().any(|key| !allowed.contains(&key.as_str()))
+            {
+                return None;
+            }
+            let role = ProducerRole::parse(object.get("runtime_role")?.as_str()?)?;
+            let instance = object.get("instance_id")?.as_str()?;
+            if !valid_instance_id(instance) {
+                return None;
+            }
+            (role, Some(instance.to_owned()))
+        }
+        _ => return None,
+    };
     let backlog_age_ms = match object.get("backlog_age_ms")? {
         serde_json::Value::Null => None,
         value => Some(value.as_u64()?),
@@ -135,6 +203,8 @@ fn parse_producer_health(value: &serde_json::Value) -> Option<ProducerHealthRepo
         _ => return None,
     };
     Some(ProducerHealthReport {
+        role,
+        instance_id,
         checkpoint_bytes: object.get("checkpoint_bytes")?.as_u64()?,
         backlog_bytes: object.get("backlog_bytes")?.as_u64()?,
         backlog_age_ms,
@@ -142,6 +212,16 @@ fn parse_producer_health(value: &serde_json::Value) -> Option<ProducerHealthRepo
         events_malformed_total: object.get("events_malformed_total")?.as_u64()?,
         transport_state,
     })
+}
+
+fn valid_instance_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 /// Point-in-time aggregate ingestion counters containing no frame content or paths.
@@ -177,7 +257,40 @@ pub struct IngestionHealthSnapshot {
     pub storage_errors_total: u64,
 }
 
+impl Default for IngestionHealth {
+    fn default() -> Self {
+        Self::with_required_roles(Vec::new())
+    }
+}
+
 impl IngestionHealth {
+    /// Create process-lifetime health state with optional required runtime roles.
+    #[must_use]
+    pub fn with_required_roles(required_roles: Vec<ProducerRole>) -> Self {
+        Self {
+            accepted: AtomicU64::new(0),
+            unauthorized: AtomicU64::new(0),
+            capacity_rejected: AtomicU64::new(0),
+            listener_errors: AtomicU64::new(0),
+            peer_credential_errors: AtomicU64::new(0),
+            received: AtomicU64::new(0),
+            oversized: AtomicU64::new(0),
+            invalid: AtomicU64::new(0),
+            timed_out: AtomicU64::new(0),
+            persisted: AtomicU64::new(0),
+            duplicates: AtomicU64::new(0),
+            collisions: AtomicU64::new(0),
+            correlation_truncated: AtomicU64::new(0),
+            storage_errors: AtomicU64::new(0),
+            last_degraded_at_unix_ms: AtomicU64::new(0),
+            listener_live: AtomicBool::new(false),
+            last_event_received_at_unix_ms: AtomicU64::new(0),
+            last_event_committed_at_unix_ms: AtomicU64::new(0),
+            required_roles,
+            sources: Mutex::new(BTreeMap::new()),
+        }
+    }
+
     /// Return a bounded aggregate snapshot.
     #[must_use]
     pub fn snapshot(&self) -> IngestionHealthSnapshot {
@@ -227,7 +340,7 @@ impl IngestionHealth {
         self.listener_live.store(false, Ordering::Release);
     }
 
-    /// Return a bounded operator-safe status projection with one entry per authenticated UID.
+    /// Return bounded transport enrollment and independent hook-event recency.
     #[must_use]
     pub fn status_json(&self, stale_after: Duration) -> serde_json::Value {
         let snapshot = self.snapshot();
@@ -238,53 +351,71 @@ impl IngestionHealth {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut source_values = Vec::with_capacity(sources.len());
-        let mut source_degraded = sources.is_empty();
-        for (uid, source) in sources.iter() {
-            let stale = source
-                .producer_reported_at_unix_ms
-                .is_some_and(|reported| now.saturating_sub(reported) > stale_after_ms);
-            let transport_state = match source.transport_state {
-                Some(ProducerTransportState::Available) if !stale => "available",
-                Some(ProducerTransportState::Available) => "stale",
-                Some(ProducerTransportState::Degraded) => "degraded",
-                None => "unknown",
-            };
-            let recent_degrading_error = source.last_error_category.is_some_and(|category| {
-                is_degrading_error(category)
-                    && source
-                        .last_error_at_unix_ms
-                        .is_some_and(|at| now.saturating_sub(at) <= stale_after_ms)
-            });
-            source_degraded |= stale
-                || source.transport_state.is_none()
-                || source.transport_state == Some(ProducerTransportState::Degraded)
-                || source.backlog_bytes.unwrap_or(0) > 0
-                || recent_degrading_error;
-            source_values.push(json!({
-                "source_id": format!("uid:{uid}"),
-                "last_event_received_at_unix_ms": source.last_event_received_at_unix_ms,
-                "last_event_committed_at_unix_ms": source.last_event_committed_at_unix_ms,
-                "producer_checkpoint_bytes": source.producer_checkpoint_bytes,
-                "backlog_bytes": source.backlog_bytes,
-                "backlog_age_ms": source.backlog_age_ms,
-                "events_malformed_total": source.daemon_events_malformed_total.saturating_add(source.producer_events_malformed_total),
-                "events_dropped_total": source.events_dropped_total,
-                "events_duplicate_total": source.events_duplicate_total,
-                "events_collision_total": source.events_collision_total,
-                "last_error_category": source.last_error_category,
-                "last_error_at_unix_ms": source.last_error_at_unix_ms,
-                "producer_reported_at_unix_ms": source.producer_reported_at_unix_ms,
-                "transport_state": transport_state,
-            }));
+        let mut producer_count = 0usize;
+        let mut producer_degraded = false;
+        let mut any_fresh_heartbeat = false;
+        for ((uid, role), source) in sources.iter() {
+            let (value, has_report, is_degraded, fresh_heartbeat) =
+                source_status_json(*uid, *role, source, now, stale_after_ms);
+            producer_count += usize::from(has_report);
+            producer_degraded |= is_degraded;
+            any_fresh_heartbeat |= fresh_heartbeat;
+            source_values.push(value);
         }
+        let mut required_values = Vec::with_capacity(self.required_roles.len());
+        let mut required_degraded = false;
+        for required in &self.required_roles {
+            let mut present = false;
+            let mut fresh = false;
+            for ((_, role), source) in sources.iter() {
+                if role != required || source.producer_reported_at_unix_ms.is_none() {
+                    continue;
+                }
+                present = true;
+                fresh |= source.producer_reported_at_unix_ms.is_some_and(|reported| {
+                    now.saturating_sub(reported) <= stale_after_ms
+                        && source.transport_state == Some(ProducerTransportState::Available)
+                        && source.backlog_bytes.unwrap_or(0) == 0
+                });
+            }
+            let state = if fresh {
+                "fresh"
+            } else if present {
+                "stale"
+            } else {
+                "absent"
+            };
+            required_degraded |= !fresh;
+            required_values.push(json!({"runtime_role": required.as_str(), "state": state}));
+        }
+        let last_received =
+            optional_timestamp(self.last_event_received_at_unix_ms.load(Ordering::Relaxed));
+        let last_committed =
+            optional_timestamp(self.last_event_committed_at_unix_ms.load(Ordering::Relaxed));
         let listener_live = self.listener_live.load(Ordering::Acquire);
         let last_degraded = self.last_degraded_at_unix_ms.load(Ordering::Relaxed);
         let recently_degraded =
             last_degraded != 0 && now.saturating_sub(last_degraded) <= stale_after_ms;
-        let degraded = !listener_live || source_degraded || recently_degraded;
+        let degraded = !listener_live
+            || producer_count == 0
+            || producer_degraded
+            || required_degraded
+            || recently_degraded;
         json!({
             "state": if degraded { "degraded" } else { "healthy" },
             "listener_live": listener_live,
+            "transport_heartbeat_state": if any_fresh_heartbeat { "fresh" } else if producer_count > 0 { "stale" } else { "not_observed" },
+            "hook_event_state": match last_received {
+                Some(at) if now.saturating_sub(at) <= stale_after_ms => "fresh",
+                Some(_) => "stale",
+                None => "not_observed",
+            },
+            "hook_event_freshness_affects_state": false,
+            "last_event_received_at_unix_ms": last_received,
+            "last_event_received_age_ms": last_received.map(|at| now.saturating_sub(at)),
+            "last_event_committed_at_unix_ms": last_committed,
+            "last_event_committed_age_ms": last_committed.map(|at| now.saturating_sub(at)),
+            "required_roles": required_values,
             "connections_accepted_total": snapshot.connections_accepted_total,
             "connections_unauthorized_total": snapshot.connections_unauthorized_total,
             "connections_capacity_rejected_total": snapshot.connections_capacity_rejected_total,
@@ -308,12 +439,15 @@ impl IngestionHealth {
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source = sources.entry(uid).or_default();
-        source.last_error_category = Some(category);
-        source.last_error_at_unix_ms = Some(unix_ms_now());
-        if category == "malformed_frame" {
-            source.daemon_events_malformed_total =
-                source.daemon_events_malformed_total.saturating_add(1);
+        let key = (uid, ProducerRole::Legacy);
+        if sources.contains_key(&key) || sources.len() < MAX_HEALTH_SOURCES {
+            let source = sources.entry(key).or_default();
+            source.last_error_category = Some(category);
+            source.last_error_at_unix_ms = Some(unix_ms_now());
+            if category == "malformed_frame" {
+                source.daemon_events_malformed_total =
+                    source.daemon_events_malformed_total.saturating_add(1);
+            }
         }
         drop(sources);
         if is_degrading_error(category) {
@@ -322,12 +456,20 @@ impl IngestionHealth {
     }
 
     fn record_event_received(&self, uid: u32) {
-        self.sources
+        let now = unix_ms_now();
+        self.last_event_received_at_unix_ms
+            .store(now, Ordering::Relaxed);
+        let mut sources = self
+            .sources
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(uid)
-            .or_default()
-            .last_event_received_at_unix_ms = Some(unix_ms_now());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (uid, ProducerRole::Legacy);
+        if sources.contains_key(&key) || sources.len() < MAX_HEALTH_SOURCES {
+            sources
+                .entry(key)
+                .or_default()
+                .last_event_received_at_unix_ms = Some(now);
+        }
     }
 
     fn record_result(&self, uid: u32, status: ContinuousIngestStatus) {
@@ -335,10 +477,21 @@ impl IngestionHealth {
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source = sources.entry(uid).or_default();
+        let key = (uid, ProducerRole::Legacy);
+        if !sources.contains_key(&key) && sources.len() >= MAX_HEALTH_SOURCES {
+            if status == ContinuousIngestStatus::Persisted {
+                self.last_event_committed_at_unix_ms
+                    .store(unix_ms_now(), Ordering::Relaxed);
+            }
+            return;
+        }
+        let source = sources.entry(key).or_default();
         match status {
             ContinuousIngestStatus::Persisted => {
-                source.last_event_committed_at_unix_ms = Some(unix_ms_now());
+                let now = unix_ms_now();
+                source.last_event_committed_at_unix_ms = Some(now);
+                self.last_event_committed_at_unix_ms
+                    .store(now, Ordering::Relaxed);
             }
             ContinuousIngestStatus::Duplicate => {
                 source.events_duplicate_total = source.events_duplicate_total.saturating_add(1);
@@ -349,12 +502,22 @@ impl IngestionHealth {
         }
     }
 
-    fn record_producer_health(&self, uid: u32, report: &ProducerHealthReport) {
+    fn record_producer_health(&self, uid: u32, report: &ProducerHealthReport) -> bool {
         let mut sources = self
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source = sources.entry(uid).or_default();
+        let key = (uid, report.role);
+        if !sources.contains_key(&key) && sources.len() >= MAX_HEALTH_SOURCES {
+            return false;
+        }
+        let source = sources.entry(key).or_default();
+        if source.instance_id != report.instance_id {
+            *source = SourceHealth {
+                instance_id: report.instance_id.clone(),
+                ..SourceHealth::default()
+            };
+        }
         source.producer_checkpoint_bytes = Some(report.checkpoint_bytes);
         source.backlog_bytes = Some(report.backlog_bytes);
         source.backlog_age_ms = report.backlog_age_ms;
@@ -362,6 +525,7 @@ impl IngestionHealth {
         source.producer_events_malformed_total = report.events_malformed_total;
         source.transport_state = Some(report.transport_state);
         source.producer_reported_at_unix_ms = Some(unix_ms_now());
+        true
     }
 
     fn record_correlation_truncated(&self) {
@@ -385,6 +549,65 @@ fn unix_ms_now() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+fn source_status_json(
+    uid: u32,
+    role: ProducerRole,
+    source: &SourceHealth,
+    now: u64,
+    stale_after_ms: u64,
+) -> (serde_json::Value, bool, bool, bool) {
+    let has_report = source.producer_reported_at_unix_ms.is_some();
+    let stale = source
+        .producer_reported_at_unix_ms
+        .is_some_and(|reported| now.saturating_sub(reported) > stale_after_ms);
+    let transport_state = match source.transport_state {
+        Some(ProducerTransportState::Available) if !stale => "available",
+        Some(ProducerTransportState::Available) => "stale",
+        Some(ProducerTransportState::Degraded) => "degraded",
+        None => "unknown",
+    };
+    let recent_degrading_error = source.last_error_category.is_some_and(|category| {
+        is_degrading_error(category)
+            && source
+                .last_error_at_unix_ms
+                .is_some_and(|at| now.saturating_sub(at) <= stale_after_ms)
+    });
+    let degraded = has_report
+        && (stale
+            || source.transport_state == Some(ProducerTransportState::Degraded)
+            || source.backlog_bytes.unwrap_or(0) > 0
+            || recent_degrading_error);
+    let source_id = source.instance_id.as_ref().map_or_else(
+        || format!("uid:{uid}"),
+        |instance| format!("uid:{uid}:{}:{instance}", role.as_str()),
+    );
+    let value = json!({
+        "source_id": source_id,
+        "authenticated_uid": uid,
+        "runtime_role": role.as_str(),
+        "instance_id": source.instance_id,
+        "last_event_received_at_unix_ms": source.last_event_received_at_unix_ms,
+        "last_event_committed_at_unix_ms": source.last_event_committed_at_unix_ms,
+        "producer_checkpoint_bytes": source.producer_checkpoint_bytes,
+        "backlog_bytes": source.backlog_bytes,
+        "backlog_age_ms": source.backlog_age_ms,
+        "events_malformed_total": source.daemon_events_malformed_total.saturating_add(source.producer_events_malformed_total),
+        "events_dropped_total": source.events_dropped_total,
+        "events_duplicate_total": source.events_duplicate_total,
+        "events_collision_total": source.events_collision_total,
+        "last_error_category": source.last_error_category,
+        "last_error_at_unix_ms": source.last_error_at_unix_ms,
+        "producer_reported_at_unix_ms": source.producer_reported_at_unix_ms,
+        "producer_report_age_ms": source.producer_reported_at_unix_ms.map(|at| now.saturating_sub(at)),
+        "transport_state": transport_state,
+    });
+    (value, has_report, degraded, has_report && !stale)
+}
+
+fn optional_timestamp(value: u64) -> Option<u64> {
+    (value != 0).then_some(value)
 }
 
 /// Safely replace an owned stale socket and bind the configured listener.
@@ -545,13 +768,18 @@ fn handle_producer_health_frame(
     }
     let Some(report) = parse_producer_health(&value) else {
         health.invalid.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(uid, "invalid_health");
         return Some(write_ack(
             stream,
             &json!({"version":1,"status":"rejected_permanent","reason":"invalid_health"}),
         ));
     };
-    health.record_producer_health(uid, &report);
+    if !health.record_producer_health(uid, &report) {
+        health.invalid.fetch_add(1, Ordering::Relaxed);
+        return Some(write_ack(
+            stream,
+            &json!({"version":1,"status":"rejected_permanent","reason":"source_capacity"}),
+        ));
+    }
     Some(write_ack(
         stream,
         &json!({"version":1,"status":"health_recorded"}),

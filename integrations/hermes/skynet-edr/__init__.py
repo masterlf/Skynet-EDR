@@ -84,6 +84,7 @@ _ARTIFACT_PROVIDER_BY_KIND = {
 _lock = threading.Lock()
 _logger_lock = threading.Lock()
 _session_trace_id = f"hermes-local-{uuid.uuid4().hex}"
+_runtime_instance_fallback = uuid.uuid4().hex
 _counter = 0
 _logger: logging.Logger | None = None
 
@@ -447,8 +448,10 @@ def _send_health_report() -> bool:
         degraded = backlog > 0
         payload = json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "message_type": "producer_health",
+                "runtime_role": _runtime_role(),
+                "instance_id": _runtime_instance_id(),
                 "checkpoint_bytes": checkpoint,
                 "backlog_bytes": backlog,
                 "backlog_age_ms": backlog_age_ms,
@@ -584,6 +587,20 @@ def _setup_logging() -> logging.Logger:
 
 def _enabled() -> bool:
     return os.environ.get("SKYNET_EDR_HERMES_PLUGIN_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+
+
+def _runtime_role() -> str:
+    """Return only a fixed Hermes runtime role; hostile labels become unknown."""
+    configured = os.environ.get("HERMES_RUNTIME_ROLE", "unknown")
+    return configured if configured in {"gateway", "dashboard", "worker", "unknown"} else "unknown"
+
+
+def _runtime_instance_id() -> str:
+    """Return a bounded non-sensitive process instance identifier."""
+    configured = os.environ.get("SKYNET_EDR_RUNTIME_INSTANCE")
+    if configured and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", configured):
+        return configured
+    return _runtime_instance_fallback
 
 
 def _state_dir() -> Path:

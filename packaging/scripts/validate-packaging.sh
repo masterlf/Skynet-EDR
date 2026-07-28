@@ -76,6 +76,7 @@ grep -q '^socket = "/run/skynet-edr-ingest/ingest.sock"' packaging/config/config
 grep -q '^socket_group = "skynet-edr-ingest"' packaging/config/config.toml
 grep -q '^allowed_uids = \[\]' packaging/config/config.toml
 grep -q '^allow_root = false' packaging/config/config.toml
+grep -q '^required_roles = \[\]' packaging/config/config.toml
 grep -q '^max_frame_bytes = 262144' packaging/config/config.toml
 
 grep -q 'skynet-edr-daemon' packaging/nfpm.yaml
@@ -140,6 +141,7 @@ grep -q 'skynet-edr-plugin.log' integrations/hermes/skynet-edr/README.md
 grep -q 'events-v1.jsonl' integrations/hermes/skynet-edr/README.md
 grep -q 'SKYNET_EDR_INGEST_SOCKET' integrations/hermes/skynet-edr/README.md
 grep -q 'events-v1.jsonl' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'does not restart' packaging/scripts/skynet-edr-install-hermes-plugin.sh
 grep -q 'PLUGIN_SPOOL="$PLUGIN_STATE/events-v1.jsonl"' packaging/scripts/vm-smoke.sh
 if grep -q 'PLUGIN_SPOOL="$PLUGIN_STATE/events.jsonl"' packaging/scripts/vm-smoke.sh; then
   echo "VM smoke must not open the historical Hermes events.jsonl spool" >&2

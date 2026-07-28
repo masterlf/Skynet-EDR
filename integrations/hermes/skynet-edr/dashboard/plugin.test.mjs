@@ -298,6 +298,40 @@ test('IIFE registers exactly skynet-edr and only uses authenticated scoped JSON 
   for (const mutation of ['POST', 'PUT', 'PATCH', 'DELETE']) assert.equal(source.includes(mutation), false);
 });
 
+test('status validator accepts bounded runtime health and rejects hostile attribution', async () => {
+  const valid = structuredClone(canonicalStatus);
+  valid.ingestion = {
+    state: 'healthy', listener_live: true, transport_heartbeat_state: 'fresh',
+    hook_event_state: 'not_observed', hook_event_freshness_affects_state: false,
+    last_event_received_at_unix_ms: null, last_event_received_age_ms: null,
+    last_event_committed_at_unix_ms: null, last_event_committed_age_ms: null,
+    required_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
+    sources: [{
+      source_id: 'uid:1000:gateway:gate-a1', authenticated_uid: 1000,
+      runtime_role: 'gateway', instance_id: 'gate-a1', producer_reported_at_unix_ms: 1,
+      producer_report_age_ms: 0, transport_state: 'available',
+    }],
+  };
+  let harness = createHarness({
+    '/api/plugins/skynet-edr/status': valid,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  assert.match(textOf(harness.render()), /Passive projection online/);
+
+  const hostile = structuredClone(valid);
+  hostile.ingestion.sources[0].instance_id = '/proc/self/cmdline';
+  harness = createHarness({
+    '/api/plugins/skynet-edr/status': hostile,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  assert.match(textOf(harness.render()), /Backend unavailable/);
+  assert.doesNotMatch(textOf(harness.render()), /cmdline/);
+});
+
 test('renders loading, empty and generic fail-closed error states', async () => {
   let harness = createHarness({});
   let tree = harness.render();

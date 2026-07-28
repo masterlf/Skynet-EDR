@@ -293,10 +293,48 @@
     return data;
   }
 
+  function validateIngestionStatus(data) {
+    if (!isPlainObject(data) || !Array.isArray(data.sources) || data.sources.length > 64) failContract();
+    if (data.state === "disabled") {
+      if (data.listener_live !== false || data.sources.length !== 0) failContract();
+      return;
+    }
+    if (!["healthy", "degraded"].includes(data.state) || typeof data.listener_live !== "boolean") failContract();
+    if (!["fresh", "stale", "not_observed"].includes(data.transport_heartbeat_state)) failContract();
+    if (!["fresh", "stale", "not_observed"].includes(data.hook_event_state) || data.hook_event_freshness_affects_state !== false) failContract();
+    [
+      "last_event_received_at_unix_ms", "last_event_received_age_ms",
+      "last_event_committed_at_unix_ms", "last_event_committed_age_ms",
+    ].forEach(function (key) {
+      if (data[key] !== null && !boundedSafeInteger(data[key])) failContract();
+    });
+    if (!Array.isArray(data.required_roles) || data.required_roles.length > 4) failContract();
+    const roles = new Set();
+    data.required_roles.forEach(function (required) {
+      if (!isPlainObject(required) || !["gateway", "dashboard", "worker", "unknown"].includes(required.runtime_role)) failContract();
+      if (!["fresh", "stale", "absent"].includes(required.state) || roles.has(required.runtime_role)) failContract();
+      roles.add(required.runtime_role);
+    });
+    const sourceIds = new Set();
+    data.sources.forEach(function (source) {
+      if (!isPlainObject(source) || !Number.isInteger(source.authenticated_uid) || source.authenticated_uid < 0 || source.authenticated_uid > 4294967295) failContract();
+      if (typeof source.source_id !== "string" || source.source_id.length > 160 || !/^[a-z0-9:-]+$/.test(source.source_id) || sourceIds.has(source.source_id)) failContract();
+      if (!["gateway", "dashboard", "worker", "unknown", "legacy"].includes(source.runtime_role)) failContract();
+      if (source.runtime_role === "legacy") {
+        if (source.instance_id !== null) failContract();
+      } else if (typeof source.instance_id !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(source.instance_id)) failContract();
+      if (source.producer_reported_at_unix_ms !== null && !boundedSafeInteger(source.producer_reported_at_unix_ms)) failContract();
+      if (source.producer_report_age_ms !== null && !boundedSafeInteger(source.producer_report_age_ms)) failContract();
+      if (!["available", "degraded", "stale", "unknown"].includes(source.transport_state)) failContract();
+      sourceIds.add(source.source_id);
+    });
+  }
+
   function validateStatus(data) {
     if (!isPlainObject(data) || data.read_only !== true) failContract();
     if (data.product !== "Skynet-EDR" || data.binary !== "skynet-edr" || data.run_mode !== "passive" || data.server !== "skynet-edr-mcp" || data.tool_count !== 6) failContract();
     if (!boundedSafeInteger(data.incident_count) || !boundedSafeInteger(data.event_count)) failContract();
+    if (hasKey(data, "ingestion")) validateIngestionStatus(data.ingestion);
     return data;
   }
 

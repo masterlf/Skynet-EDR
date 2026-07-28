@@ -14,7 +14,8 @@ use std::{
 
 use skynet_edr_core::LocalStore;
 use skynet_edr_daemon::{
-    bind_ingest_listener, process_ingest_connection, IngestionHealth, UnixIngestConfig,
+    bind_ingest_listener, process_ingest_connection, IngestionHealth, ProducerRole,
+    UnixIngestConfig,
 };
 
 const CANONICAL_EVENT: &str =
@@ -42,7 +43,28 @@ fn config(socket_path: PathBuf, allowed_uids: Vec<u32>) -> UnixIngestConfig {
         read_timeout: Duration::from_millis(100),
         write_timeout: Duration::from_millis(100),
         candidate_limit: 10_000,
+        required_roles: Vec::new(),
     }
+}
+
+fn health_report(version: u64, role: Option<&str>, instance_id: Option<&str>) -> serde_json::Value {
+    let mut report = serde_json::json!({
+        "version": version,
+        "message_type": "producer_health",
+        "checkpoint_bytes": 0,
+        "backlog_bytes": 0,
+        "backlog_age_ms": null,
+        "events_dropped_total": 0,
+        "events_malformed_total": 0,
+        "transport_state": "available"
+    });
+    if let Some(role) = role {
+        report["runtime_role"] = serde_json::json!(role);
+    }
+    if let Some(instance_id) = instance_id {
+        report["instance_id"] = serde_json::json!(instance_id);
+    }
+    report
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {
@@ -373,6 +395,7 @@ fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
     assert_eq!(status["sources"][0]["events_malformed_total"], 1);
     assert!(status["sources"][0]["last_event_received_at_unix_ms"].is_u64());
     assert!(status["sources"][0]["last_event_committed_at_unix_ms"].is_u64());
+    assert_eq!(status["hook_event_state"], "fresh");
     let serialized = status.to_string();
     for forbidden in ["events-v1.jsonl", "FAKE_SECRET", "/root/", "command"] {
         assert!(!serialized.contains(forbidden));
@@ -381,6 +404,7 @@ fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
     thread::sleep(Duration::from_millis(2));
     let stale = health.status_json(Duration::ZERO);
     assert_eq!(stale["state"], "degraded");
+    assert_eq!(stale["hook_event_state"], "stale");
     assert_eq!(stale["sources"][0]["transport_state"], "stale");
 
     let _ = fs::remove_file(db_path);
@@ -473,6 +497,199 @@ fn hostile_health_report_is_rejected_without_label_or_payload_leakage() {
         .status_json(Duration::from_secs(30))
         .to_string()
         .contains("FAKE_SECRET"));
+}
+
+#[test]
+fn same_uid_roles_are_distinct_and_only_gateway_satisfies_required_gateway() {
+    let db_path = temp_path("runtime-roles.sqlite");
+    let config = config(temp_path("runtime-roles.sock"), vec![1_234]);
+    let health = IngestionHealth::with_required_roles(vec![ProducerRole::Gateway]);
+    health.record_listener_started();
+
+    let dashboard = health_report(2, Some("dashboard"), Some("dash-a1"));
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&dashboard).unwrap()),
+        &health,
+    );
+    let dashboard_only = health.status_json(Duration::from_secs(30));
+    assert_eq!(dashboard_only["state"], "degraded");
+    assert_eq!(dashboard_only["required_roles"][0]["state"], "absent");
+
+    let gateway = health_report(2, Some("gateway"), Some("gate-a1"));
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&gateway).unwrap()),
+        &health,
+    );
+    let enrolled = health.status_json(Duration::from_secs(30));
+    assert_eq!(enrolled["state"], "healthy");
+    assert_eq!(enrolled["required_roles"][0]["state"], "fresh");
+    assert_eq!(enrolled["sources"].as_array().unwrap().len(), 2);
+    assert_ne!(
+        enrolled["sources"][0]["source_id"],
+        enrolled["sources"][1]["source_id"]
+    );
+}
+
+#[test]
+fn legacy_health_is_observable_but_cannot_satisfy_explicit_role() {
+    let db_path = temp_path("legacy-role.sqlite");
+    let config = config(temp_path("legacy-role.sock"), vec![1_234]);
+    let health = IngestionHealth::with_required_roles(vec![ProducerRole::Gateway]);
+    health.record_listener_started();
+    let legacy = health_report(1, None, None);
+    let ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&legacy).unwrap()),
+        &health,
+    );
+    assert!(ack.contains(r#""status":"health_recorded""#), "{ack}");
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["state"], "degraded");
+    assert_eq!(status["sources"][0]["runtime_role"], "legacy");
+    assert_eq!(status["required_roles"][0]["state"], "absent");
+}
+
+#[test]
+fn heartbeat_and_hook_event_freshness_are_separate_and_required_role_stales() {
+    let db_path = temp_path("freshness.sqlite");
+    let config = config(temp_path("freshness.sock"), vec![1_234]);
+    let health = IngestionHealth::with_required_roles(vec![ProducerRole::Gateway]);
+    health.record_listener_started();
+    let gateway = health_report(2, Some("gateway"), Some("gate-a1"));
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&gateway).unwrap()),
+        &health,
+    );
+    let fresh = health.status_json(Duration::from_secs(30));
+    assert_eq!(fresh["transport_heartbeat_state"], "fresh");
+    assert_eq!(fresh["hook_event_state"], "not_observed");
+    assert!(fresh["last_event_received_at_unix_ms"].is_null());
+    thread::sleep(Duration::from_millis(2));
+    let stale = health.status_json(Duration::ZERO);
+    assert_eq!(stale["state"], "degraded");
+    assert_eq!(stale["required_roles"][0]["state"], "stale");
+    assert_eq!(stale["transport_heartbeat_state"], "stale");
+    assert_eq!(stale["hook_event_state"], "not_observed");
+}
+
+#[test]
+fn hostile_v2_attribution_is_rejected_and_instance_replacement_is_bounded() {
+    let db_path = temp_path("v2-bounds.sqlite");
+    let config = config(temp_path("v2-bounds.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    for invalid in [
+        health_report(2, Some("gateway/../../secret"), Some("gate-a1")),
+        health_report(2, Some("gateway"), Some("/proc/self/cmdline")),
+        health_report(2, Some("other"), Some("safe-a1")),
+    ] {
+        let ack = exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&invalid).unwrap()),
+            &health,
+        );
+        assert!(ack.contains(r#""reason":"invalid_health""#), "{ack}");
+    }
+    for instance in ["gate-old", "gate-new"] {
+        let report = health_report(2, Some("gateway"), Some(instance));
+        exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&report).unwrap()),
+            &health,
+        );
+    }
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(status["sources"][0]["instance_id"], "gate-new");
+    assert!(!status.to_string().contains("cmdline"));
+}
+
+#[test]
+fn source_cap_rejects_new_sources_but_allows_instance_replacement() {
+    let db_path = temp_path("source-cap.sqlite");
+    let config = config(temp_path("source-cap.sock"), (1_000..1_070).collect());
+    let health = IngestionHealth::default();
+    for uid in 1_000..1_064 {
+        let report = health_report(2, Some("worker"), Some("worker-a1"));
+        let ack = exchange_with_health(
+            uid,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&report).unwrap()),
+            &health,
+        );
+        assert!(ack.contains(r#""status":"health_recorded""#), "{ack}");
+    }
+    let overflow = health_report(2, Some("gateway"), Some("gate-overflow"));
+    let rejected = exchange_with_health(
+        1_069,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&overflow).unwrap()),
+        &health,
+    );
+    assert!(
+        rejected.contains(r#""reason":"source_capacity""#),
+        "{rejected}"
+    );
+    let replacement = health_report(2, Some("worker"), Some("worker-a2"));
+    let accepted = exchange_with_health(
+        1_000,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&replacement).unwrap()),
+        &health,
+    );
+    assert!(
+        accepted.contains(r#""status":"health_recorded""#),
+        "{accepted}"
+    );
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["sources"].as_array().unwrap().len(), 64);
+    assert_eq!(status["sources"][0]["instance_id"], "worker-a2");
+}
+
+#[test]
+fn runtime_health_resets_while_persisted_store_survives_restart() {
+    let db_path = temp_path("restart-health.sqlite");
+    drop(LocalStore::open(&db_path).expect("store initializes"));
+    let config = config(temp_path("restart-health.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    let mut event: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).unwrap();
+    event["event_id"] = serde_json::json!("evt_restart_health");
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&event).unwrap()),
+        &health,
+    );
+    assert_eq!(health.snapshot().events_persisted_total, 1);
+    let restarted = IngestionHealth::default();
+    assert_eq!(restarted.snapshot().events_persisted_total, 0);
+    assert!(
+        restarted.status_json(Duration::from_secs(30))["last_event_committed_at_unix_ms"].is_null()
+    );
+    assert!(LocalStore::open_read_only(&db_path)
+        .unwrap()
+        .get_event("evt_restart_health")
+        .unwrap()
+        .is_some());
+    let _ = fs::remove_file(db_path);
 }
 
 #[test]

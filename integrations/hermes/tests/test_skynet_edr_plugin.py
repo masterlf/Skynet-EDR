@@ -168,7 +168,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_HERMES_PLUGIN_ENABLED", None)
         os.environ.pop("SKYNET_EDR_FALLBACK_MAX_BYTES", None)
         os.environ.pop("SKYNET_EDR_CHECKPOINT_PATH", None)
-        os.environ.pop("SKYNET_EDR_INGEST_SOCKET", None)
+        os.environ["SKYNET_EDR_INGEST_SOCKET"] = str(self.state_dir / "missing-ingest.sock")
         self.plugin = load_plugin()
         logger = logging.getLogger("skynet_edr_hermes_plugin")
         for handler in list(logger.handlers):
@@ -323,6 +323,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         body = json.loads(fake.sent[4:])
         self.assertEqual(declared, len(fake.sent) - 4)
         self.assertEqual(body["message_type"], "producer_health")
+        self.assertEqual(body["version"], 2)
+        self.assertIn(body["runtime_role"], {"gateway", "dashboard", "worker", "unknown"})
+        self.assertRegex(body["instance_id"], r"^[a-z0-9][a-z0-9-]{0,63}$")
         self.assertEqual(body["checkpoint_bytes"], 4)
         self.assertEqual(body["backlog_bytes"], fallback.stat().st_size - 4)
         self.assertEqual(body["transport_state"], "degraded")
@@ -340,6 +343,35 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(recovered_body["backlog_bytes"], 0)
         self.assertEqual(recovered_body["transport_state"], "available")
         self.assertEqual(recovered_body["events_dropped_total"], 2)
+
+    def test_runtime_role_derivation_is_allowlisted_and_hostile_overrides_fall_back(self):
+        cases = {
+            "gateway": "gateway",
+            "dashboard": "dashboard",
+            "worker": "worker",
+            "unknown": "unknown",
+            "../../root/secret": "unknown",
+            "GATEWAY": "unknown",
+            "gateway-command --token=fake": "unknown",
+        }
+        for configured, expected in cases.items():
+            with self.subTest(configured=configured), patch.dict(
+                os.environ, {"HERMES_RUNTIME_ROLE": configured}, clear=False
+            ):
+                self.assertEqual(self.plugin._runtime_role(), expected)
+
+    def test_runtime_instance_override_is_bounded_and_never_uses_paths(self):
+        with patch.dict(
+            os.environ, {"SKYNET_EDR_RUNTIME_INSTANCE": "gateway-blue-01"}, clear=False
+        ):
+            self.assertEqual(self.plugin._runtime_instance_id(), "gateway-blue-01")
+        for hostile in ["/proc/self/cmdline", "x" * 65, "UPPER", "a b", "../secret"]:
+            with self.subTest(hostile=hostile), patch.dict(
+                os.environ, {"SKYNET_EDR_RUNTIME_INSTANCE": hostile}, clear=False
+            ):
+                instance = self.plugin._runtime_instance_id()
+                self.assertRegex(instance, r"^[a-z0-9][a-z0-9-]{0,63}$")
+                self.assertNotIn(hostile, instance)
 
     def test_fallback_state_lock_serializes_processes(self):
         context = multiprocessing.get_context("spawn")

@@ -65,4 +65,8 @@ else
   echo "If Hermes uses opt-in plugins, enable it with: hermes plugins enable skynet-edr"
 fi
 
-echo "Restart Hermes sessions after installation so hooks are loaded."
+echo "Plugin bytes are installed, but that does not prove a running Hermes process loaded them."
+echo "This installer does not restart the current process or any Hermes service."
+echo "Restart each reviewed gateway/dashboard service in an approved window, then verify:"
+echo "  curl --fail --silent http://127.0.0.1:8787/api/status"
+echo "Confirm the expected runtime_role is fresh and its instance_id changed after restart."
