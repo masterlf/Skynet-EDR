@@ -70,6 +70,7 @@ skynet-edr incidents export --db ./skynet-edr.sqlite --format jsonl
 ## Security assumptions
 
 - Redaction happens before storage; local storage does not attempt UI-side masking after secrets have already landed.
+- Before redaction or a write transaction, local storage iteratively validates every object key in each event's complete `attributes` tree, including objects inside arrays. Unsafe keys, more than 64 nested containers, or more than 4,114 total object-key/array-item units reject the whole event or incident without partial persistence. The extra 18 units above the 4,096-unit canonical input limit are reserved for canonical-to-storage projection's fixed typed metadata.
 - Stored payloads preserve complete typed JSON for auditability while duplicating a few indexed fields for efficient local queries.
 - JSONL export writes one complete incident per line so downstream tools can process records incrementally.
 - The MVP fails loudly on malformed JSON, missing options, unsupported export formats, or unknown commands.

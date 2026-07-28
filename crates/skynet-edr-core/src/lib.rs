@@ -18,6 +18,11 @@ use sha2::{Digest, Sha256};
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const LOCAL_STORE_SCHEMA_VERSION: i64 = 1;
 const MAX_CANONICAL_ATTRIBUTE_KEY_BYTES: usize = 128;
+const MAX_JSON_ATTRIBUTE_CONTAINER_DEPTH: usize = 64;
+const MAX_JSON_ATTRIBUTE_TREE_UNITS: usize = 4_096;
+// Canonical-to-storage projection adds at most six synthetic top-level fields and
+// twelve fixed typed child fields (provenance plus artifact).
+const MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS: usize = MAX_JSON_ATTRIBUTE_TREE_UNITS + 18;
 const SYNTHETIC_CANONICAL_ATTRIBUTES: [&str; 6] = [
     "schema_version",
     "event_type",
@@ -520,9 +525,13 @@ impl CanonicalEventEnvelope {
                 "redaction metadata is inconsistent with redacted_fields".to_owned(),
             ));
         }
-        for key in self.attributes.keys() {
-            validate_canonical_attribute_key(key)?;
-        }
+        validate_json_attribute_tree(&self.attributes, MAX_JSON_ATTRIBUTE_TREE_UNITS).map_err(
+            |()| {
+                CanonicalEventError::Validation(
+                    "canonical attributes contain unsafe or unbounded JSON object keys".to_owned(),
+                )
+            },
+        )?;
         let mut redacted_paths = BTreeSet::new();
         for field in &self.redaction.redacted_fields {
             if !redacted_paths.insert(field.path.as_str()) {
@@ -632,6 +641,61 @@ fn validate_canonical_attribute_key(key: &str) -> Result<(), CanonicalEventError
             "canonical attribute keys must not contain sensitive content".to_owned(),
         ));
     }
+    Ok(())
+}
+
+fn validate_json_attribute_tree(
+    attributes: &BTreeMap<String, serde_json::Value>,
+    max_tree_units: usize,
+) -> Result<(), ()> {
+    let mut visited_units = attributes.len();
+    if visited_units > max_tree_units {
+        return Err(());
+    }
+
+    let mut pending = Vec::with_capacity(attributes.len().min(MAX_JSON_ATTRIBUTE_TREE_UNITS));
+    for (key, value) in attributes {
+        validate_canonical_attribute_key(key).map_err(|_| ())?;
+        pending.push((value, 0_usize));
+    }
+
+    while let Some((value, parent_container_depth)) = pending.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                let depth = parent_container_depth.checked_add(1).ok_or(())?;
+                if depth > MAX_JSON_ATTRIBUTE_CONTAINER_DEPTH {
+                    return Err(());
+                }
+                visited_units = visited_units.checked_add(object.len()).ok_or(())?;
+                if visited_units > max_tree_units {
+                    return Err(());
+                }
+                for (key, child) in object {
+                    validate_canonical_attribute_key(key).map_err(|_| ())?;
+                    if is_sensitive_key(key) {
+                        return Err(());
+                    }
+                    pending.push((child, depth));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                let depth = parent_container_depth.checked_add(1).ok_or(())?;
+                if depth > MAX_JSON_ATTRIBUTE_CONTAINER_DEPTH {
+                    return Err(());
+                }
+                visited_units = visited_units.checked_add(items.len()).ok_or(())?;
+                if visited_units > max_tree_units {
+                    return Err(());
+                }
+                pending.extend(items.iter().map(|item| (item, depth)));
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+
     Ok(())
 }
 
@@ -2663,8 +2727,7 @@ const SECRET_EGRESS_ATTACK_SIM_TRACE_JSON: &str = r#"[
     "file_accesses": [
       {
         "operation": "read",
-        "path": "/home/attack-sim/.skynet/fake-secret.env",
-        "secret_label": "FAKE_SKYNET_ATTACK_SIM_SECRET_DO_NOT_EXPOSE"
+        "path": "/home/attack-sim/.skynet/fake-secret.env"
       }
     ]
   },
@@ -3358,6 +3421,8 @@ pub enum StorageError {
     Io(std::io::Error),
     /// Existing database header indicates a non-rollback journal mode read-only paths reject.
     UnsupportedReadOnlyJournalMode,
+    /// Event attributes contain unsafe object keys or exceed traversal bounds.
+    UnsafeOrUnboundedAttributes,
     /// A fast writable connection found a database that startup has not migrated.
     SchemaVersionMismatch {
         /// Schema version required by this binary.
@@ -3384,6 +3449,12 @@ impl std::fmt::Display for StorageError {
                 formatter,
                 "unsupported SQLite journal mode for read-only local store"
             ),
+            Self::UnsafeOrUnboundedAttributes => {
+                write!(
+                    formatter,
+                    "local storage rejected unsafe or unbounded JSON attributes"
+                )
+            }
             Self::SchemaVersionMismatch { expected, actual } => write!(
                 formatter,
                 "local store schema version mismatch: expected {expected}, found {actual}"
@@ -4457,9 +4528,11 @@ impl LocalStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError`] when JSON serialization or `SQLite` persistence
-    /// fails.
+    /// Returns [`StorageError`] when the complete attribute tree contains an unsafe
+    /// object key, exceeds traversal bounds, or JSON/`SQLite` persistence fails.
     pub fn insert_event(&self, event: &Event) -> StorageResult<()> {
+        validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+            .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
         let event = sanitize_event_for_storage(event);
         insert_event_on_connection(&self.connection, &event)
     }
@@ -4468,9 +4541,14 @@ impl LocalStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError`] when embedded event persistence, JSON
-    /// serialization, or `SQLite` persistence fails.
+    /// Returns [`StorageError`] before the transaction when any embedded event's
+    /// complete attribute tree contains an unsafe object key or exceeds traversal
+    /// bounds, or when JSON/`SQLite` persistence fails.
     pub fn insert_incident(&self, incident: &Incident) -> StorageResult<()> {
+        for event in &incident.events {
+            validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+                .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
+        }
         let incident = sanitize_incident_for_storage(incident);
         let transaction = self.connection.unchecked_transaction()?;
         for event in &incident.events {
@@ -5697,8 +5775,11 @@ fn redact_text_field(text: &str, path: &str, fields: &mut Vec<RedactedField>) ->
 ///
 /// # Errors
 ///
-/// Returns [`StorageError`] when JSON serialization or file append fails.
+/// Returns [`StorageError`] when the complete attribute tree contains an unsafe
+/// object key, exceeds traversal bounds, or JSON serialization/file append fails.
 pub fn append_event_jsonl(path: impl AsRef<Path>, event: &Event) -> StorageResult<()> {
+    validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+        .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
     let event = sanitize_event_for_storage(event);
     append_jsonl(path, &event)
 }
@@ -5707,8 +5788,14 @@ pub fn append_event_jsonl(path: impl AsRef<Path>, event: &Event) -> StorageResul
 ///
 /// # Errors
 ///
-/// Returns [`StorageError`] when JSON serialization or file append fails.
+/// Returns [`StorageError`] when an embedded event's complete attribute tree
+/// contains an unsafe object key, exceeds traversal bounds, or JSON
+/// serialization/file append fails.
 pub fn append_incident_jsonl(path: impl AsRef<Path>, incident: &Incident) -> StorageResult<()> {
+    for event in &incident.events {
+        validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+            .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
+    }
     let incident = sanitize_incident_for_storage(incident);
     append_jsonl(path, &incident)
 }
