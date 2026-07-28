@@ -848,10 +848,12 @@ def _session_attributes(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[s
 
 def _estimate_message_count(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int | None:
     for value in list(args) + list(kwargs.values()):
-        if isinstance(value, list):
+        if type(value) is list:
             return len(value)
-        if isinstance(value, dict) and isinstance(value.get("messages"), list):
-            return len(value["messages"])
+        if type(value) is dict:
+            messages = value.get("messages")
+            if type(messages) is list:
+                return len(messages)
     return None
 
 
@@ -870,10 +872,10 @@ def _extract_tool_call(
         tool_name = args[0]
     if params is None and len(args) > 1:
         params = args[1]
-    valid_name = isinstance(tool_name, str) and bool(
+    valid_name = type(tool_name) is str and bool(
         re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", tool_name)
     )
-    safe_name: str = tool_name if isinstance(tool_name, str) and valid_name else _INVALID_TOOL_NAME
+    safe_name: str = tool_name if type(tool_name) is str and valid_name else _INVALID_TOOL_NAME
     return (
         safe_name,
         params if params is not None else {},
@@ -962,41 +964,42 @@ def _bounded_selected_text(
         if depth > _CLASSIFICATION_MAX_DEPTH:
             truncated = True
             return
-        if isinstance(node, dict):
+        node_type = type(node)
+        if node_type is dict:
             if not register_container(node):
                 return
             for key, child in node.items():
                 if not consume_item():
                     return
-                if not isinstance(key, str) or len(key) > 64:
+                if type(key) is not str or len(key) > 64:
                     truncated = True
                     continue
-                child_depth = depth + 1 if isinstance(child, (dict, list, tuple)) else depth
+                child_depth = depth + 1 if type(child) in (dict, list, tuple) else depth
                 walk(child, child_depth, selected or key in selected_keys)
                 if hard_stop:
                     return
             return
-        if isinstance(node, (list, tuple)):
+        if node_type in (list, tuple):
             if not register_container(node):
                 return
             for child in node:
                 if not consume_item():
                     return
-                child_depth = depth + 1 if isinstance(child, (dict, list, tuple)) else depth
+                child_depth = depth + 1 if type(child) in (dict, list, tuple) else depth
                 walk(child, child_depth, selected)
                 if hard_stop:
                     return
             return
-        if isinstance(node, str):
+        if node_type is str:
             if selected:
                 examine_string(node)
             return
-        if node is None or isinstance(node, (bool, int)):
+        if node is None or node_type in (bool, int):
             return
         truncated = True
 
     try:
-        scalar_root = not isinstance(value, (dict, list, tuple))
+        scalar_root = type(value) not in (dict, list, tuple)
         walk(value, 0, root_selected and scalar_root)
     except (AttributeError, RuntimeError, TypeError, ValueError):
         truncated = True
@@ -1103,10 +1106,10 @@ def _locator_hash(kind: str, selected_strings: tuple[str, ...]) -> str | None:
 
 def _safe_url_locator(params: Any, params_text: str) -> str | None:
     candidates: list[str] = []
-    if isinstance(params, dict):
+    if type(params) is dict:
         for key in ("url", "uri"):
             value = params.get(key)
-            if isinstance(value, str):
+            if type(value) is str:
                 candidates.append(value)
     candidates.extend(_URL_RE.findall(params_text))
     for candidate in candidates:
@@ -1253,10 +1256,10 @@ def _remove_last_path_segment(path: str) -> str:
 
 def _safe_git_locator(params: Any, params_text: str) -> str | None:
     candidates: list[str] = []
-    if isinstance(params, dict):
+    if type(params) is dict:
         for key in ("repository", "repo", "remote", "url"):
             value = params.get(key)
-            if isinstance(value, str):
+            if type(value) is str:
                 candidates.append(value)
     candidates.extend(_GITHUB_FALLBACK_RE.findall(params_text))
     for candidate in candidates:

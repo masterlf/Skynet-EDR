@@ -233,6 +233,17 @@ fn late_event_correlates_incrementally_inside_derived_window() {
     assert_eq!(result.max_rule_window_ms, 60_000);
     assert_eq!(result.opened_incidents, 1);
     assert_eq!(store.count_incidents().expect("incident count"), 1);
+    assert_eq!(
+        store
+            .list_incidents()
+            .expect("incident list")
+            .into_iter()
+            .next()
+            .expect("continuous sequence incident")
+            .id
+            .as_str(),
+        "inc:EDR-PI-001:7495016ca4679c8198690557f3efc99c9d15a6f5afecf7b9dd4c634fa226b293"
+    );
     assert!(result.candidate_events <= 2);
 
     let _ = fs::remove_file(db_path);

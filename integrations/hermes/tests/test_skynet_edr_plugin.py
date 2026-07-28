@@ -856,6 +856,29 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             self.assertFalse(event["attributes"]["sensitive_access"])
 
     def test_giant_nested_params_are_bounded_and_content_omitted(self):
+        touched = []
+
+        class HostileDict(dict):
+            def items(self):
+                touched.append("dict.items")
+                raise AssertionError("hostile dict.items executed")
+
+            def get(self, *_args, **_kwargs):
+                touched.append("dict.get")
+                raise AssertionError("hostile dict.get executed")
+
+            def __iter__(self):
+                touched.append("dict.__iter__")
+                raise AssertionError("hostile dict.__iter__ executed")
+
+            def __len__(self):
+                touched.append("dict.__len__")
+                raise AssertionError("hostile dict.__len__ executed")
+
+            def __str__(self):
+                touched.append("dict.__str__")
+                return "FAKE_HOSTILE_DICT_PARAMS_35"
+
         ctx = FakeContext()
         self.plugin.register(ctx)
         cases = [
@@ -868,11 +891,12 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             {"path": ["A" * 4096] * 4},
             {"path": ["A" * 4096] * 4 + ["B"]},
             {"Path": "FAKE_UNSELECTED_KEY", "path": "FAKE_SELECTED_KEY"},
+            {"path": HostileDict(path="FAKE_HOSTILE_DICT_PARAMS_35")},
         ]
         for params in cases:
             ctx.hooks["pre_tool_call"]("read_file", params)
         events = self.read_events()[-len(cases):]
-        expected_truncation = [False, True, False, True, False, True, False, True, False]
+        expected_truncation = [False, True, False, True, False, True, False, True, False, True]
         self.assertEqual([event["attributes"]["classification_truncated"] for event in events], expected_truncation)
         self.assertEqual(events[0]["attributes"]["params_examined_chars"], 4096)
         self.assertEqual(events[4]["attributes"]["params_examined_chars"], 4096)
@@ -880,11 +904,70 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(events[6]["attributes"]["params_examined_chars"], 16384)
         self.assertEqual(events[7]["attributes"]["params_examined_chars"], 16384)
         serialized = json.dumps(events)
-        for forbidden in ["FAKE_DEPTH_5", "FAKE_UNSELECTED_KEY", "FAKE_SELECTED_KEY"]:
+        for forbidden in [
+            "FAKE_DEPTH_5",
+            "FAKE_UNSELECTED_KEY",
+            "FAKE_SELECTED_KEY",
+            "FAKE_HOSTILE_DICT_PARAMS_35",
+        ]:
             self.assertNotIn(forbidden, serialized)
+        self.assertEqual(touched, [])
         self.assertTrue(all(event["attributes"]["params_preview"] == "[OMITTED:tool_params]" for event in events))
+        for path in [
+            self.state_dir / "events-v1.jsonl",
+            self.state_dir / "skynet-edr-plugin.log",
+        ]:
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            self.assertNotIn("FAKE_HOSTILE_DICT_PARAMS_35", text)
+        self.assertTrue(
+            all("FAKE_HOSTILE_DICT_PARAMS_35" not in event["title"] for event in events)
+        )
 
     def test_recursive_params_fail_safely_without_hook_escape(self):
+        touched = []
+
+        class HostileList(list):
+            def items(self):
+                touched.append("list.items")
+                raise AssertionError("hostile list.items executed")
+
+            def get(self, *_args, **_kwargs):
+                touched.append("list.get")
+                raise AssertionError("hostile list.get executed")
+
+            def __iter__(self):
+                touched.append("list.__iter__")
+                raise AssertionError("hostile list.__iter__ executed")
+
+            def __len__(self):
+                touched.append("list.__len__")
+                raise AssertionError("hostile list.__len__ executed")
+
+            def __str__(self):
+                touched.append("list.__str__")
+                return "FAKE_HOSTILE_LIST_PARAMS_36"
+
+        class HostileTuple(tuple):
+            def items(self):
+                touched.append("tuple.items")
+                raise AssertionError("hostile tuple.items executed")
+
+            def get(self, *_args, **_kwargs):
+                touched.append("tuple.get")
+                raise AssertionError("hostile tuple.get executed")
+
+            def __iter__(self):
+                touched.append("tuple.__iter__")
+                raise AssertionError("hostile tuple.__iter__ executed")
+
+            def __len__(self):
+                touched.append("tuple.__len__")
+                raise AssertionError("hostile tuple.__len__ executed")
+
+            def __str__(self):
+                touched.append("tuple.__str__")
+                return "FAKE_HOSTILE_TUPLE_PARAMS_36"
+
         ctx = FakeContext()
         self.plugin.register(ctx)
         recursive = {}
@@ -893,11 +976,44 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         params = {"path": [alias, alias], "unsupported": {"FAKE_SET"}}
         self.assertIsNone(ctx.hooks["pre_tool_call"]("read_file", recursive))
         self.assertIsNone(ctx.hooks["pre_tool_call"]("terminal", params))
-        recursive_event, alias_event = self.read_events()[-2:]
+        self.assertIsNone(
+            ctx.hooks["pre_tool_call"](
+                "read_file", HostileList(["FAKE_HOSTILE_LIST_PARAMS_36"])
+            )
+        )
+        self.assertIsNone(
+            ctx.hooks["pre_tool_call"](
+                "read_file", HostileTuple(("FAKE_HOSTILE_TUPLE_PARAMS_36",))
+            )
+        )
+        recursive_event, alias_event, hostile_list_event, hostile_tuple_event = self.read_events()[-4:]
         self.assertTrue(recursive_event["attributes"]["classification_truncated"])
         self.assertTrue(alias_event["attributes"]["classification_truncated"])
         self.assertNotIn("FAKE_ALIAS", json.dumps([recursive_event, alias_event]))
         self.assertNotIn("FAKE_SET", json.dumps([recursive_event, alias_event]))
+        self.assertTrue(hostile_list_event["attributes"]["classification_truncated"])
+        self.assertTrue(hostile_tuple_event["attributes"]["classification_truncated"])
+        serialized = json.dumps([hostile_list_event, hostile_tuple_event])
+        self.assertNotIn("FAKE_HOSTILE_LIST_PARAMS_36", serialized)
+        self.assertNotIn("FAKE_HOSTILE_TUPLE_PARAMS_36", serialized)
+        self.assertEqual(touched, [])
+        for path in [
+            self.state_dir / "events-v1.jsonl",
+            self.state_dir / "skynet-edr-plugin.log",
+        ]:
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            self.assertNotIn("FAKE_HOSTILE_LIST_PARAMS_36", text)
+            self.assertNotIn("FAKE_HOSTILE_TUPLE_PARAMS_36", text)
+        self.assertTrue(
+            all(
+                marker not in event["title"]
+                for marker in [
+                    "FAKE_HOSTILE_LIST_PARAMS_36",
+                    "FAKE_HOSTILE_TUPLE_PARAMS_36",
+                ]
+                for event in [hostile_list_event, hostile_tuple_event]
+            )
+        )
 
     def test_secret_bearing_params_never_reach_event_spool_log_or_title(self):
         class HostileString:
@@ -912,12 +1028,41 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             def __str__(self):
                 return "FAKE_HOSTILE_EXCEPTION_SECRET_37"
 
+        touched = []
+
+        class HostileMessages(dict):
+            def items(self):
+                touched.append("messages.items")
+                raise AssertionError("hostile messages.items executed")
+
+            def get(self, *_args, **_kwargs):
+                touched.append("messages.get")
+                raise AssertionError("hostile messages.get executed")
+
+            def __iter__(self):
+                touched.append("messages.__iter__")
+                raise AssertionError("hostile messages.__iter__ executed")
+
+            def __len__(self):
+                touched.append("messages.__len__")
+                raise AssertionError("hostile messages.__len__ executed")
+
+            def __str__(self):
+                touched.append("messages.__str__")
+                return "FAKE_HOSTILE_MESSAGES_37"
+
         ctx = FakeContext()
         self.plugin.register(ctx)
         hostile = HostileString()
         ctx.hooks["pre_tool_call"](hostile, {"command": "token=FAKE_SECRET_37 /tmp/FAKE_PATH_37", "custom": hostile})
         ctx.hooks["pre_tool_call"](
             "terminal", {"command": "token=", "path": "FAKE_SPLIT_SCALAR_37"}
+        )
+        split_scalar_event = self.read_events()[-1]
+        self.assertIsNone(
+            ctx.hooks["pre_llm_call"](
+                HostileMessages(messages=["FAKE_HOSTILE_MESSAGES_37"])
+            )
         )
 
         def hostile_handler(*_args, **_kwargs):
@@ -928,9 +1073,11 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                 "FAKE_HOSTILE_ARG_SECRET_37", raw="FAKE_HOSTILE_KWARG_SECRET_37"
             )
         )
-        split_scalar_event = self.read_events()[-1]
+        pre_llm_event = self.read_events()[-1]
         self.assertFalse(split_scalar_event["attributes"]["sensitive_access"])
+        self.assertNotIn("message_count", pre_llm_event["attributes"])
         self.assertFalse(hostile.called)
+        self.assertEqual(touched, [])
         for path in [self.state_dir / "events-v1.jsonl", self.state_dir / "skynet-edr-plugin.log"]:
             text = path.read_text(encoding="utf-8") if path.exists() else ""
             for forbidden in [
@@ -941,6 +1088,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                 "FAKE_HOSTILE_EXCEPTION_ARG_SECRET_37",
                 "FAKE_HOSTILE_ARG_SECRET_37",
                 "FAKE_HOSTILE_KWARG_SECRET_37",
+                "FAKE_HOSTILE_MESSAGES_37",
                 "Traceback",
                 "HostileException",
             ]:
@@ -956,6 +1104,29 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             def __str__(self):
                 self.called = True
                 return "FAKE_HOSTILE_RESULT_STR_38"
+
+        touched = []
+
+        class HostileResultTuple(tuple):
+            def items(self):
+                touched.append("result.items")
+                raise AssertionError("hostile result.items executed")
+
+            def get(self, *_args, **_kwargs):
+                touched.append("result.get")
+                raise AssertionError("hostile result.get executed")
+
+            def __iter__(self):
+                touched.append("result.__iter__")
+                raise AssertionError("hostile result.__iter__ executed")
+
+            def __len__(self):
+                touched.append("result.__len__")
+                raise AssertionError("hostile result.__len__ executed")
+
+            def __str__(self):
+                touched.append("result.__str__")
+                return "FAKE_HOSTILE_RESULT_TUPLE_38"
 
         ctx = FakeContext()
         self.plugin.register(ctx)
@@ -988,6 +1159,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         hostile = HostileResult()
         unsupported = emit({"output": {"FAKE_UNSUPPORTED_RESULT_38"}})
         hostile_event = emit({"output": hostile})
+        hostile_tuple_event = emit(
+            {"output": HostileResultTuple((raw_marker, "FAKE_HOSTILE_RESULT_TUPLE_38"))}
+        )
 
         self.assertFalse(depth4["attributes"]["classification_truncated"])
         self.assertTrue(depth4["attributes"]["malware_indicator"])
@@ -1012,7 +1186,10 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertTrue(alias["attributes"]["malware_indicator"])
         self.assertTrue(unsupported["attributes"]["classification_truncated"])
         self.assertTrue(hostile_event["attributes"]["classification_truncated"])
+        self.assertTrue(hostile_tuple_event["attributes"]["classification_truncated"])
+        self.assertFalse(hostile_tuple_event["attributes"]["malware_indicator"])
         self.assertFalse(hostile.called)
+        self.assertEqual(touched, [])
 
         selected_events = [emit({key: raw_marker}) for key in sorted(self.plugin._RESULT_CLASSIFICATION_KEYS)]
         nonselected_events = [emit({key: raw_marker}) for key in ["Output", "ignored", "results"]]
@@ -1062,6 +1239,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                 "FAKE_IGNORED_RESULT_38",
                 "FAKE_UNSUPPORTED_RESULT_38",
                 "FAKE_HOSTILE_RESULT_STR_38",
+                "FAKE_HOSTILE_RESULT_TUPLE_38",
                 "FAKE_38",
             ]:
                 self.assertNotIn(forbidden, serialized)

@@ -330,7 +330,11 @@ fn live_spool_ingestion_opens_built_in_incident_for_cross_line_trace_sequence_on
     let incidents = store.list_incidents().expect("incident list succeeds");
     assert_eq!(incidents.len(), 1);
     assert_eq!(incidents[0].severity, Severity::High);
-    assert!(incidents[0].id.as_str().starts_with("inc:EDR-PI-001:"));
+    assert_eq!(
+        incidents[0].id.as_str(),
+        "inc:EDR-PI-001:5cd736acf18e1222",
+        "generic spool sequence incident IDs remain compatible"
+    );
     assert!(!incidents[0].id.as_str().contains("evt_spool_pi"));
     assert!(!incidents[0].id.as_str().contains("evt_spool_terminal"));
     assert!(!incidents[0].title.contains("trace_spool_sensitive"));

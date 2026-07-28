@@ -885,6 +885,31 @@ fn sequence_incident_id(sequence_match: &SequenceMatch) -> String {
     format!("inc:{}:{digest:016x}", sequence_match.rule_id)
 }
 
+fn continuous_sequence_match_incident(
+    sequence_match: &SequenceMatch,
+    stored_events: &[Event],
+) -> Incident {
+    let mut incident = sequence_match_incident(sequence_match, stored_events);
+    incident.id = IncidentId::new(continuous_sequence_incident_id(sequence_match));
+    incident
+}
+
+fn continuous_sequence_incident_id(sequence_match: &SequenceMatch) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"skynet-edr-continuous-sequence-incident-v1\0");
+    hasher.update(sequence_match.rule_id.as_bytes());
+    hasher.update(b"\0");
+    for event_id in &sequence_match.matched_event_ids {
+        hasher.update(event_id.as_str().as_bytes());
+        hasher.update(b"\0");
+    }
+    format!(
+        "inc:{}:{}",
+        sequence_match.rule_id,
+        hex_digest(hasher.finalize().as_slice())
+    )
+}
+
 fn sequence_incident_digest(sequence_match: &SequenceMatch) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -4439,7 +4464,7 @@ impl LocalStore {
             );
         }
         for sequence_match in matches {
-            let incident = sanitize_incident_for_storage(&sequence_match_incident(
+            let incident = sanitize_incident_for_storage(&continuous_sequence_match_incident(
                 &sequence_match,
                 &stored_events,
             ));
