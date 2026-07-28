@@ -22,7 +22,7 @@ Detection rules may use:
 
 ## Implemented engines
 
-- The explicit `events ingest-hermes` trace importer runs Hermes-specific correlators for `EDR-EXFIL-001` and `EDR-MALWARE-001`. Those correlators are not currently invoked by AF_UNIX continuous ingestion or canonical JSONL spool ingestion.
+- The authenticated AF_UNIX transaction applies a strict continuous-ingest projection, then runs bounded transactional correlators for `EDR-EXFIL-001` and `EDR-MALWARE-001`. The explicit `events ingest-hermes` trace importer retains its separate normalized-trace correlators; generic canonical parsing and direct sequence evaluation remain unchanged.
 - The canonical sequence engine evaluates ordered canonical events with exact `event_type`, exact `trust_level`, optional `attributes.*` predicates, a fixed time window, deterministic timestamp/event-id ordering, and same-session or same-trace joins.
 - The built-in canonical sequence rule pack covers `EDR-MCP-001`, `EDR-CONFIG-001`, `EDR-CRON-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-SCOPE-001`, and `EDR-PERSIST-001` as passive explainable matches. It does not replace or duplicate the existing `EDR-EXFIL-001` Hermes secret-egress correlator.
 
@@ -40,11 +40,11 @@ Detection rules may use:
 | `EDR-CRON-001` | canonical sequence | **Dark:** plugin emits no `agent.automation.scheduled` event or `persistence_indicator` attribute | **Producer-dependent** | Not evaluated by this importer |
 | `EDR-SCOPE-001` | canonical sequence | **Dark:** plugin emits no `agent.approval.granted` event or `scope_expansion` attribute | **Producer-dependent** | Not evaluated by this importer |
 | `EDR-PERSIST-001` | canonical sequence | **Dark:** plugin emits no `agent.config.changed` event with `persistence_indicator=true` | **Producer-dependent** | Not evaluated by this importer |
-| `EDR-EXFIL-001` | Hermes-specific correlator | **Unsupported on this path:** plugin indicators may be stored, but continuous ingestion does not run this correlator | Not evaluated by canonical spool ingestion | **Implemented and regression-tested** for normalized Hermes secret-access → egress traces |
-| `EDR-MALWARE-001` | Hermes-specific correlator | **Unsupported on this path:** plugin can emit a safe malware-test indicator, but continuous ingestion does not run this correlator | Not evaluated by canonical spool ingestion | **Implemented and regression-tested** for normalized safe test-marker traces |
+| `EDR-EXFIL-001` | bounded continuous correlator / trace importer | **Live, narrow:** exact reviewed sensitive read/enumeration followed by reviewed egress or delivery, same authenticated source and non-empty projected trace/session join, ordered within 60 seconds | Not evaluated by canonical spool ingestion | **Implemented and regression-tested** for normalized Hermes secret-access → egress traces |
+| `EDR-MALWARE-001` | bounded continuous correlator / trace importer | **Live, narrow:** exact reviewed omitted-result, tool-output, MCP-source, indicator, and allowlisted safe-signature conjunction | Not evaluated by canonical spool ingestion | **Implemented and regression-tested** for normalized safe test-marker traces |
 | `EDR-SECRET-001` | roadmap candidate only | **Unsupported:** no standalone shipped correlator | Unsupported | Unsupported |
 
-Live rows still depend on event ordering within 60 seconds, the same trace, exact typed attributes, successful durable ingestion, and a non-truncated correlation candidate set. The plugin's network classifier does not fully cover IPv6, indirect SDK/Python/cloud-client egress, `scp`, `rsync`, `ftp://`, or `s3://`; absence of a match is not proof of safety. See [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md#detection-limits) and [continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
+Live rows still depend on producer-asserted timestamps and joins, exact typed attributes, successful durable ingestion, and a non-truncated correlation candidate set. EXFIL uses deterministic `(observed_at_unix_ms,event_id)` ordering and trace-before-session precedence; equal timestamps are ordered by event ID. The plugin's network classifier does not fully cover IPv6, indirect SDK/Python/cloud-client egress, `scp`, `rsync`, `ftp://`, or `s3://`; absence of a match is not proof of safety. Passive detection reports evidence but does not prevent an action. See [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md#detection-limits) and [continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
 
 ## Rule families
 

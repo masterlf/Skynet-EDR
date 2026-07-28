@@ -40,6 +40,17 @@ DEFAULT_FALLBACK_MAX_BYTES = 64 * 1024 * 1024
 MAX_FALLBACK_MAX_BYTES = 256 * 1024 * 1024
 MAX_INGEST_FRAME_BYTES = 262_144
 DEFAULT_INGEST_SOCKET = "/run/skynet-edr-ingest/ingest.sock"
+_CLASSIFICATION_MAX_DEPTH = 4
+_CLASSIFICATION_MAX_ITEMS = 64
+_CLASSIFICATION_MAX_SCALAR_BYTES = 4096
+_CLASSIFICATION_MAX_TOTAL_BYTES = 16_384
+_PARAM_CLASSIFICATION_KEYS = frozenset(
+    {"path", "pattern", "query", "command", "url", "uri", "destination", "recipient"}
+)
+_RESULT_CLASSIFICATION_KEYS = frozenset(
+    {"result", "output", "content", "text", "body", "message", "data"}
+)
+_INVALID_TOOL_NAME = "invalid_tool"
 
 _SECRET_RE = re.compile(
     r"(?i)(authorization\s*:\s*bearer\s+\S+|x-api-key\s*[:=]\s*\S+|api[_-]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
@@ -127,8 +138,8 @@ def _safe_hook(handler):
     def wrapper(*args: Any, **kwargs: Any):
         try:
             return handler(*args, **kwargs)
-        except Exception as exc:  # pragma: no cover - deliberately defensive
-            _setup_logging().exception("hook_failed handler=%s error=%s", handler.__name__, exc.__class__.__name__)
+        except Exception:  # pragma: no cover - deliberately defensive
+            _setup_logging().error("hook_failed category=handler_exception")
             return None
 
     return wrapper
@@ -177,26 +188,26 @@ def _pre_llm_call(*args: Any, **kwargs: Any) -> None:
 
 
 def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
-    tool_name, params = _extract_tool_call(args, kwargs)
-    params_text = _safe_json(params)
-    indicators = _classify_tool(tool_name, params_text)
-    artifact = _artifact_for_tool(tool_name, params, params_text, "agent_action")
+    tool_name, params, tool_name_truncated = _extract_tool_call(args, kwargs)
+    classification = _bounded_selected_text(params, _PARAM_CLASSIFICATION_KEYS)
+    classification["truncated"] = classification["truncated"] or tool_name_truncated
+    params_strings = classification["strings"]
+    indicators = _classify_tool(tool_name, params_strings)
+    artifact = _artifact_for_tool(tool_name, params_strings, "agent_action")
     attrs: dict[str, Any] = {
         "hook": "pre_tool_call",
         "tool_name": tool_name,
+        "tool_class": indicators["tool_class"],
+        "access_class": indicators["access_class"],
         "network_indicator": indicators["network_indicator"],
         "direct_ip": indicators["direct_ip"],
         "delivery_indicator": indicators["delivery_indicator"],
         "sensitive_access": indicators["sensitive_access"],
-        "params_length": len(params_text),
+        "params_length": classification["examined_chars"],
+        "params_preview": "[OMITTED:tool_params]",
+        "params_examined_chars": classification["examined_chars"],
+        "classification_truncated": classification["truncated"],
     }
-    replacement = _redaction_replacement(params_text)
-    redacted: list[dict[str, str]] = []
-    if replacement:
-        attrs["params_preview"] = replacement
-        redacted.append(_redacted_field("attributes.params_preview", replacement))
-    else:
-        attrs["params_preview"] = "[OMITTED:tool_params]"
     if indicators["command_class"]:
         attrs["command_class"] = indicators["command_class"]
     if indicators["source_kind"] == "mcp_tool":
@@ -205,6 +216,10 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         event_type = "agent.network.egress"
     else:
         event_type = "agent.tool.requested"
+    redacted_fields: list[dict[str, str]] = []
+    replacement = _redaction_replacement(params_strings)
+    if replacement is not None:
+        redacted_fields.append(_redacted_field("attributes.params_preview", replacement))
     _write_event(
         event_type=event_type,
         source_kind=indicators["source_kind"],
@@ -215,23 +230,36 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         title=f"Hermes tool requested: {tool_name}",
         attributes=attrs,
         artifact=artifact,
-        redacted_fields=redacted,
+        redacted_fields=redacted_fields,
     )
 
 
 def _post_tool_call(*args: Any, **kwargs: Any) -> None:
-    tool_name, params, result = _extract_post_tool_call(args, kwargs)
-    result_text = _stringify(result)
-    params_text = _safe_json(params)
-    indicators = _classify_tool(tool_name, params_text)
-    artifact = _artifact_for_tool(tool_name, params, params_text, "tool_output")
-    malware_signature = _malware_signature(result_text)
-    injection = bool(_PROMPT_INJECTION_RE.search(result_text))
+    tool_name, params, result, tool_name_truncated = _extract_post_tool_call(args, kwargs)
+    params_classification = _bounded_selected_text(params, _PARAM_CLASSIFICATION_KEYS)
+    params_classification["truncated"] = (
+        params_classification["truncated"] or tool_name_truncated
+    )
+    result_classification = _bounded_selected_text(
+        result, _RESULT_CLASSIFICATION_KEYS, root_selected=True
+    )
+    params_strings = params_classification["strings"]
+    result_strings = result_classification["strings"]
+    indicators = _classify_tool(tool_name, params_strings)
+    artifact = _artifact_for_tool(tool_name, params_strings, "tool_output")
+    malware_signature = _malware_signature(result_strings)
+    injection = any(_PROMPT_INJECTION_RE.search(text) for text in result_strings)
     attrs: dict[str, Any] = {
         "hook": "post_tool_call",
         "tool_name": tool_name,
+        "tool_class": indicators["tool_class"],
+        "access_class": indicators["access_class"],
         "result_omitted": True,
-        "result_length": len(result_text),
+        "result_length": result_classification["examined_chars"],
+        "result_examined_chars": result_classification["examined_chars"],
+        "classification_truncated": (
+            params_classification["truncated"] or result_classification["truncated"]
+        ),
         "network_indicator": indicators["network_indicator"],
         "direct_ip": indicators["direct_ip"],
         "delivery_indicator": indicators["delivery_indicator"],
@@ -252,18 +280,20 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
         artifact=artifact,
     )
     if injection:
+        content_artifact = dict(artifact)
+        content_artifact["trust_level"] = "untrusted_content"
         _write_event(
             event_type="agent.content.ingested",
             source_kind="mcp_tool",
             trust_level="untrusted_content",
             severity="medium",
             title="Untrusted Hermes tool output contains prompt-injection instructions",
-            artifact=artifact,
+            artifact=content_artifact,
             attributes={
                 "hook": "post_tool_call",
                 "tool_name": tool_name,
                 "content_omitted": True,
-                "content_length": len(result_text),
+                "content_length": result_classification["examined_chars"],
                 "instruction_authority": False,
                 "contains_instructional_attack": True,
                 "expected_disposition": "treat_as_data",
@@ -825,54 +855,193 @@ def _estimate_message_count(args: tuple[Any, ...], kwargs: dict[str, Any]) -> in
     return None
 
 
-def _extract_tool_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, Any]:
-    tool_name = kwargs.get("tool_name") or kwargs.get("name")
-    params = kwargs.get("params") or kwargs.get("arguments") or kwargs.get("args")
+def _extract_tool_call(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[str, Any, bool]:
+    tool_name = kwargs.get("tool_name")
+    if tool_name is None:
+        tool_name = kwargs.get("name")
+    params = kwargs.get("params")
+    if params is None:
+        params = kwargs.get("arguments")
+    if params is None:
+        params = kwargs.get("args")
     if tool_name is None and args:
         tool_name = args[0]
     if params is None and len(args) > 1:
         params = args[1]
-    return str(tool_name or "unknown_tool"), params if params is not None else {}
+    valid_name = isinstance(tool_name, str) and bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", tool_name)
+    )
+    safe_name: str = tool_name if isinstance(tool_name, str) and valid_name else _INVALID_TOOL_NAME
+    return (
+        safe_name,
+        params if params is not None else {},
+        not valid_name,
+    )
 
 
-def _extract_post_tool_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, Any, Any]:
-    tool_name, params = _extract_tool_call(args, kwargs)
-    result = kwargs.get("result") or kwargs.get("output")
+def _extract_post_tool_call(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[str, Any, Any, bool]:
+    tool_name, params, tool_name_truncated = _extract_tool_call(args, kwargs)
+    result = kwargs.get("result")
+    if result is None:
+        result = kwargs.get("output")
     if result is None and len(args) > 2:
         result = args[2]
-    return tool_name, params, result
+    return tool_name, params, result, tool_name_truncated
 
 
-def _is_delivery_tool(lower_tool_name: str) -> bool:
-    segments = [segment for segment in re.split(r"[.:/]+", lower_tool_name) if segment]
-    return lower_tool_name in _DELIVERY_TOOLS or bool(segments and segments[-1] in _DELIVERY_TOOLS)
+def _is_delivery_tool(tool_name: str) -> bool:
+    return tool_name in _DELIVERY_TOOLS
 
 
-def _classify_tool(tool_name: str, params_text: str) -> dict[str, Any]:
-    lower = tool_name.lower()
-    network = bool(_NETWORK_RE.search(params_text))
-    delivery = _is_delivery_tool(lower)
-    sensitive = bool(_LOCAL_CONTEXT_RE.search(params_text) or _SECRET_RE.search(params_text))
-    if lower in _FILE_TOOLS:
+def _tool_classes(tool_name: str) -> tuple[str, str]:
+    if tool_name == "read_file":
+        return "file_read", "read"
+    if tool_name == "search_files":
+        return "file_enumerate", "enumerate"
+    if tool_name in {"write_file", "patch"}:
+        return "file_mutation", "mutation"
+    if tool_name in _PROCESS_TOOLS:
+        return "process", "none"
+    if tool_name in _DELIVERY_TOOLS:
+        return "delivery", "none"
+    return "mcp", "none"
+
+
+def _bounded_selected_text(
+    value: Any, selected_keys: frozenset[str], *, root_selected: bool = False
+) -> dict[str, Any]:
+    strings: list[str] = []
+    examined = 0
+    visited_items = 0
+    truncated = False
+    hard_stop = False
+    seen: set[int] = set()
+
+    def consume_item() -> bool:
+        nonlocal visited_items, truncated, hard_stop
+        if visited_items >= _CLASSIFICATION_MAX_ITEMS:
+            truncated = True
+            hard_stop = True
+            return False
+        visited_items += 1
+        return True
+
+    def register_container(node: Any) -> bool:
+        nonlocal truncated, hard_stop
+        identity = id(node)
+        if identity in seen:
+            truncated = True
+            return False
+        if len(seen) >= _CLASSIFICATION_MAX_ITEMS:
+            truncated = True
+            hard_stop = True
+            return False
+        seen.add(identity)
+        return True
+
+    def examine_string(text: str) -> None:
+        nonlocal examined, truncated
+        length = len(text)
+        if length > _CLASSIFICATION_MAX_SCALAR_BYTES:
+            truncated = True
+            return
+        if examined + length > _CLASSIFICATION_MAX_TOTAL_BYTES:
+            truncated = True
+            return
+        strings.append(text)
+        examined += length
+
+    def walk(node: Any, depth: int, selected: bool = False) -> None:
+        nonlocal truncated
+        if hard_stop:
+            return
+        if depth > _CLASSIFICATION_MAX_DEPTH:
+            truncated = True
+            return
+        if isinstance(node, dict):
+            if not register_container(node):
+                return
+            for key, child in node.items():
+                if not consume_item():
+                    return
+                if not isinstance(key, str) or len(key) > 64:
+                    truncated = True
+                    continue
+                child_depth = depth + 1 if isinstance(child, (dict, list, tuple)) else depth
+                walk(child, child_depth, selected or key in selected_keys)
+                if hard_stop:
+                    return
+            return
+        if isinstance(node, (list, tuple)):
+            if not register_container(node):
+                return
+            for child in node:
+                if not consume_item():
+                    return
+                child_depth = depth + 1 if isinstance(child, (dict, list, tuple)) else depth
+                walk(child, child_depth, selected)
+                if hard_stop:
+                    return
+            return
+        if isinstance(node, str):
+            if selected:
+                examine_string(node)
+            return
+        if node is None or isinstance(node, (bool, int)):
+            return
+        truncated = True
+
+    try:
+        scalar_root = not isinstance(value, (dict, list, tuple))
+        walk(value, 0, root_selected and scalar_root)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        truncated = True
+    return {
+        "strings": tuple(strings),
+        "examined_chars": examined,
+        "truncated": truncated,
+    }
+
+
+def _classify_tool(tool_name: str, params_strings: tuple[str, ...]) -> dict[str, Any]:
+    tool_class, access_class = _tool_classes(tool_name)
+    network = any(_NETWORK_RE.search(text) for text in params_strings)
+    delivery = _is_delivery_tool(tool_name)
+    sensitive = any(
+        _LOCAL_CONTEXT_RE.search(text) or _SECRET_RE.search(text)
+        for text in params_strings
+    )
+    if tool_class in {"file_read", "file_enumerate", "file_mutation"}:
         source = "file"
-    elif lower in _PROCESS_TOOLS:
+    elif tool_class == "process":
         source = "process"
-    elif delivery:
+    elif tool_class == "delivery":
         source = "messaging"
     else:
         source = "mcp_tool"
     return {
         "source_kind": source,
+        "tool_class": tool_class,
+        "access_class": access_class,
         "network_indicator": network,
-        "direct_ip": network and _contains_direct_ipv4_destination(params_text),
+        "direct_ip": network
+        and any(_contains_direct_ipv4_destination(text) for text in params_strings),
         "delivery_indicator": delivery,
         "sensitive_access": sensitive,
         "command_class": "network_egress" if network else None,
     }
 
 
-def _artifact_for_tool(tool_name: str, params: Any, params_text: str, trust_level: str) -> dict[str, Any]:
-    kind = _artifact_kind(tool_name, params_text)
+def _artifact_for_tool(
+    tool_name: str,
+    selected_strings: tuple[str, ...],
+    trust_level: str,
+) -> dict[str, Any]:
+    kind = _artifact_kind(tool_name, selected_strings)
     label = {
         "email": "Email content",
         "url": "URL content",
@@ -888,12 +1057,12 @@ def _artifact_for_tool(tool_name: str, params: Any, params_text: str, trust_leve
         "kind": kind,
         "provider": _ARTIFACT_PROVIDER_BY_KIND.get(kind),
         "display_label": label,
-        "locator_hash": _locator_hash(kind, params, params_text),
+        "locator_hash": _locator_hash(kind, selected_strings),
         "trust_level": trust_level,
     }
 
 
-def _artifact_kind(tool_name: str, params_text: str) -> str:
+def _artifact_kind(tool_name: str, selected_strings: tuple[str, ...]) -> str:
     lower = tool_name.lower()
     segments = [segment for segment in re.split(r"[.:/]+", lower) if segment]
     leaf = segments[-1] if segments else lower
@@ -901,7 +1070,11 @@ def _artifact_kind(tool_name: str, params_text: str) -> str:
         return "email"
     if leaf in _BROWSER_TOOLS or lower.startswith("browser") or leaf in {"web_search", "web_extract"}:
         return "url"
-    if "github" in lower or leaf in {"git", "gh"} or "git_repository" in params_text.lower():
+    if (
+        "github" in lower
+        or leaf in {"git", "gh"}
+        or any("git_repository" in text.lower() for text in selected_strings)
+    ):
         return "git_repository"
     if leaf in _CODE_TOOLS:
         return "code"
@@ -916,15 +1089,16 @@ def _artifact_kind(tool_name: str, params_text: str) -> str:
     return "unknown"
 
 
-def _locator_hash(kind: str, params: Any, params_text: str) -> str | None:
-    locator: str | None = None
-    if kind == "url":
-        locator = _safe_url_locator(params, params_text)
-    elif kind == "git_repository":
-        locator = _safe_git_locator(params, params_text)
-    if locator is None:
-        return None
-    return "sha256:" + hashlib.sha256(locator.encode("utf-8")).hexdigest()
+def _locator_hash(kind: str, selected_strings: tuple[str, ...]) -> str | None:
+    for text in selected_strings:
+        locator: str | None = None
+        if kind == "url":
+            locator = _safe_url_locator({}, text)
+        elif kind == "git_repository":
+            locator = _safe_git_locator({}, text)
+        if locator is not None:
+            return "sha256:" + hashlib.sha256(locator.encode("utf-8")).hexdigest()
+    return None
 
 
 def _safe_url_locator(params: Any, params_text: str) -> str | None:
@@ -1137,20 +1311,21 @@ def _is_ipv4_literal(candidate: str | None) -> bool:
         return False
 
 
-def _malware_signature(text: str) -> str | None:
-    match = _MALWARE_TEST_RE.search(text)
-    if not match:
-        return None
-    value = match.group(1).lower()
-    if "eicar" in value:
-        return "eicar_test_string"
-    return "skynet_fake_malware_test_string"
+def _malware_signature(strings: tuple[str, ...]) -> str | None:
+    for text in strings:
+        match = _MALWARE_TEST_RE.search(text)
+        if match:
+            value = match.group(1).lower()
+            if "eicar-standard" in value:
+                return "eicar_test_string"
+            return "skynet_fake_malware_test_string"
+    return None
 
 
-def _redaction_replacement(text: str) -> str | None:
-    if _SECRET_RE.search(text):
+def _redaction_replacement(strings: tuple[str, ...]) -> str | None:
+    if any(_SECRET_RE.search(text) for text in strings):
         return "[REDACTED:secret]"
-    if _LOCAL_CONTEXT_RE.search(text):
+    if any(_LOCAL_CONTEXT_RE.search(text) for text in strings):
         return "[REDACTED:local_context]"
     return None
 

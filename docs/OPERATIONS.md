@@ -43,7 +43,7 @@ The doctor command intentionally does not require `rules.d` or `agents.d` direct
 
 ## Continuous ingestion operations
 
-The packaged continuous path accepts one length-prefixed `skynet.event.v0` event per authenticated AF_UNIX connection. It is passive: a successful transaction stores the redacted event, evaluates the built-in canonical sequence rules, stores any resulting incidents and a receipt, then returns a versioned acknowledgement. It is not guard mode and never approves, delays, blocks, or rewrites an agent action.
+The packaged continuous path accepts one length-prefixed `skynet.event.v0` event per authenticated AF_UNIX connection. Before persistence it applies the exact continuous-ingest event/source/trust/attribute projection; unknown, mistyped, raw-bearing, or non-allowlisted shapes are permanently rejected without an event, incident, or receipt. A successful transaction stores the projected event, evaluates the built-in sequence rules plus bounded `EDR-EXFIL-001` and `EDR-MALWARE-001` correlators, stores derived incidents before the receipt, then returns a versioned acknowledgement. It is not guard mode and never approves, delays, blocks, or rewrites an agent action.
 
 ### Deploy and enroll a producer
 
@@ -124,7 +124,7 @@ The object exposes bounded process-lifetime aggregates plus at most 64 complete 
 
 - connections: accepted, unauthorized, capacity-rejected, listener errors, and peer-credential errors;
 - frames: received, oversized, invalid, and timed out;
-- outcomes: persisted, duplicate, event-ID collision, correlation overflow, and storage errors;
+- outcomes: persisted, duplicate, event-ID collision, incident-integrity collision, correlation overflow, and storage errors;
 - listener liveness, required-role enrollment state, producer heartbeat timestamp/age and transport state (`available`, `degraded`, `stale`, or `unknown`), plus checkpoint/backlog and fixed counters;
 - separate daemon-observed last accepted and last committed hook-event timestamps/ages. `hook_event_state` is `fresh`, `stale`, or `not_observed` from daemon receive time; it is not inferred from heartbeat traffic. `hook_event_freshness_affects_state=false` is explicit: an idle runtime with no expected user activity is not degraded solely because no hook event has occurred. Operators must compare event ages with known activity when investigating telemetry coverage.
 
@@ -166,10 +166,11 @@ The daemon never scans producer home directories and continuous ingestion never 
 
 ### Failure and restart behavior
 
-- If the daemon is unavailable or returns a retryable outcome, the producer attempts a durable versioned fallback append. An abrupt producer-process exit can still lose records that existed only in the in-memory queue.
+- If the daemon is unavailable or returns a retryable outcome, the producer attempts a durable versioned fallback append. Replay can delay observations; an abrupt producer-process exit can still lose records that existed only in the in-memory queue.
 - The producer worker replays small bounded batches before new delivery and during idle periods. Duplicate event IDs from an uncertain ACK are idempotent only when source identity and payload match; a mismatch is a permanent collision. Durable collision evidence is bounded to the first fingerprint-only row for each colliding event identifier and authenticated source, so payload variants cannot amplify evidence storage.
-- A storage or correlation transaction failure rolls back event, incident, and receipt together and returns `retry_later` when an ACK can be written.
+- A generic storage or correlation transaction failure rolls back event, incident, and receipt together and returns `retry_later` when an ACK can be written. A derived incident-ID collision also rolls back that transaction, then records one fingerprint-only row per deterministic incident/source key in a separate transaction. Successful diagnostic persistence returns terminal `rejected_permanent` with reason `incident_collision`, increments `incident_integrity_collision_total`, and exposes the fixed `incident_collision` health category; diagnostic persistence failure returns `retry_later` and commits neither trigger nor receipt.
 - Candidate overflow persists the triggering redacted event and receipt atomically with one deterministic, event-deduplicated `Continuous correlation degraded` incident, increments `correlation_truncated_total`, and degrades status. Replaying the same trigger does not duplicate the alert, while a distinct later overflow remains visible. It never treats the skipped evaluation as a clean no-match. Increase limits only after investigating event volume and memory/storage impact.
+- Producer timestamps and trace/session joins are assertions, not attestations. Correlation keys are pseudonymized before storage, trace takes precedence over session, and equal timestamps use event-ID order. UID authorization does not prove process identity or event truth. Passive incidents do not prevent the observed action; fallback delay, queue/fallback drops, classifier truncation, and candidate overflow can make coverage incomplete.
 - The systemd unit restarts a failed daemon after five seconds. Its in-memory counters and source health reset; the SQLite store and producer-owned fallback remain. Listener-thread liveness is explicit in `/api/status`; verify liveness, fresh producer reports, and counter movement after a restart.
 
 ### Harmless transport canary
@@ -185,21 +186,20 @@ event_id = f"evt_ops_canary_{uuid.uuid4().hex}"
 event = {
     "schema_version": "skynet.event.v0",
     "event_id": event_id,
-    "event_type": "agent.session.canary",
+    "event_type": "agent.session.started",
     "observed_at_unix_ms": now,
     "received_at_unix_ms": now,
     "severity": "informational",
-    "source": {"kind": "sensor", "sensor": "operations-canary", "integration": "manual-local"},
+    "source": {"kind": "sensor", "sensor": "skynet-edr-hermes-plugin", "integration": "hermes"},
     "provenance": {
-        "producer": "operations-canary",
-        "collector": "skynet-edr-daemon",
-        "tenant": "local-canary",
+        "producer": "hermes-agent",
+        "collector": "skynet-edr-hermes-plugin",
         "source_event_id": event_id,
         "trace_id": f"trace_{event_id}",
     },
     "trust_level": "sensor_observation",
     "title": "Harmless local continuous-ingestion canary",
-    "attributes": {"canary": True},
+    "attributes": {"plugin_version": "0.4.0", "argument_count": 0, "keyword_count": 0},
     "redaction": {"contains_sensitive_data": False, "redacted_fields": []},
 }
 payload = json.dumps(event, separators=(",", ":"), sort_keys=True).encode()

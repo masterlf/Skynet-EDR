@@ -23,7 +23,7 @@ use nix::{
 use serde_json::json;
 use skynet_edr_core::{
     built_in_ai_agent_sequence_rules, parse_canonical_event_json, CanonicalEventEnvelope,
-    ContinuousIngestStatus, LocalStore,
+    ContinuousIngestError, ContinuousIngestStatus, LocalStore,
 };
 
 const MAX_HEALTH_SOURCES: usize = 64;
@@ -108,6 +108,7 @@ pub struct IngestionHealth {
     persisted: AtomicU64,
     duplicates: AtomicU64,
     collisions: AtomicU64,
+    incident_integrity_collisions: AtomicU64,
     correlation_truncated: AtomicU64,
     storage_errors: AtomicU64,
     last_degraded_at_unix_ms: AtomicU64,
@@ -255,6 +256,8 @@ pub struct IngestionHealthSnapshot {
     pub events_duplicate_total: u64,
     /// Event identifiers rejected because source identity or payload did not match.
     pub events_collision_total: u64,
+    /// Derived incident identifiers rejected because sanitized evidence differed.
+    pub incident_integrity_collision_total: u64,
     /// Events persisted while bounded correlation was skipped due to candidate overflow.
     pub correlation_truncated_total: u64,
     /// Transactional storage/correlation failures.
@@ -296,6 +299,7 @@ impl IngestionHealth {
             persisted: AtomicU64::new(0),
             duplicates: AtomicU64::new(0),
             collisions: AtomicU64::new(0),
+            incident_integrity_collisions: AtomicU64::new(0),
             correlation_truncated: AtomicU64::new(0),
             storage_errors: AtomicU64::new(0),
             last_degraded_at_unix_ms: AtomicU64::new(0),
@@ -324,6 +328,9 @@ impl IngestionHealth {
             events_persisted_total: self.persisted.load(Ordering::Relaxed),
             events_duplicate_total: self.duplicates.load(Ordering::Relaxed),
             events_collision_total: self.collisions.load(Ordering::Relaxed),
+            incident_integrity_collision_total: self
+                .incident_integrity_collisions
+                .load(Ordering::Relaxed),
             correlation_truncated_total: self.correlation_truncated.load(Ordering::Relaxed),
             storage_errors_total: self.storage_errors.load(Ordering::Relaxed),
         }
@@ -455,6 +462,7 @@ impl IngestionHealth {
             "events_persisted_total": snapshot.events_persisted_total,
             "events_duplicate_total": snapshot.events_duplicate_total,
             "events_collision_total": snapshot.events_collision_total,
+            "incident_integrity_collision_total": snapshot.incident_integrity_collision_total,
             "correlation_truncated_total": snapshot.correlation_truncated_total,
             "storage_errors_total": snapshot.storage_errors_total,
             "sources": source_values,
@@ -564,7 +572,10 @@ impl IngestionHealth {
 }
 
 fn is_degrading_error(category: &str) -> bool {
-    matches!(category, "frame_timeout" | "storage" | "transaction")
+    matches!(
+        category,
+        "frame_timeout" | "storage" | "transaction" | "incident_collision"
+    )
 }
 
 fn unix_ms_now() -> u64 {
@@ -856,41 +867,62 @@ fn commit_event_and_ack(
         );
     };
     let source_id = format!("uid:{uid}");
-    if let Ok(result) = store.commit_continuous_event(
+    match store.commit_continuous_event(
         &source_id,
         event,
         &built_in_ai_agent_sequence_rules(),
         config.candidate_limit,
     ) {
-        health.record_result(uid, result.status);
-        if result.correlation_truncated {
-            health.record_correlation_truncated();
+        Ok(result) => {
+            health.record_result(uid, result.status);
+            if result.correlation_truncated {
+                health.record_correlation_truncated();
+            }
+            let status = match result.status {
+                ContinuousIngestStatus::Persisted => {
+                    health.persisted.fetch_add(1, Ordering::Relaxed);
+                    "persisted"
+                }
+                ContinuousIngestStatus::Duplicate => {
+                    health.duplicates.fetch_add(1, Ordering::Relaxed);
+                    "duplicate"
+                }
+                ContinuousIngestStatus::Collision => {
+                    health.collisions.fetch_add(1, Ordering::Relaxed);
+                    "collision"
+                }
+            };
+            write_ack(
+                stream,
+                &json!({"version":1,"event_id":event.event_id.as_str(),"status":status}),
+            )
         }
-        let status = match result.status {
-            ContinuousIngestStatus::Persisted => {
-                health.persisted.fetch_add(1, Ordering::Relaxed);
-                "persisted"
-            }
-            ContinuousIngestStatus::Duplicate => {
-                health.duplicates.fetch_add(1, Ordering::Relaxed);
-                "duplicate"
-            }
-            ContinuousIngestStatus::Collision => {
-                health.collisions.fetch_add(1, Ordering::Relaxed);
-                "collision"
-            }
-        };
-        write_ack(
-            stream,
-            &json!({"version":1,"event_id":event.event_id.as_str(),"status":status}),
-        )
-    } else {
-        health.storage_errors.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(uid, "transaction");
-        write_ack(
-            stream,
-            &json!({"version":1,"event_id":event.event_id.as_str(),"status":"retry_later","reason":"transaction"}),
-        )
+        Err(ContinuousIngestError::Canonical(_)) => {
+            health.invalid.fetch_add(1, Ordering::Relaxed);
+            health.record_source_error(uid, "invalid_event");
+            write_ack(
+                stream,
+                &json!({"version":1,"event_id":event.event_id.as_str(),"status":"rejected_permanent","reason":"invalid_event"}),
+            )
+        }
+        Err(ContinuousIngestError::IncidentCollision { .. }) => {
+            health
+                .incident_integrity_collisions
+                .fetch_add(1, Ordering::Relaxed);
+            health.record_source_error(uid, "incident_collision");
+            write_ack(
+                stream,
+                &json!({"version":1,"event_id":event.event_id.as_str(),"status":"rejected_permanent","reason":"incident_collision"}),
+            )
+        }
+        Err(_) => {
+            health.storage_errors.fetch_add(1, Ordering::Relaxed);
+            health.record_source_error(uid, "transaction");
+            write_ack(
+                stream,
+                &json!({"version":1,"event_id":event.event_id.as_str(),"status":"retry_later","reason":"transaction"}),
+            )
+        }
     }
 }
 

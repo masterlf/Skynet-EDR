@@ -38,6 +38,47 @@ fn canonical_event(
     } else {
         "agent_action"
     };
+    let (source_kind, projected_attributes) = if event_type == "agent.content.ingested" {
+        let attack = attributes
+            .get("contains_instructional_attack")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        (
+            "mcp_tool",
+            serde_json::json!({
+                "hook": "post_tool_call",
+                "tool_name": "remote.fetch",
+                "content_omitted": true,
+                "content_length": 0,
+                "instruction_authority": false,
+                "contains_instructional_attack": attack,
+                "expected_disposition": "treat_as_data"
+            }),
+        )
+    } else {
+        let network = attributes
+            .get("network_indicator")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let sensitive = attributes
+            .get("sensitive_access")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let mut normalized = serde_json::json!({
+            "hook": "pre_tool_call",
+            "tool_name": "terminal",
+            "network_indicator": network,
+            "direct_ip": false,
+            "delivery_indicator": false,
+            "sensitive_access": sensitive,
+            "params_length": 0,
+            "params_preview": "[OMITTED:tool_params]"
+        });
+        if network {
+            normalized["command_class"] = serde_json::json!("network_egress");
+        }
+        ("process", normalized)
+    };
     parse_canonical_event_json(
         &serde_json::json!({
             "schema_version": "skynet.event.v0",
@@ -46,10 +87,10 @@ fn canonical_event(
             "observed_at_unix_ms": observed_at_unix_ms,
             "received_at_unix_ms": observed_at_unix_ms,
             "severity": "high",
-            "source": {"kind": "sensor", "sensor": "continuous-ingest-test", "integration": "hermes"},
+            "source": {"kind": source_kind, "sensor": "skynet-edr-hermes-plugin", "integration": "hermes"},
             "provenance": {
                 "producer": "hermes-agent",
-                "collector": "skynet-edr-hermes-forwarder",
+                "collector": "skynet-edr-hermes-plugin",
                 "tenant": "fake-test",
                 "source_event_id": id,
                 "trace_id": trace_id,
@@ -59,7 +100,7 @@ fn canonical_event(
             "trust_level": trust_level,
             "title": "Clearly fake continuous ingestion test event",
             "details": null,
-            "attributes": attributes,
+            "attributes": projected_attributes,
             "redaction": {"contains_sensitive_data": false, "redacted_fields": []}
         })
         .to_string(),
@@ -91,6 +132,7 @@ fn replay_is_immutable_and_returns_duplicate_without_overwrite() {
     assert_eq!(replay.status, ContinuousIngestStatus::Duplicate);
     let mut conflicting = original.clone();
     conflicting.title = "Attacker tried to overwrite an existing event".to_owned();
+    conflicting.observed_at_unix_ms += 1;
     let collision = store
         .commit_continuous_event("uid:1000", &conflicting, &rules, 10_000)
         .expect("conflicting replay is a bounded collision outcome");
@@ -101,7 +143,7 @@ fn replay_is_immutable_and_returns_duplicate_without_overwrite() {
             .expect("lookup succeeds")
             .expect("event exists")
             .title,
-        "Clearly fake continuous ingestion test event"
+        "Hermes tool action requested"
     );
     assert_eq!(store.count_ingest_receipts().expect("receipt count"), 1);
 

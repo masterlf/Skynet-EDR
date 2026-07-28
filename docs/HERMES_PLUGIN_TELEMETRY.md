@@ -86,7 +86,7 @@ Telemetry events now include optional safe artifact metadata when derivable. Lab
 ~/.local/state/skynet-edr/hermes/skynet-edr-plugin.log
 ```
 
-The fallback, checkpoint, lock, and log are created as private user state where the platform supports the required ownership and mode checks. The versioned fallback is not the legacy unversioned `events.jsonl`.
+The fallback, checkpoint, lock, and log are created as private user state where the platform supports the required ownership and mode checks. The versioned fallback is not the legacy unversioned `events.jsonl`. Fallback replay preserves order but may delay telemetry; queue drops, fallback-cap drops, classifier truncation, and candidate overflow mean visibility can be incomplete.
 
 ## Logging
 
@@ -118,7 +118,9 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 
 ## Detection limits
 
-The v0.4 plugin records indicators, not verdicts. `network_indicator` catches
+The v0.4 plugin records indicators, not verdicts. Tool parameters and results are examined by a deterministic structured walker bounded to depth 4, 64 visited items/identities, 4,096 Unicode scalar values per string, and 16,384 examined scalar values per hook side. Only complete bounded strings under exact selected keys are classified; cycles, aliases, unsupported objects, and exceeded limits set `classification_truncated=true` without stringifying hostile objects. A negative indicator on a truncated event is not a safety claim.
+
+`network_indicator` catches
 common egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and `ncat`.
 For those recognized network operations, the plugin sets `direct_ip=true` when
 it validates an explicit IPv4 destination host in an HTTP(S) URL, `/dev/tcp`, or
@@ -129,7 +131,7 @@ as MCP tools and emit `agent.mcp.tool.requested`, allowing `EDR-MCP-001` to cons
 the packaged telemetry. The plugin does not yet fully classify IPv6 literals or
 indirect egress inside arbitrary Python, SDK, cloud-client,
 `scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed network indicators
-as a coverage limitation, not proof of safety.
+as a coverage limitation, not proof of safety. Trace/session identifiers and observed timestamps are producer asserted and pseudonymized by continuous ingestion before storage. Socket UID authorization permits the producer but does not attest process identity or event truth. The plugin and correlators are passive: they do not prevent delivery, egress, or tool execution. P1b mutation-success/config/cron/approval producers remain pending.
 
 ## Legacy manual ingestion
 

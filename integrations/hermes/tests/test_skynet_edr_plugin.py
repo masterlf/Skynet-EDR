@@ -544,7 +544,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertTrue(event["attributes"]["network_indicator"])
         self.assertFalse(event["attributes"]["direct_ip"])
         self.assertTrue(event["attributes"]["sensitive_access"])
-        self.assertEqual(event["attributes"]["params_preview"], "[REDACTED:secret]")
+        self.assertEqual(event["attributes"]["params_preview"], "[OMITTED:tool_params]")
         self.assertNotIn("fake-token-value", serialized)
         self.assertNotIn("/root/.hermes/auth.json", serialized)
         self.assertTrue(event["redaction"]["contains_sensitive_data"])
@@ -695,8 +695,8 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             "https://evil.invalid/path/github.com/repo",
         ]
         for locator in hostile_locators:
-            ctx.hooks["pre_tool_call"]("git", {"repository": locator})
-            ctx.hooks["pre_tool_call"]("git", {"payload": f"clone {locator}"})
+            ctx.hooks["pre_tool_call"]("git", {"uri": locator})
+            ctx.hooks["pre_tool_call"]("git", {"command": f"clone {locator}"})
 
         events = self.read_events()[-6:]
         serialized = "\n".join(json.dumps(event) for event in events)
@@ -716,8 +716,8 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             "github.com/owner/repo",
         ]
         for locator in valid_locators:
-            ctx.hooks["pre_tool_call"]("git", {"repository": locator})
-            ctx.hooks["pre_tool_call"]("git", {"payload": f"clone {locator}"})
+            ctx.hooks["pre_tool_call"]("git", {"uri": locator})
+            ctx.hooks["pre_tool_call"]("git", {"command": f"clone {locator}"})
 
         events = self.read_events()[-8:]
         serialized = "\n".join(json.dumps(event) for event in events)
@@ -735,7 +735,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         event = self.read_events()[-1]
         serialized = json.dumps(event)
 
-        self.assertEqual(event["attributes"]["params_preview"], "[REDACTED:secret]")
+        self.assertEqual(event["attributes"]["params_preview"], "[OMITTED:tool_params]")
         self.assertTrue(event["redaction"]["contains_sensitive_data"])
         self.assertEqual(
             event["redaction"]["redacted_fields"],
@@ -833,6 +833,239 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         content = [event for event in events if event["event_type"] == "agent.content.ingested"][-1]
         self.assertEqual(content["attributes"]["rule_id"], "EDR-PI-001")
         self.assertFalse(content["attributes"]["instruction_authority"])
+
+    def test_hermes_access_class_exact_read_and_enumerate_positive(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_tool_call"]("read_file", {"path": "/tmp/FAKE_P1A_READ"})
+        ctx.hooks["pre_tool_call"]("search_files", {"pattern": "FAKE_P1A_PATTERN"})
+        read_event, enumerate_event = self.read_events()[-2:]
+        self.assertEqual((read_event["attributes"]["tool_class"], read_event["attributes"]["access_class"]), ("file_read", "read"))
+        self.assertEqual((enumerate_event["attributes"]["tool_class"], enumerate_event["attributes"]["access_class"]), ("file_enumerate", "enumerate"))
+
+    def test_hermes_access_class_mutation_write_and_near_actions_are_benign(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        for tool_name in ["write_file", "patch", "read_files", "search_file"]:
+            ctx.hooks["pre_tool_call"](tool_name, {"path": "/tmp/FAKE_P1A_MUTATION"})
+        mutation, patch_event, near_read, near_search = self.read_events()[-4:]
+        self.assertEqual((mutation["attributes"]["tool_class"], mutation["attributes"]["access_class"]), ("file_mutation", "mutation"))
+        self.assertEqual((patch_event["attributes"]["tool_class"], patch_event["attributes"]["access_class"]), ("file_mutation", "mutation"))
+        for event in [near_read, near_search]:
+            self.assertNotIn(event["attributes"]["access_class"], {"read", "enumerate"})
+            self.assertFalse(event["attributes"]["sensitive_access"])
+
+    def test_giant_nested_params_are_bounded_and_content_omitted(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        cases = [
+            {"path": {"a": {"b": {"c": "A" * 4096}}}},
+            {"path": {"a": {"b": {"c": {"d": {"e": "FAKE_DEPTH_5"}}}}}},
+            {"path": ["x"] * 63},
+            {"path": ["x"] * 64},
+            {"path": "A" * 4096},
+            {"path": "A" * 4097},
+            {"path": ["A" * 4096] * 4},
+            {"path": ["A" * 4096] * 4 + ["B"]},
+            {"Path": "FAKE_UNSELECTED_KEY", "path": "FAKE_SELECTED_KEY"},
+        ]
+        for params in cases:
+            ctx.hooks["pre_tool_call"]("read_file", params)
+        events = self.read_events()[-len(cases):]
+        expected_truncation = [False, True, False, True, False, True, False, True, False]
+        self.assertEqual([event["attributes"]["classification_truncated"] for event in events], expected_truncation)
+        self.assertEqual(events[0]["attributes"]["params_examined_chars"], 4096)
+        self.assertEqual(events[4]["attributes"]["params_examined_chars"], 4096)
+        self.assertEqual(events[5]["attributes"]["params_examined_chars"], 0)
+        self.assertEqual(events[6]["attributes"]["params_examined_chars"], 16384)
+        self.assertEqual(events[7]["attributes"]["params_examined_chars"], 16384)
+        serialized = json.dumps(events)
+        for forbidden in ["FAKE_DEPTH_5", "FAKE_UNSELECTED_KEY", "FAKE_SELECTED_KEY"]:
+            self.assertNotIn(forbidden, serialized)
+        self.assertTrue(all(event["attributes"]["params_preview"] == "[OMITTED:tool_params]" for event in events))
+
+    def test_recursive_params_fail_safely_without_hook_escape(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        recursive = {}
+        recursive["path"] = recursive
+        alias = {"command": "printf FAKE_ALIAS"}
+        params = {"path": [alias, alias], "unsupported": {"FAKE_SET"}}
+        self.assertIsNone(ctx.hooks["pre_tool_call"]("read_file", recursive))
+        self.assertIsNone(ctx.hooks["pre_tool_call"]("terminal", params))
+        recursive_event, alias_event = self.read_events()[-2:]
+        self.assertTrue(recursive_event["attributes"]["classification_truncated"])
+        self.assertTrue(alias_event["attributes"]["classification_truncated"])
+        self.assertNotIn("FAKE_ALIAS", json.dumps([recursive_event, alias_event]))
+        self.assertNotIn("FAKE_SET", json.dumps([recursive_event, alias_event]))
+
+    def test_secret_bearing_params_never_reach_event_spool_log_or_title(self):
+        class HostileString:
+            def __init__(self):
+                self.called = False
+
+            def __str__(self):
+                self.called = True
+                return "FAKE_CUSTOM_STR_SECRET_37"
+
+        class HostileException(Exception):
+            def __str__(self):
+                return "FAKE_HOSTILE_EXCEPTION_SECRET_37"
+
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        hostile = HostileString()
+        ctx.hooks["pre_tool_call"](hostile, {"command": "token=FAKE_SECRET_37 /tmp/FAKE_PATH_37", "custom": hostile})
+        ctx.hooks["pre_tool_call"](
+            "terminal", {"command": "token=", "path": "FAKE_SPLIT_SCALAR_37"}
+        )
+
+        def hostile_handler(*_args, **_kwargs):
+            raise HostileException("FAKE_HOSTILE_EXCEPTION_ARG_SECRET_37")
+
+        self.assertIsNone(
+            self.plugin._safe_hook(hostile_handler)(
+                "FAKE_HOSTILE_ARG_SECRET_37", raw="FAKE_HOSTILE_KWARG_SECRET_37"
+            )
+        )
+        split_scalar_event = self.read_events()[-1]
+        self.assertFalse(split_scalar_event["attributes"]["sensitive_access"])
+        self.assertFalse(hostile.called)
+        for path in [self.state_dir / "events-v1.jsonl", self.state_dir / "skynet-edr-plugin.log"]:
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            for forbidden in [
+                "FAKE_CUSTOM_STR_SECRET_37",
+                "FAKE_SECRET_37",
+                "FAKE_PATH_37",
+                "FAKE_HOSTILE_EXCEPTION_SECRET_37",
+                "FAKE_HOSTILE_EXCEPTION_ARG_SECRET_37",
+                "FAKE_HOSTILE_ARG_SECRET_37",
+                "FAKE_HOSTILE_KWARG_SECRET_37",
+                "Traceback",
+                "HostileException",
+            ]:
+                self.assertNotIn(forbidden, text)
+        log_text = (self.state_dir / "skynet-edr-plugin.log").read_text(encoding="utf-8")
+        self.assertIn("hook_failed category=handler_exception", log_text)
+
+    def test_raw_result_marker_only_produces_allowlisted_indicator_metadata(self):
+        class HostileResult:
+            def __init__(self):
+                self.called = False
+
+            def __str__(self):
+                self.called = True
+                return "FAKE_HOSTILE_RESULT_STR_38"
+
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        raw_marker = "SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE"
+
+        def emit(result):
+            ctx.hooks["post_tool_call"](
+                "remote.fetch", {"url": "https://example.invalid/FAKE_38"}, result
+            )
+            return [
+                event
+                for event in self.read_events()
+                if event["event_type"] == "agent.tool.completed"
+            ][-1]
+
+        depth4 = emit({"output": {"a": {"b": {"c": {"d": raw_marker}}}}})
+        depth5 = emit({"output": {"a": {"b": {"c": {"d": {"e": raw_marker}}}}}})
+        items64 = emit({"output": ["x"] * 63})
+        items65 = emit({"output": ["x"] * 64})
+        scalar4096 = emit({"output": raw_marker + "A" * (4096 - len(raw_marker))})
+        scalar4097 = emit({"output": raw_marker + "A" * (4097 - len(raw_marker))})
+        total16384 = emit({"output": ["A" * 4096] * 4})
+        total16385 = emit({"output": ["A" * 4096] * 4 + ["B"]})
+
+        recursive = {}
+        recursive["output"] = recursive
+        cycle = emit(recursive)
+        alias_value = {"text": raw_marker}
+        alias = emit({"data": [alias_value, alias_value]})
+        hostile = HostileResult()
+        unsupported = emit({"output": {"FAKE_UNSUPPORTED_RESULT_38"}})
+        hostile_event = emit({"output": hostile})
+
+        self.assertFalse(depth4["attributes"]["classification_truncated"])
+        self.assertTrue(depth4["attributes"]["malware_indicator"])
+        self.assertTrue(depth5["attributes"]["classification_truncated"])
+        self.assertFalse(depth5["attributes"]["malware_indicator"])
+        self.assertEqual(items64["attributes"]["result_examined_chars"], 63)
+        self.assertFalse(items64["attributes"]["classification_truncated"])
+        self.assertEqual(items65["attributes"]["result_examined_chars"], 63)
+        self.assertTrue(items65["attributes"]["classification_truncated"])
+        self.assertEqual(scalar4096["attributes"]["result_examined_chars"], 4096)
+        self.assertTrue(scalar4096["attributes"]["malware_indicator"])
+        self.assertFalse(scalar4096["attributes"]["classification_truncated"])
+        self.assertEqual(scalar4097["attributes"]["result_examined_chars"], 0)
+        self.assertFalse(scalar4097["attributes"]["malware_indicator"])
+        self.assertTrue(scalar4097["attributes"]["classification_truncated"])
+        self.assertEqual(total16384["attributes"]["result_examined_chars"], 16384)
+        self.assertFalse(total16384["attributes"]["classification_truncated"])
+        self.assertEqual(total16385["attributes"]["result_examined_chars"], 16384)
+        self.assertTrue(total16385["attributes"]["classification_truncated"])
+        self.assertTrue(cycle["attributes"]["classification_truncated"])
+        self.assertTrue(alias["attributes"]["classification_truncated"])
+        self.assertTrue(alias["attributes"]["malware_indicator"])
+        self.assertTrue(unsupported["attributes"]["classification_truncated"])
+        self.assertTrue(hostile_event["attributes"]["classification_truncated"])
+        self.assertFalse(hostile.called)
+
+        selected_events = [emit({key: raw_marker}) for key in sorted(self.plugin._RESULT_CLASSIFICATION_KEYS)]
+        nonselected_events = [emit({key: raw_marker}) for key in ["Output", "ignored", "results"]]
+        self.assertTrue(all(event["attributes"]["malware_indicator"] for event in selected_events))
+        self.assertTrue(
+            all(not event["attributes"]["malware_indicator"] for event in nonselected_events)
+        )
+
+        root_scalar = emit(raw_marker)
+        self.assertTrue(root_scalar["attributes"]["malware_indicator"])
+        self.assertEqual(root_scalar["attributes"]["result_examined_chars"], len(raw_marker))
+
+        events = self.read_events()
+        completed = [event for event in events if event["event_type"] == "agent.tool.completed"]
+        self.assertTrue(
+            all(
+                set(event["attributes"]).issubset(
+                    {
+                        "hook",
+                        "tool_name",
+                        "tool_class",
+                        "access_class",
+                        "result_omitted",
+                        "result_length",
+                        "result_examined_chars",
+                        "classification_truncated",
+                        "network_indicator",
+                        "direct_ip",
+                        "delivery_indicator",
+                        "sensitive_access",
+                        "prompt_injection_indicator",
+                        "malware_indicator",
+                        "malware_signature",
+                        "rule_id",
+                    }
+                )
+                for event in completed
+            )
+        )
+        for path in [
+            self.state_dir / "events-v1.jsonl",
+            self.state_dir / "skynet-edr-plugin.log",
+        ]:
+            serialized = path.read_text(encoding="utf-8") if path.exists() else ""
+            for forbidden in [
+                raw_marker,
+                "FAKE_IGNORED_RESULT_38",
+                "FAKE_UNSUPPORTED_RESULT_38",
+                "FAKE_HOSTILE_RESULT_STR_38",
+                "FAKE_38",
+            ]:
+                self.assertNotIn(forbidden, serialized)
+        self.assertTrue(all(raw_marker not in event["title"] for event in events))
 
     def test_logs_are_sanitized_and_private(self):
         ctx = FakeContext()
