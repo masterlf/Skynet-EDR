@@ -258,7 +258,7 @@ pub struct IngestionHealthSnapshot {
     pub events_collision_total: u64,
     /// Derived incident identifiers rejected because sanitized evidence differed.
     pub incident_integrity_collision_total: u64,
-    /// Events persisted while bounded correlation was skipped due to candidate overflow.
+    /// Events persisted while a bounded candidate subset was evaluated and truncated.
     pub correlation_truncated_total: u64,
     /// Transactional storage/correlation failures.
     pub storage_errors_total: u64,

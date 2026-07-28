@@ -1,6 +1,6 @@
 //! P1a strict continuous-ingestion and passive detector contract tests.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf, process::Command};
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use skynet_edr_core::{
     built_in_ai_agent_sequence_rules, correlate_sequence_rules, parse_canonical_event_json,
     CanonicalEventEnvelope, ContinuousIngestError, ContinuousIngestStatus, LocalStore,
-    SequenceRule, CONTINUOUS_SESSION_CANDIDATE_SQL, CONTINUOUS_TRACE_CANDIDATE_SQL,
+    SequenceAttributePredicate, SequenceJoin, SequenceRule, SequenceStep, Severity, TrustLevel,
+    CONTINUOUS_SESSION_CANDIDATE_SQL, CONTINUOUS_TRACE_CANDIDATE_SQL,
 };
 
 const HERMES_GOLDEN: &str = include_str!("fixtures/hermes_agent_golden_events_v0.jsonl");
@@ -244,6 +245,65 @@ fn digest(parts: &[&str]) -> String {
             write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
             output
         })
+}
+
+fn generic_rule() -> SequenceRule {
+    SequenceRule {
+        id: "EDR-FAKE-GENERIC-001".to_owned(),
+        name: "fake generic continuous fan-out regression".to_owned(),
+        severity: Severity::High,
+        window_ms: 60_000,
+        join: SequenceJoin::SameTrace,
+        steps: vec![
+            SequenceStep {
+                name: "fake precursor".to_owned(),
+                event_type: "agent.content.ingested".to_owned(),
+                trust_level: TrustLevel::UntrustedContent,
+                attributes: vec![SequenceAttributePredicate::equals_bool(
+                    "attributes.contains_instructional_attack",
+                    true,
+                )],
+            },
+            SequenceStep {
+                name: "fake trigger".to_owned(),
+                event_type: "agent.mcp.tool.requested".to_owned(),
+                trust_level: TrustLevel::AgentAction,
+                attributes: vec![SequenceAttributePredicate::equals_bool(
+                    "attributes.network_indicator",
+                    true,
+                )],
+            },
+        ],
+    }
+}
+
+fn generic_precursor(id: &str, observed: u64, trace: &str) -> CanonicalEventEnvelope {
+    let mut attrs = content_attrs(None);
+    attrs["contains_instructional_attack"] = json!(true);
+    plugin_event(
+        id,
+        "agent.content.ingested",
+        "mcp_tool",
+        "untrusted_content",
+        observed,
+        Some(trace),
+        attrs,
+    )
+}
+
+fn generic_trigger(id: &str, observed: u64, trace: &str) -> CanonicalEventEnvelope {
+    let mut attrs = request_attrs("remote.fetch", None);
+    attrs["network_indicator"] = json!(true);
+    attrs["command_class"] = json!("network_egress");
+    plugin_event(
+        id,
+        "agent.mcp.tool.requested",
+        "mcp_tool",
+        "agent_action",
+        observed,
+        Some(trace),
+        attrs,
+    )
 }
 
 #[test]
@@ -981,8 +1041,211 @@ fn continuous_candidate_query_uses_source_trace_or_source_session_index() {
             details.iter().all(|detail| !detail.contains("SCAN events")),
             "full events scan in exact production plan: {details:?}"
         );
+        assert!(
+            details.iter().all(|detail| {
+                let upper = detail.to_ascii_uppercase();
+                !upper.contains("USE TEMP B-TREE") && !upper.contains("ORDER BY")
+            }),
+            "temporary ORDER BY work in exact production plan: {details:?}"
+        );
     }
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn continuous_generic_sequence_selects_one_trigger_match_with_exact_id() {
+    let path = temp_path("generic-fanout");
+    let store = LocalStore::open(&path).unwrap();
+    let trace = "FAKE_TRACE_GENERIC_FANOUT";
+    for index in 0..32 {
+        commit(
+            &store,
+            "uid:2101",
+            &generic_precursor(
+                &format!("evt_generic_precursor_{index:02}"),
+                BASE_TIME + index,
+                trace,
+            ),
+        );
+    }
+    let trigger_id = "evt_generic_trigger";
+    let result = store
+        .commit_continuous_event(
+            "uid:2101",
+            &generic_trigger(trigger_id, BASE_TIME + 40, trace),
+            &[generic_rule()],
+            128,
+        )
+        .unwrap();
+    assert_eq!(result.opened_incidents, 1);
+    let incidents = p1_incidents(&store, "EDR-FAKE-GENERIC-001");
+    assert_eq!(incidents.len(), 1);
+    let expected = format!(
+        "inc:EDR-FAKE-GENERIC-001:{}",
+        digest(&[
+            "skynet-edr-continuous-sequence-incident-v1\0",
+            "EDR-FAKE-GENERIC-001",
+            "\0",
+            "evt_generic_precursor_00",
+            "\0",
+            trigger_id,
+            "\0",
+        ])
+    );
+    assert_eq!(incidents[0].id.as_str(), expected);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn continuous_generic_sequence_ignores_unrelated_historical_match() {
+    let path = temp_path("generic-historical");
+    let store = LocalStore::open(&path).unwrap();
+    let trace = "FAKE_TRACE_GENERIC_HISTORICAL";
+    commit(
+        &store,
+        "uid:2102",
+        &generic_precursor("evt_generic_historical_a", BASE_TIME, trace),
+    );
+    commit(
+        &store,
+        "uid:2102",
+        &generic_trigger("evt_generic_historical_b", BASE_TIME + 1, trace),
+    );
+    let unrelated = plugin_event(
+        "evt_generic_unrelated",
+        "agent.config.changed",
+        "configuration",
+        "agent_action",
+        BASE_TIME + 2,
+        Some(trace),
+        json!({"approval_required":true,"persistence_indicator":false}),
+    );
+    let result = store
+        .commit_continuous_event("uid:2102", &unrelated, &[generic_rule()], 128)
+        .unwrap();
+    assert_eq!(result.opened_incidents, 0);
+    assert!(p1_incidents(&store, "EDR-FAKE-GENERIC-001").is_empty());
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn continuous_hot_join_reserves_late_precursor_and_keeps_bounded_stable_result() {
+    let mut stable_incident_id = None;
+    for history_size in [32_u64, 512] {
+        let path = temp_path(&format!("hot-join-{history_size}"));
+        let store = LocalStore::open(&path).unwrap();
+        let trace = "FAKE_TRACE_HOT_JOIN";
+        for index in 0..history_size {
+            let observed = if index < 3 {
+                BASE_TIME + 100 + index
+            } else {
+                BASE_TIME + 1
+            };
+            commit(
+                &store,
+                "uid:2103",
+                &generic_trigger(&format!("evt_hot_trigger_{index:04}"), observed, trace),
+            );
+        }
+        let incoming_id = "evt_hot_late_precursor";
+        let result = store
+            .commit_continuous_event(
+                "uid:2103",
+                &generic_precursor(incoming_id, BASE_TIME, trace),
+                &[generic_rule()],
+                4,
+            )
+            .unwrap();
+        assert!(result.correlation_truncated);
+        assert_eq!(result.candidate_events, 4);
+        let incidents = p1_incidents(&store, "EDR-FAKE-GENERIC-001");
+        assert_eq!(incidents.len(), 1);
+        assert!(incidents[0]
+            .events
+            .iter()
+            .any(|event| event.id.as_str() == incoming_id));
+        if let Some(expected) = &stable_incident_id {
+            assert_eq!(incidents[0].id.as_str(), expected);
+        } else {
+            stable_incident_id = Some(incidents[0].id.as_str().to_owned());
+        }
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
+fn continuous_projection_accepts_direct_ip_delivery_and_file_shapes_without_raw_url() {
+    let path = temp_path("direct-ip-tool-shapes");
+    let store = LocalStore::open(&path).unwrap();
+    let producer_state = path.with_extension("producer-state");
+    fs::create_dir(&producer_state).unwrap();
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../integrations/hermes/skynet-edr/__init__.py");
+    let script = r#"
+import importlib.util, pathlib, sys
+plugin_path, state = sys.argv[1:3]
+spec = importlib.util.spec_from_file_location("skynet_edr_delayed_review_e2e", plugin_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module._session_trace_id = "FAKE_TRACE_DIRECT_IP_TOOL_SHAPES"
+class Context:
+    def __init__(self): self.hooks = {}
+    def register_hook(self, name, callback): self.hooks[name] = callback
+ctx = Context()
+module.register(ctx)
+ctx.hooks["pre_tool_call"]("read_file", {"path": "/root/.hermes/FAKE_E2E_SENSITIVE"})
+inert = "https://198.51.100.42/FAKE_INERT_DIRECT_IP"
+ctx.hooks["pre_tool_call"]("send_message", {"recipient": inert})
+ctx.hooks["pre_tool_call"]("read_file", {"url": inert})
+module._event_queue.join()
+module._worker_stop.set()
+module._worker_thread.join(timeout=2)
+print(pathlib.Path(state, "events-v1.jsonl").read_text(), end="")
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(&plugin_path)
+        .arg(&producer_state)
+        .env("SKYNET_EDR_STATE_DIR", &producer_state)
+        .env(
+            "SKYNET_EDR_INGEST_SOCKET",
+            producer_state.join("missing.sock"),
+        )
+        .env("HERMES_SESSION_ID", "FAKE_TRACE_DIRECT_IP_TOOL_SHAPES")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let raw_producer_jsonl = String::from_utf8(output.stdout).unwrap();
+    assert!(!raw_producer_jsonl.contains("198.51.100.42"));
+    let produced = raw_producer_jsonl
+        .lines()
+        .map(|line| parse_canonical_event_json(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(produced.len(), 3);
+    assert_eq!(produced[1].event_type, "agent.tool.requested");
+    assert_eq!(produced[2].event_type, "agent.tool.requested");
+    for event in &produced {
+        commit(&store, "uid:2104", event);
+    }
+    for event in &produced[1..] {
+        let stored = store.get_event(event.event_id.as_str()).unwrap().unwrap();
+        assert_eq!(stored.attributes.get("direct_ip"), Some(&json!(true)));
+        assert_eq!(
+            stored.attributes.get("network_indicator"),
+            Some(&json!(true))
+        );
+        assert!(!stored.attributes.contains_key("tool_name"));
+    }
+    let bytes = fs::read(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("198.51.100.42"));
+    assert_eq!(p1_incidents(&store, "EDR-EXFIL-001").len(), 1);
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_dir_all(producer_state);
 }
 
 #[test]

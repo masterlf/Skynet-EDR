@@ -24,8 +24,8 @@ pub const CONTINUOUS_TRACE_CANDIDATE_SQL: &str =
      WHERE ingest_source_id = ?1
        AND trace_id = ?2
        AND observed_at_unix_ms BETWEEN ?3 AND ?4
-     ORDER BY CASE WHEN id = ?5 THEN 0 ELSE 1 END ASC,
-              observed_at_unix_ms DESC, id DESC
+       AND id != ?5
+     ORDER BY observed_at_unix_ms DESC, id DESC
      LIMIT ?6";
 
 /// Exact indexed session-candidate statement used by continuous ingestion.
@@ -34,8 +34,8 @@ pub const CONTINUOUS_SESSION_CANDIDATE_SQL: &str =
      WHERE ingest_source_id = ?1
        AND session_id = ?2
        AND observed_at_unix_ms BETWEEN ?3 AND ?4
-     ORDER BY CASE WHEN id = ?5 THEN 0 ELSE 1 END ASC,
-              observed_at_unix_ms DESC, id DESC
+       AND id != ?5
+     ORDER BY observed_at_unix_ms DESC, id DESC
      LIMIT ?6";
 
 macro_rules! insert_continuous_incident_or_record_collision {
@@ -908,6 +908,24 @@ fn continuous_sequence_incident_id(sequence_match: &SequenceMatch) -> String {
         sequence_match.rule_id,
         hex_digest(hasher.finalize().as_slice())
     )
+}
+
+fn continuous_sequence_matches_for_trigger(
+    rules: &[SequenceRule],
+    candidates: &[CanonicalEventEnvelope],
+    trigger_id: &EventId,
+) -> Result<Vec<SequenceMatch>, SequenceRuleError> {
+    Ok(correlate_sequence_rules(rules, candidates)?
+        .into_iter()
+        .filter(|sequence_match| sequence_match.matched_event_ids.contains(trigger_id))
+        .fold(BTreeMap::new(), |mut selected, sequence_match| {
+            selected
+                .entry(sequence_match.rule_id.clone())
+                .or_insert(sequence_match);
+            selected
+        })
+        .into_values()
+        .collect())
 }
 
 fn sequence_incident_digest(sequence_match: &SequenceMatch) -> u64 {
@@ -4447,7 +4465,8 @@ impl LocalStore {
                 .cmp(&right.observed_at_unix_ms)
                 .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
         });
-        let matches = correlate_sequence_rules(rules, &candidates)?;
+        let matches =
+            continuous_sequence_matches_for_trigger(rules, &candidates, &projected.event_id)?;
         let stored_events = candidates
             .iter()
             .cloned()
@@ -5183,7 +5202,7 @@ fn load_continuous_candidates(
     let upper = event.observed_at_unix_ms.saturating_add(max_rule_window_ms);
     let trace_id = event.provenance.trace_id.as_deref();
     let session_id = event_session_id(event);
-    let query_limit = candidate_limit.saturating_add(1);
+    let query_limit = candidate_limit;
     let lower = sqlite_unix_ms("ingest.candidate.lower", lower)?;
     let upper = sqlite_unix_ms("ingest.candidate.upper", upper)?;
     let query_limit = sqlite_usize("ingest.candidate.limit", query_limit)?;
@@ -5214,18 +5233,22 @@ fn load_continuous_candidates(
             ],
         )?
     } else {
-        let mut statement = connection.prepare("SELECT payload_json FROM events WHERE id = ?1")?;
-        collect_payload_rows::<Event, _>(&mut statement, params![event.event_id.as_str()])?
+        Vec::new()
     };
-    stored_events
-        .iter()
-        .map(storage_event_to_canonical_event)
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| {
-            ContinuousIngestError::Canonical(CanonicalEventError::Validation(
-                "continuous ingest candidate could not be reconstructed".to_owned(),
-            ))
-        })
+    let mut candidates = Vec::with_capacity(stored_events.len().saturating_add(1));
+    candidates.push(event.clone());
+    candidates.extend(
+        stored_events
+            .iter()
+            .map(storage_event_to_canonical_event)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                ContinuousIngestError::Canonical(CanonicalEventError::Validation(
+                    "continuous ingest candidate could not be reconstructed".to_owned(),
+                ))
+            })?,
+    );
+    Ok(candidates)
 }
 
 fn insert_continuous_incident_on_connection(

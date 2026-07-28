@@ -212,14 +212,20 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
         attrs["command_class"] = indicators["command_class"]
     if indicators["source_kind"] == "mcp_tool":
         event_type = "agent.mcp.tool.requested"
-    elif indicators["direct_ip"]:
+    elif (
+        indicators["tool_class"] == "process"
+        and indicators["source_kind"] == "process"
+        and indicators["direct_ip"]
+    ):
         event_type = "agent.network.egress"
     else:
         event_type = "agent.tool.requested"
     redacted_fields: list[dict[str, str]] = []
     replacement = _redaction_replacement(params_strings)
     if replacement is not None:
-        redacted_fields.append(_redacted_field("attributes.params_preview", replacement))
+        redacted_fields.append(
+            _redacted_field("attributes.params_preview", "[OMITTED:tool_params]")
+        )
     _write_event(
         event_type=event_type,
         source_kind=indicators["source_kind"],
@@ -847,27 +853,49 @@ def _session_attributes(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[s
 
 
 def _estimate_message_count(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int | None:
-    for value in list(args) + list(kwargs.values()):
+    values = args[:64] if type(args) is tuple else ()
+    for value in values:
         if type(value) is list:
             return len(value)
         if type(value) is dict:
-            messages = value.get("messages")
+            messages = _bounded_exact_dict_lookup(value, "messages")
             if type(messages) is list:
                 return len(messages)
+    if type(kwargs) is dict:
+        for index, value in enumerate(dict.values(kwargs)):
+            if index >= 64:
+                break
+            if type(value) is list:
+                return len(value)
+            if type(value) is dict:
+                messages = _bounded_exact_dict_lookup(value, "messages")
+                if type(messages) is list:
+                    return len(messages)
+    return None
+
+
+def _bounded_exact_dict_lookup(value: Any, expected_key: str) -> Any:
+    if type(value) is not dict:
+        return None
+    for index, (key, candidate) in enumerate(dict.items(value)):
+        if index >= 64:
+            break
+        if type(key) is str and key == expected_key:
+            return candidate
     return None
 
 
 def _extract_tool_call(
     args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> tuple[str, Any, bool]:
-    tool_name = kwargs.get("tool_name")
+    tool_name = _bounded_exact_dict_lookup(kwargs, "tool_name")
     if tool_name is None:
-        tool_name = kwargs.get("name")
-    params = kwargs.get("params")
+        tool_name = _bounded_exact_dict_lookup(kwargs, "name")
+    params = _bounded_exact_dict_lookup(kwargs, "params")
     if params is None:
-        params = kwargs.get("arguments")
+        params = _bounded_exact_dict_lookup(kwargs, "arguments")
     if params is None:
-        params = kwargs.get("args")
+        params = _bounded_exact_dict_lookup(kwargs, "args")
     if tool_name is None and args:
         tool_name = args[0]
     if params is None and len(args) > 1:
@@ -887,9 +915,9 @@ def _extract_post_tool_call(
     args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> tuple[str, Any, Any, bool]:
     tool_name, params, tool_name_truncated = _extract_tool_call(args, kwargs)
-    result = kwargs.get("result")
+    result = _bounded_exact_dict_lookup(kwargs, "result")
     if result is None:
-        result = kwargs.get("output")
+        result = _bounded_exact_dict_lookup(kwargs, "output")
     if result is None and len(args) > 2:
         result = args[2]
     return tool_name, params, result, tool_name_truncated
@@ -1334,7 +1362,12 @@ def _redaction_replacement(strings: tuple[str, ...]) -> str | None:
 
 
 def _redacted_field(path: str, replacement: str) -> dict[str, str]:
-    reason = "secret" if replacement == "[REDACTED:secret]" else "local_context"
+    if replacement == "[REDACTED:secret]":
+        reason = "secret"
+    elif replacement == "[OMITTED:tool_params]":
+        reason = "policy"
+    else:
+        reason = "local_context"
     return {"path": path, "reason": reason, "replacement": replacement}
 
 

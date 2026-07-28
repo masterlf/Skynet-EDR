@@ -739,7 +739,13 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertTrue(event["redaction"]["contains_sensitive_data"])
         self.assertEqual(
             event["redaction"]["redacted_fields"],
-            [{"path": "attributes.params_preview", "reason": "secret", "replacement": "[REDACTED:secret]"}],
+            [
+                {
+                    "path": "attributes.params_preview",
+                    "reason": "policy",
+                    "replacement": "[OMITTED:tool_params]",
+                }
+            ],
         )
         self.assertNotIn("FAKE_TOKEN_VALUE", serialized)
 
@@ -1298,6 +1304,102 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(event["event_type"], "agent.llm.call.requested")
         self.assertEqual(event["attributes"]["message_count"], 1)
         self.assertEqual(event["provenance"]["trace_id"], "hermes-local-test-session")
+
+    def test_exact_dict_hostile_string_keys_are_bounded_and_opaque(self):
+        touched = []
+
+        class HostileKey(str):
+            def __hash__(self):
+                touched.append("key.__hash__")
+                return str.__hash__(self)
+
+            def __eq__(self, other):
+                touched.append("key.__eq__")
+                raise AssertionError("hostile key equality executed")
+
+            def __str__(self):
+                touched.append("key.__str__")
+                raise AssertionError("hostile key string conversion executed")
+
+            def __len__(self):
+                touched.append("key.__len__")
+                raise AssertionError("hostile key length executed")
+
+            def __iter__(self):
+                touched.append("key.__iter__")
+                raise AssertionError("hostile key iteration executed")
+
+        marker = "FAKE_HOSTILE_EXACT_DICT_KEY_MARKER"
+
+        def hostile_mapping(keys, ordinary=None):
+            mapping = {}
+            for key in keys:
+                mapping[HostileKey(key)] = marker
+            if ordinary:
+                mapping.update(ordinary)
+            touched.clear()
+            return mapping
+
+        messages = hostile_mapping(["messages"], {"safe": ["ordinary"]})
+        self.assertIsNone(self.plugin._estimate_message_count((messages,), {}))
+
+        request = hostile_mapping(
+            ["tool_name", "name", "params", "arguments", "args"], {"safe": marker}
+        )
+        tool_name, params, truncated = self.plugin._extract_tool_call((), request)
+        self.assertEqual(tool_name, "invalid_tool")
+        self.assertEqual(params, {})
+        self.assertTrue(truncated)
+
+        completed = hostile_mapping(
+            [
+                "tool_name",
+                "name",
+                "params",
+                "arguments",
+                "args",
+                "result",
+                "output",
+            ],
+            {"safe": marker},
+        )
+        tool_name, params, result, truncated = self.plugin._extract_post_tool_call((), completed)
+        self.assertEqual((tool_name, params, result, truncated), ("invalid_tool", {}, None, True))
+        self.assertEqual(touched, [])
+
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        ctx.hooks["pre_llm_call"](messages)
+        ctx.hooks["pre_tool_call"](tool_name, params)
+        ctx.hooks["post_tool_call"](tool_name, params, result)
+        events = self.read_events()
+        serialized = json.dumps(events)
+        self.assertNotIn(marker, serialized)
+        self.assertTrue(all(marker not in event["title"] for event in events))
+        for path in [
+            self.state_dir / "events-v1.jsonl",
+            self.state_dir / "skynet-edr-plugin.log",
+        ]:
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            self.assertNotIn(marker, text)
+
+    def test_direct_ip_delivery_and_file_requests_keep_tool_requested_shape(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        inert_url = "https://198.51.100.42/FAKE_INERT_DIRECT_IP"
+        ctx.hooks["pre_tool_call"]("send_message", {"recipient": inert_url})
+        ctx.hooks["pre_tool_call"]("read_file", {"url": inert_url})
+        delivery_event, file_event = self.read_events()[-2:]
+        self.assertEqual(delivery_event["event_type"], "agent.tool.requested")
+        self.assertEqual(delivery_event["source"]["kind"], "messaging")
+        self.assertEqual(delivery_event["attributes"]["tool_class"], "delivery")
+        self.assertTrue(delivery_event["attributes"]["delivery_indicator"])
+        self.assertTrue(delivery_event["attributes"]["direct_ip"])
+        self.assertEqual(file_event["event_type"], "agent.tool.requested")
+        self.assertEqual(file_event["source"]["kind"], "file")
+        self.assertEqual(file_event["attributes"]["tool_class"], "file_read")
+        self.assertTrue(file_event["attributes"]["direct_ip"])
+        self.assertNotIn(inert_url, json.dumps([delivery_event, file_event]))
 
     def test_delivery_tool_is_high_severity_even_without_network_url(self):
         ctx = FakeContext()
