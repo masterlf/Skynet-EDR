@@ -851,6 +851,36 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(content["attributes"]["rule_id"], "EDR-PI-001")
         self.assertFalse(content["attributes"]["instruction_authority"])
 
+    def test_malware_test_markers_require_token_boundaries(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        near_markers = (
+            "prefixSKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE",
+            "SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTEsuffix",
+            "prefixEICAR-STANDARD-ANTIVIRUS-TEST-FILE",
+            "EICAR-STANDARD-ANTIVIRUS-TEST-FILEsuffix",
+        )
+
+        for result in near_markers:
+            ctx.hooks["post_tool_call"](
+                "read_file", {"path": "/tmp/FAKE_NEAR_MARKER"}, result
+            )
+
+        events = self.read_events()
+        completed = [
+            event for event in events if event["event_type"] == "agent.tool.completed"
+        ]
+        self.assertEqual(len(completed), len(near_markers))
+        self.assertTrue(
+            all(not event["attributes"]["malware_indicator"] for event in completed)
+        )
+        self.assertTrue(
+            all(event["attributes"].get("malware_signature") is None for event in completed)
+        )
+        self.assertFalse(
+            any(event["event_type"] == "agent.content.ingested" for event in events)
+        )
+
     def test_hermes_access_class_exact_read_and_enumerate_positive(self):
         ctx = FakeContext()
         self.plugin.register(ctx)
@@ -1187,8 +1217,8 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         depth5 = emit({"output": {"a": {"b": {"c": {"d": {"e": raw_marker}}}}}})
         items64 = emit({"output": ["x"] * 63})
         items65 = emit({"output": ["x"] * 64})
-        scalar4096 = emit({"output": raw_marker + "A" * (4096 - len(raw_marker))})
-        scalar4097 = emit({"output": raw_marker + "A" * (4097 - len(raw_marker))})
+        scalar4096 = emit({"output": raw_marker + " " + "A" * (4095 - len(raw_marker))})
+        scalar4097 = emit({"output": raw_marker + " " + "A" * (4096 - len(raw_marker))})
         total16384 = emit({"output": ["A" * 4096] * 4})
         total16385 = emit({"output": ["A" * 4096] * 4 + ["B"]})
 

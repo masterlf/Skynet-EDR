@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Hardened authenticated continuous ingestion with exact per-event projection, pseudonymized correlation identities, transactional bounded EXFIL/MALWARE correlation, and collision-safe acknowledgements.
+- Hardened authenticated continuous ingestion with exact per-event projection, pseudonymized correlation identities, transactional bounded EXFIL/MALWARE correlation, trigger-anchored linear two-step sequence evaluation, and collision-safe acknowledgements.
 - Added bounded Hermes parameter/result classification metadata without persisting raw tool input or output; P1b mutation producers remain pending.
 
 ## 0.4.0 - 2026-07-24

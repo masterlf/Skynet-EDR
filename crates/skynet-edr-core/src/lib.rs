@@ -1060,17 +1060,108 @@ fn continuous_sequence_matches_for_trigger(
     candidates: &[CanonicalEventEnvelope],
     trigger_id: &EventId,
 ) -> Result<Vec<SequenceMatch>, SequenceRuleError> {
-    Ok(correlate_sequence_rules(rules, candidates)?
-        .into_iter()
-        .filter(|sequence_match| sequence_match.matched_event_ids.contains(trigger_id))
-        .fold(BTreeMap::new(), |mut selected, sequence_match| {
-            selected
-                .entry(sequence_match.rule_id.clone())
-                .or_insert(sequence_match);
-            selected
-        })
-        .into_values()
-        .collect())
+    validate_continuous_sequence_rules(rules)?;
+    let Some(trigger_index) = candidates
+        .iter()
+        .position(|candidate| &candidate.event_id == trigger_id)
+    else {
+        return Ok(Vec::new());
+    };
+    let trigger = &candidates[trigger_index];
+    let mut matches = Vec::new();
+
+    for rule in rules {
+        let trigger_join_key = event_join_key(trigger, rule.join);
+        let mut selected: Option<SequenceMatch> = None;
+
+        if step_matches(&rule.steps[0], trigger) {
+            if let Some(join_key) = trigger_join_key.as_deref() {
+                if let Some(successor) =
+                    candidates.iter().skip(trigger_index + 1).find(|candidate| {
+                        candidate.observed_at_unix_ms >= trigger.observed_at_unix_ms
+                            && candidate.observed_at_unix_ms - trigger.observed_at_unix_ms
+                                <= rule.window_ms
+                            && event_join_key(candidate, rule.join).as_deref() == Some(join_key)
+                            && step_matches(&rule.steps[1], candidate)
+                    })
+                {
+                    selected = Some(sequence_match_from_events(
+                        rule, trigger, successor, join_key,
+                    ));
+                }
+            }
+        }
+
+        if step_matches(&rule.steps[1], trigger) {
+            if let Some(join_key) = trigger_join_key.as_deref() {
+                let preceding = &candidates[..trigger_index];
+                let start_floor = preceding
+                    .iter()
+                    .rposition(|candidate| {
+                        event_join_key(candidate, rule.join).as_deref() == Some(join_key)
+                            && step_matches(&rule.steps[1], candidate)
+                    })
+                    .unwrap_or(0);
+                let predecessor = preceding[start_floor..]
+                    .iter()
+                    .filter(|candidate| {
+                        trigger.observed_at_unix_ms >= candidate.observed_at_unix_ms
+                            && trigger.observed_at_unix_ms - candidate.observed_at_unix_ms
+                                <= rule.window_ms
+                            && event_join_key(candidate, rule.join).as_deref() == Some(join_key)
+                            && step_matches(&rule.steps[0], candidate)
+                    })
+                    .min_by(|left, right| left.event_id.as_str().cmp(right.event_id.as_str()));
+                if let Some(predecessor) = predecessor {
+                    let candidate =
+                        sequence_match_from_events(rule, predecessor, trigger, join_key);
+                    if selected.as_ref().is_none_or(|current| {
+                        candidate.matched_event_ids < current.matched_event_ids
+                    }) {
+                        selected = Some(candidate);
+                    }
+                }
+            }
+        }
+
+        if let Some(selected) = selected {
+            matches.push(selected);
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        left.rule_id
+            .cmp(&right.rule_id)
+            .then_with(|| left.matched_event_ids.cmp(&right.matched_event_ids))
+    });
+    Ok(matches)
+}
+
+fn validate_continuous_sequence_rules(rules: &[SequenceRule]) -> Result<(), SequenceRuleError> {
+    for rule in rules {
+        rule.validate()?;
+        if rule.steps.len() != 2 {
+            return Err(SequenceRuleError::Validation(
+                "continuous sequence rules require exactly two steps".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sequence_match_from_events(
+    rule: &SequenceRule,
+    first: &CanonicalEventEnvelope,
+    second: &CanonicalEventEnvelope,
+    join_key: &str,
+) -> SequenceMatch {
+    SequenceMatch {
+        rule_id: rule.id.clone(),
+        severity: rule.severity,
+        matched_event_ids: vec![first.event_id.clone(), second.event_id.clone()],
+        join_key: Some(join_key.to_owned()),
+        explanations: explain_sequence_match(rule, &[first, second]),
+    }
 }
 
 fn sequence_incident_digest(sequence_match: &SequenceMatch) -> u64 {
@@ -4579,9 +4670,7 @@ impl LocalStore {
         if candidate_limit == 0 {
             return Err(ContinuousIngestError::CandidateLimitExceeded { limit: 0 });
         }
-        for rule in rules {
-            rule.validate()?;
-        }
+        validate_continuous_sequence_rules(rules)?;
         let projected = project_continuous_event(canonical_event)?;
         let source_key = continuous_source_key(source_id)?;
         let max_rule_window_ms = rules
@@ -5861,6 +5950,94 @@ mod storage_hardening_tests {
                 .expect("clock after epoch")
                 .as_nanos()
         ))
+    }
+
+    fn sequence_candidate(
+        id: String,
+        event_type: &str,
+        observed_at_unix_ms: u64,
+        trust_level: TrustLevel,
+        attributes: BTreeMap<String, serde_json::Value>,
+    ) -> CanonicalEventEnvelope {
+        CanonicalEventEnvelope {
+            schema_version: EventSchemaVersion::V0,
+            event_id: EventId::new(id.clone()),
+            event_type: event_type.to_owned(),
+            observed_at_unix_ms,
+            received_at_unix_ms: Some(observed_at_unix_ms),
+            severity: Severity::High,
+            source: EventSource {
+                kind: SourceKind::Sensor,
+                sensor: "fake-linear-correlation-test".to_owned(),
+                integration: Some("hermes".to_owned()),
+            },
+            provenance: EventProvenance {
+                producer: "fake-test-producer".to_owned(),
+                collector: "fake-test-collector".to_owned(),
+                tenant: Some("fake-test".to_owned()),
+                source_event_id: Some(id),
+                trace_id: Some("fake-hot-trace".to_owned()),
+                span_id: None,
+                parent_span_id: None,
+            },
+            artifact: None,
+            trust_level,
+            title: "Clearly fake linear-correlation test event".to_owned(),
+            details: None,
+            attributes,
+            redaction: RedactionMetadata {
+                contains_sensitive_data: false,
+                redacted_fields: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn continuous_trigger_correlation_is_linear_at_the_hard_candidate_cap() {
+        let mut candidates = (0..9_999)
+            .map(|index| {
+                sequence_candidate(
+                    format!("evt_linear_precursor_{index:05}"),
+                    "agent.content.ingested",
+                    1_781_600_000_000 + index,
+                    TrustLevel::UntrustedContent,
+                    BTreeMap::from([
+                        ("instruction_authority".to_owned(), serde_json::json!(false)),
+                        (
+                            "contains_instructional_attack".to_owned(),
+                            serde_json::json!(true),
+                        ),
+                    ]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let trigger_id = EventId::new("evt_linear_trigger");
+        candidates.push(sequence_candidate(
+            trigger_id.as_str().to_owned(),
+            "agent.tool.requested",
+            1_781_600_010_000,
+            TrustLevel::AgentAction,
+            BTreeMap::from([
+                ("network_indicator".to_owned(), serde_json::json!(true)),
+                ("sensitive_access".to_owned(), serde_json::json!(true)),
+            ]),
+        ));
+        let started = std::time::Instant::now();
+
+        let matches = continuous_sequence_matches_for_trigger(
+            &built_in_ai_agent_sequence_rules(),
+            &candidates,
+            &trigger_id,
+        )
+        .expect("bounded built-in correlation succeeds");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "trigger-anchored correlation exceeded the linear-work regression budget"
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_id, "EDR-PI-001");
+        assert_eq!(matches[0].matched_event_ids[1], trigger_id);
     }
 
     fn sidecars(path: &Path) -> [PathBuf; 2] {

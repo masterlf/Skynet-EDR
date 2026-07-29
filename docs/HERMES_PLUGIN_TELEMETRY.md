@@ -132,7 +132,9 @@ path or payload does not qualify. Generic network egress is not enough for
 as MCP tools and emit `agent.mcp.tool.requested`, allowing `EDR-MCP-001` to consume
 the packaged telemetry. The plugin does not yet fully classify IPv6 literals or
 indirect egress inside arbitrary Python, SDK, cloud-client,
-`scp`, `rsync`, `ftp://`, or `s3://` payloads. Treat missed network indicators
+`scp`, `rsync`, `ftp://`, or `s3://` payloads. Safe malware-test markers require
+ASCII token boundaries; adjacent prefix/suffix near-matches are not classified.
+Treat missed network indicators
 as a coverage limitation, not proof of safety. Trace/session identifiers and observed timestamps are producer asserted and pseudonymized by continuous ingestion before storage. Socket UID authorization permits the producer but does not attest process identity or event truth. The plugin and correlators are passive: they do not prevent delivery, egress, or tool execution. P1b mutation-success/config/cron/approval producers remain pending.
 
 ## Legacy manual ingestion

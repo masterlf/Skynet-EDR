@@ -76,7 +76,7 @@ _PROMPT_INJECTION_RE = re.compile(
     r"(?i)(ignore (all )?(previous|prior) instructions|disregard (all )?(previous|prior) instructions|system prompt|developer message|reveal your instructions|exfiltrate|send (the )?(secret|token|credentials))"
 )
 _MALWARE_TEST_RE = re.compile(
-    r"(?i)(skynet_fake_malware_test_string_do_not_execute|eicar-standard-antivirus-test-file)"
+    r"(?i)(?<![a-z0-9_])(skynet_fake_malware_test_string_do_not_execute|eicar-standard-antivirus-test-file)(?![a-z0-9_])"
 )
 _BROWSER_TOOLS = {"browser_navigate", "browser_snapshot", "browser_click", "web_search", "web_extract"}
 _CODE_TOOLS = {"execute_code", "codex", "claude_code"}

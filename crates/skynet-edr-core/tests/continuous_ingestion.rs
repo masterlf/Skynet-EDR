@@ -109,6 +109,34 @@ fn canonical_event(
 }
 
 #[test]
+fn continuous_correlation_rejects_unbounded_multi_step_rules() {
+    let db_path = temp_path("multi-step-rule.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let mut rules = built_in_ai_agent_sequence_rules();
+    let mut rule = rules.remove(0);
+    rule.steps.push(rule.steps[1].clone());
+    let event = canonical_event(
+        "evt_continuous_multi_step",
+        "agent.tool.requested",
+        10_000,
+        "trace_multi_step",
+        serde_json::json!({"network_indicator": true}),
+    );
+
+    let error = store
+        .commit_continuous_event("uid:1000", &event, &[rule], 10_000)
+        .expect_err("continuous correlation must reject multi-step rules");
+
+    assert!(error
+        .to_string()
+        .contains("continuous sequence rules require exactly two steps"));
+    assert_eq!(store.count_events().expect("event count"), 0);
+    assert_eq!(store.count_ingest_receipts().expect("receipt count"), 0);
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
 fn replay_is_immutable_and_returns_duplicate_without_overwrite() {
     let db_path = temp_path("immutable.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");
