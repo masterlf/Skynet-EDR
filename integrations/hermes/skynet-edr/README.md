@@ -14,6 +14,7 @@ modify model/tool execution.
 - `pre_tool_call`
 - `post_tool_call`
 
+
 ## Default output
 
 The hook path serializes into a bounded in-memory queue only. A producer-owned
@@ -70,6 +71,12 @@ The fallback, checkpoint, and log are user-private where supported.
   value and coherent Secret metadata. Unsafe keys are rejected, never silently
   renamed.
 - Hook failures are logged and swallowed so Hermes remains usable.
+- Exact successful active built-in `cronjob` `create`/`update` outcomes emit a
+  fixed `agent.automation.scheduled` event. Raw prompts, results, and job IDs are
+  never copied into that event.
+- Config, persistence, and approval-scope mutation rules remain explicitly dark:
+  terminal and generic file-write success do not prove Hermes parsed, accepted,
+  or loaded a config, and the approval callback fires before scope persistence.
 
 ## Risk Explorer
 

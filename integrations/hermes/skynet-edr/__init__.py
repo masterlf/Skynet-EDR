@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -44,6 +45,10 @@ _CLASSIFICATION_MAX_DEPTH = 4
 _CLASSIFICATION_MAX_ITEMS = 64
 _CLASSIFICATION_MAX_SCALAR_BYTES = 4096
 _CLASSIFICATION_MAX_TOTAL_BYTES = 16_384
+_MUTATION_RESULT_MAX_CHARS = 16_384
+_SCHEDULED_NEXT_RUN_RE = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})\Z"
+)
 _PARAM_CLASSIFICATION_KEYS = frozenset(
     {"path", "pattern", "query", "command", "url", "uri", "destination", "recipient"}
 )
@@ -285,6 +290,15 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
         attributes=attrs,
         artifact=artifact,
     )
+    if _completed_cron_schedule_mutation(tool_name, params, result, kwargs):
+        _write_event(
+            event_type="agent.automation.scheduled",
+            source_kind="scheduled_task",
+            trust_level="agent_action",
+            severity="high",
+            title="Hermes automation schedule mutation completed",
+            attributes={"persistence_indicator": True},
+        )
     if injection:
         content_artifact = dict(artifact)
         content_artifact["trust_level"] = "untrusted_content"
@@ -306,6 +320,76 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
                 "rule_id": "EDR-PI-001",
             },
         )
+
+
+def _completed_cron_schedule_mutation(
+    tool_name: Any,
+    params: Any,
+    result: Any,
+    hook_kwargs: dict[str, Any],
+) -> bool:
+    """Return true only for a bounded authoritative cron create/update result."""
+    if type(tool_name) is not str or tool_name != "cronjob" or type(params) is not dict:
+        return False
+    action = _bounded_exact_dict_lookup(params, "action")
+    if type(action) is not str or action not in {"create", "update"}:
+        return False
+
+    if "status" in hook_kwargs:
+        status = hook_kwargs.get("status")
+        if type(status) is not str or status != "ok":
+            return False
+    if hook_kwargs.get("error_type") is not None:
+        return False
+    if type(result) is not str or not result or len(result) > _MUTATION_RESULT_MAX_CHARS:
+        return False
+    try:
+        decoded = json.loads(
+            result,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return False
+    if type(decoded) is not dict or decoded.get("success") is not True or "error" in decoded:
+        return False
+
+    job = decoded.get("job")
+    if type(job) is not dict:
+        return False
+    job_id = job.get("job_id")
+    if type(job_id) is not str or not 0 < len(job_id) <= 256:
+        return False
+    if action == "create" and decoded.get("job_id") != job_id:
+        return False
+    return (
+        job.get("enabled") is True
+        and job.get("state") == "scheduled"
+        and _valid_scheduled_next_run_at(job.get("next_run_at"))
+    )
+
+
+def _valid_scheduled_next_run_at(value: Any) -> bool:
+    if type(value) is not str or len(value) > 40 or _SCHEDULED_NEXT_RUN_RE.fullmatch(value) is None:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    decoded: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in decoded:
+            raise ValueError("duplicate JSON key")
+        decoded[key] = value
+    return decoded
+
+
+def _reject_nonstandard_json_constant(_constant: str) -> None:
+    raise ValueError("non-standard JSON constant")
 
 
 def _write_event(

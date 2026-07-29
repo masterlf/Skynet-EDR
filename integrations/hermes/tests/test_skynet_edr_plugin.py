@@ -506,9 +506,375 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.plugin.register(ctx)
         self.assertEqual(
             set(ctx.hooks),
-            {"on_session_start", "on_session_end", "pre_llm_call", "pre_tool_call", "post_tool_call"},
+            {
+                "on_session_start",
+                "on_session_end",
+                "pre_llm_call",
+                "pre_tool_call",
+                "post_tool_call",
+            },
         )
         self.assertTrue((self.state_dir / "skynet-edr-plugin.log").exists())
+
+    def test_cron_create_and_update_emit_only_completed_schedule_mutations(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+
+        ctx.hooks["pre_tool_call"](
+            "cronjob",
+            {
+                "action": "create",
+                "prompt": "FAKE_PRIVATE_CRON_PROMPT_DO_NOT_STORE",
+                "schedule": "30m",
+            },
+        )
+        intent_events = self.read_events()
+        self.assertFalse(
+            any(event["event_type"] == "agent.automation.scheduled" for event in intent_events)
+        )
+
+        ctx.hooks["post_tool_call"](
+            "cronjob",
+            {
+                "action": "create",
+                "prompt": "FAKE_PRIVATE_CRON_PROMPT_DO_NOT_STORE",
+                "schedule": "30m",
+            },
+            json.dumps(
+                {
+                    "success": True,
+                    "job_id": "fake-job-create",
+                    "job": {
+                        "job_id": "fake-job-create",
+                        "enabled": True,
+                        "state": "scheduled",
+                        "next_run_at": "2026-12-31T23:55:00+00:00",
+                    },
+                    "message": "FAKE_PRIVATE_CRON_RESULT_DO_NOT_STORE",
+                }
+            ),
+            status="ok",
+            error_type=None,
+        )
+        ctx.hooks["post_tool_call"](
+            "cronjob",
+            {"action": "update", "job_id": "fake-job-create", "schedule": "1h"},
+            json.dumps(
+                {
+                    "success": True,
+                    "job": {
+                        "job_id": "fake-job-create",
+                        "enabled": True,
+                        "state": "scheduled",
+                        "next_run_at": "2026-12-31T23:56:00+00:00",
+                        "prompt": "FAKE_PRIVATE_UPDATED_PROMPT_DO_NOT_STORE",
+                    },
+                }
+            ),
+            status="ok",
+            error_type=None,
+        )
+
+        mutation_events = [
+            event
+            for event in self.read_events()
+            if event["event_type"] == "agent.automation.scheduled"
+        ]
+        self.assertEqual(len(mutation_events), 2)
+        for event in mutation_events:
+            self.assertEqual(event["source"]["kind"], "scheduled_task")
+            self.assertEqual(event["trust_level"], "agent_action")
+            self.assertEqual(event["attributes"], {"persistence_indicator": True})
+        serialized = json.dumps(mutation_events)
+        for raw in (
+            "FAKE_PRIVATE_CRON_PROMPT_DO_NOT_STORE",
+            "FAKE_PRIVATE_CRON_RESULT_DO_NOT_STORE",
+            "FAKE_PRIVATE_UPDATED_PROMPT_DO_NOT_STORE",
+            "fake-job-create",
+        ):
+            self.assertNotIn(raw, serialized)
+
+    def test_cron_schedule_mutation_fails_dark_for_non_success_and_near_allowlists(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        active_create_result = json.dumps(
+            {
+                "success": True,
+                "job_id": "fake-job",
+                "job": {
+                    "job_id": "fake-job",
+                    "enabled": True,
+                    "state": "scheduled",
+                    "next_run_at": "2026-12-31T23:55:00+00:00",
+                },
+            }
+        )
+
+        denied_calls = [
+            ("cronjob", {"action": action}, active_create_result, "ok")
+            for action in (
+                "list",
+                "run",
+                "pause",
+                "resume",
+                "remove",
+                "unknown",
+                "Create",
+                "create ",
+            )
+        ]
+        denied_calls.extend(
+            [
+                (
+                    tool_name,
+                    {"action": "create"},
+                    active_create_result,
+                    "ok",
+                )
+                for tool_name in ("Cronjob", "cronjobx", "cron_job")
+            ]
+        )
+        denied_calls.extend(
+            [
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    json.dumps({"success": False, "error": "fake failure"}),
+                    "error",
+                ),
+                ("cronjob", {"action": "create"}, "not-json", "ok"),
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    '{"success":false,"success":true,"job_id":"fake-job",'
+                    '"job":{"job_id":"fake-job","enabled":true,'
+                    '"state":"scheduled","next_run_at":"2026-12-31T23:55:00+00:00"}}',
+                    "ok",
+                ),
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    '{"success":true,"job_id":"fake-job",'
+                    '"job":{"job_id":"fake-job","enabled":false,"state":"paused",'
+                    '"next_run_at":null},"job":{"job_id":"fake-job","enabled":true,'
+                    '"state":"scheduled","next_run_at":"2026-12-31T23:55:00+00:00"}}',
+                    "ok",
+                ),
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    '{"success":true,"job_id":"fake-job",'
+                    '"job":{"job_id":"fake-job","enabled":true,'
+                    '"state":"scheduled","next_run_at":"2026-12-31T23:55:00+00:00"},'
+                    '"junk":NaN}',
+                    "ok",
+                ),
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    '{"success":true,"job_id":"fake-job",'
+                    '"job":{"job_id":"fake-job","enabled":true,'
+                    '"state":"scheduled","next_run_at":"2026-12-31T23:55:00+00:00"},'
+                    '"junk":' + "9" * 5_000 + "}",
+                    "ok",
+                ),
+                ("cronjob", {"action": "create"}, json.dumps({"success": "true"}), "ok"),
+                ("cronjob", {"action": "create"}, json.dumps({"success": True}), "ok"),
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    json.dumps(
+                        {
+                            "success": True,
+                            "job_id": "fake-job",
+                            "job": {
+                                "job_id": "fake-job",
+                                "enabled": False,
+                                "state": "paused",
+                                "next_run_at": None,
+                            },
+                        }
+                    ),
+                    "ok",
+                ),
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    json.dumps(
+                        {
+                            "success": True,
+                            "job_id": "fake-job",
+                            "job": {
+                                "job_id": "different-job",
+                                "enabled": True,
+                                "state": "scheduled",
+                                "next_run_at": "2026-12-31T23:55:00+00:00",
+                            },
+                        }
+                    ),
+                    "ok",
+                ),
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    json.dumps(
+                        {
+                            "success": True,
+                            "job_id": "fake-job",
+                            "job": {
+                                "job_id": "fake-job",
+                                "enabled": True,
+                                "state": "scheduled",
+                                "next_run_at": 1_785_366_000_000,
+                            },
+                        }
+                    ),
+                    "ok",
+                ),
+                *[
+                    (
+                        "cronjob",
+                        {"action": "create"},
+                        json.dumps(
+                            {
+                                "success": True,
+                                "job_id": "fake-job",
+                                "job": {
+                                    "job_id": "fake-job",
+                                    "enabled": True,
+                                    "state": "scheduled",
+                                    "next_run_at": invalid_next_run_at,
+                                },
+                            }
+                        ),
+                        "ok",
+                    )
+                    for invalid_next_run_at in (
+                        "2026-12-31T23:55:00",
+                        "2026-13-31T23:55:00+00:00",
+                        "2026-12-31T23:55:00+00:00" + "X" * 41,
+                    )
+                ],
+                (
+                    "cronjob",
+                    {"action": "create"},
+                    active_create_result,
+                    "blocked",
+                ),
+            ]
+        )
+
+        for tool_name, params, result, status in denied_calls:
+            ctx.hooks["post_tool_call"](
+                tool_name,
+                params,
+                result,
+                status=status,
+                error_type="fake" if status != "ok" else None,
+            )
+
+        self.assertFalse(
+            any(
+                event["event_type"] == "agent.automation.scheduled"
+                for event in self.read_events()
+            )
+        )
+        self.assertNotIn(
+            "post_tool_call hook failed",
+            (self.state_dir / "skynet-edr-plugin.log").read_text(encoding="utf-8"),
+        )
+
+    def test_cron_schedule_classifier_is_bounded_and_ignores_recursive_unselected_params(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+
+        recursive_params: dict[str, object] = {"action": "create"}
+        recursive_params["ignored_cycle"] = recursive_params
+        ctx.hooks["post_tool_call"](
+            "cronjob",
+            recursive_params,
+            json.dumps(
+                {
+                    "success": True,
+                    "job_id": "fake-recursive-job",
+                    "job": {
+                        "job_id": "fake-recursive-job",
+                        "enabled": True,
+                        "state": "scheduled",
+                        "next_run_at": "2026-12-31T23:55:00+00:00",
+                    },
+                }
+            ),
+            status="ok",
+            error_type=None,
+        )
+        oversized_result = json.dumps(
+            {
+                "success": True,
+                "job_id": "fake-oversized-job",
+                "job": {
+                    "job_id": "fake-oversized-job",
+                    "enabled": True,
+                    "state": "scheduled",
+                    "next_run_at": "2026-12-31T23:55:00+00:00",
+                },
+                "ignored": "X" * 20_000,
+            }
+        )
+        ctx.hooks["post_tool_call"](
+            "cronjob",
+            {"action": "create"},
+            oversized_result,
+            status="ok",
+            error_type=None,
+        )
+
+        mutation_events = [
+            event
+            for event in self.read_events()
+            if event["event_type"] == "agent.automation.scheduled"
+        ]
+        self.assertEqual(len(mutation_events), 1)
+        self.assertEqual(mutation_events[0]["attributes"], {"persistence_indicator": True})
+        serialized = json.dumps(mutation_events)
+        self.assertNotIn("fake-recursive-job", serialized)
+        self.assertNotIn("fake-oversized-job", serialized)
+        self.assertNotIn("X" * 100, serialized)
+
+    def test_cron_schedule_classifier_does_not_execute_hostile_parameter_keys(self):
+        touched = []
+
+        class HostileKey(str):
+            def __hash__(self):
+                return str.__hash__(self)
+
+            def __eq__(self, other):
+                touched.append(other)
+                raise AssertionError("hostile parameter-key equality executed")
+
+        result = json.dumps(
+            {
+                "success": True,
+                "job_id": "fake-hostile-key-job",
+                "job": {
+                    "job_id": "fake-hostile-key-job",
+                    "enabled": True,
+                    "state": "scheduled",
+                    "next_run_at": "2026-12-31T23:55:00+00:00",
+                },
+            }
+        )
+
+        self.assertFalse(
+            self.plugin._completed_cron_schedule_mutation(
+                "cronjob",
+                {HostileKey("action"): "create"},
+                result,
+                {"status": "ok", "error_type": None},
+            )
+        )
+        self.assertEqual(touched, [])
+
 
     def test_register_starts_one_worker_and_immediately_attempts_hermetic_health(self):
         configured_socket = Path(os.environ["SKYNET_EDR_INGEST_SOCKET"])
