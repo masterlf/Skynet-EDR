@@ -859,6 +859,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             "SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTEsuffix",
             "prefixEICAR-STANDARD-ANTIVIRUS-TEST-FILE",
             "EICAR-STANDARD-ANTIVIRUS-TEST-FILEsuffix",
+            "ſkynet_fake_malware_test_string_do_not_execute",
+            "sKynet_fake_malware_test_string_do_not_execute",
+            "eıcar-standard-antivirus-test-file",
         )
 
         for result in near_markers:

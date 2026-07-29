@@ -1138,11 +1138,17 @@ fn continuous_sequence_matches_for_trigger(
 }
 
 fn validate_continuous_sequence_rules(rules: &[SequenceRule]) -> Result<(), SequenceRuleError> {
+    let mut rule_ids = BTreeSet::new();
     for rule in rules {
         rule.validate()?;
         if rule.steps.len() != 2 {
             return Err(SequenceRuleError::Validation(
                 "continuous sequence rules require exactly two steps".to_owned(),
+            ));
+        }
+        if !rule_ids.insert(rule.id.as_str()) {
+            return Err(SequenceRuleError::Validation(
+                "continuous sequence rule IDs must be unique".to_owned(),
             ));
         }
     }
