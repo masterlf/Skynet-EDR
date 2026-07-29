@@ -115,6 +115,17 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertIn("node --test integrations/hermes/skynet-edr/dashboard/plugin.test.mjs", workflow)
 
+    def test_ci_rust_tests_use_private_isolated_state(self):
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        expected = """          set -euo pipefail
+          umask 077
+          test_state_dir="$(mktemp -d "${RUNNER_TEMP}/skynet-edr-rust-tests.XXXXXX")"
+          trap 'rm -rf -- "$test_state_dir"' EXIT
+          chmod 700 -- "$test_state_dir"
+          export SKYNET_EDR_STATE_DIR="$test_state_dir"
+          cargo test --workspace --all-features"""
+        self.assertIn(expected, workflow)
+
     def test_dashboard_risk_explorer_is_visible_integrity_pinned_and_loadable(self):
         manifest = json.loads(DASHBOARD_MANIFEST_PATH.read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "skynet-edr")
