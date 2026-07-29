@@ -38,6 +38,47 @@ fn canonical_event(
     } else {
         "agent_action"
     };
+    let (source_kind, projected_attributes) = if event_type == "agent.content.ingested" {
+        let attack = attributes
+            .get("contains_instructional_attack")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        (
+            "mcp_tool",
+            serde_json::json!({
+                "hook": "post_tool_call",
+                "tool_name": "remote.fetch",
+                "content_omitted": true,
+                "content_length": 0,
+                "instruction_authority": false,
+                "contains_instructional_attack": attack,
+                "expected_disposition": "treat_as_data"
+            }),
+        )
+    } else {
+        let network = attributes
+            .get("network_indicator")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let sensitive = attributes
+            .get("sensitive_access")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let mut normalized = serde_json::json!({
+            "hook": "pre_tool_call",
+            "tool_name": "terminal",
+            "network_indicator": network,
+            "direct_ip": false,
+            "delivery_indicator": false,
+            "sensitive_access": sensitive,
+            "params_length": 0,
+            "params_preview": "[OMITTED:tool_params]"
+        });
+        if network {
+            normalized["command_class"] = serde_json::json!("network_egress");
+        }
+        ("process", normalized)
+    };
     parse_canonical_event_json(
         &serde_json::json!({
             "schema_version": "skynet.event.v0",
@@ -46,10 +87,10 @@ fn canonical_event(
             "observed_at_unix_ms": observed_at_unix_ms,
             "received_at_unix_ms": observed_at_unix_ms,
             "severity": "high",
-            "source": {"kind": "sensor", "sensor": "continuous-ingest-test", "integration": "hermes"},
+            "source": {"kind": source_kind, "sensor": "skynet-edr-hermes-plugin", "integration": "hermes"},
             "provenance": {
                 "producer": "hermes-agent",
-                "collector": "skynet-edr-hermes-forwarder",
+                "collector": "skynet-edr-hermes-plugin",
                 "tenant": "fake-test",
                 "source_event_id": id,
                 "trace_id": trace_id,
@@ -59,12 +100,66 @@ fn canonical_event(
             "trust_level": trust_level,
             "title": "Clearly fake continuous ingestion test event",
             "details": null,
-            "attributes": attributes,
+            "attributes": projected_attributes,
             "redaction": {"contains_sensitive_data": false, "redacted_fields": []}
         })
         .to_string(),
     )
     .expect("test event is canonical")
+}
+
+#[test]
+fn continuous_correlation_rejects_unbounded_multi_step_rules() {
+    let db_path = temp_path("multi-step-rule.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let mut rules = built_in_ai_agent_sequence_rules();
+    let mut rule = rules.remove(0);
+    rule.steps.push(rule.steps[1].clone());
+    let event = canonical_event(
+        "evt_continuous_multi_step",
+        "agent.tool.requested",
+        10_000,
+        "trace_multi_step",
+        serde_json::json!({"network_indicator": true}),
+    );
+
+    let error = store
+        .commit_continuous_event("uid:1000", &event, &[rule], 10_000)
+        .expect_err("continuous correlation must reject multi-step rules");
+
+    assert!(error
+        .to_string()
+        .contains("continuous sequence rules require exactly two steps"));
+    assert_eq!(store.count_events().expect("event count"), 0);
+    assert_eq!(store.count_ingest_receipts().expect("receipt count"), 0);
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn continuous_correlation_rejects_duplicate_rule_ids() {
+    let db_path = temp_path("duplicate-rule-id.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let rule = built_in_ai_agent_sequence_rules().remove(0);
+    let event = canonical_event(
+        "evt_continuous_duplicate_rule",
+        "agent.tool.requested",
+        10_000,
+        "trace_duplicate_rule",
+        serde_json::json!({"network_indicator": true}),
+    );
+
+    let error = store
+        .commit_continuous_event("uid:1000", &event, &[rule.clone(), rule], 10_000)
+        .expect_err("duplicate continuous rule IDs must fail closed");
+
+    assert!(error
+        .to_string()
+        .contains("continuous sequence rule IDs must be unique"));
+    assert_eq!(store.count_events().expect("event count"), 0);
+    assert_eq!(store.count_ingest_receipts().expect("receipt count"), 0);
+
+    let _ = fs::remove_file(db_path);
 }
 
 #[test]
@@ -91,6 +186,7 @@ fn replay_is_immutable_and_returns_duplicate_without_overwrite() {
     assert_eq!(replay.status, ContinuousIngestStatus::Duplicate);
     let mut conflicting = original.clone();
     conflicting.title = "Attacker tried to overwrite an existing event".to_owned();
+    conflicting.observed_at_unix_ms += 1;
     let collision = store
         .commit_continuous_event("uid:1000", &conflicting, &rules, 10_000)
         .expect("conflicting replay is a bounded collision outcome");
@@ -101,7 +197,7 @@ fn replay_is_immutable_and_returns_duplicate_without_overwrite() {
             .expect("lookup succeeds")
             .expect("event exists")
             .title,
-        "Clearly fake continuous ingestion test event"
+        "Hermes tool action requested"
     );
     assert_eq!(store.count_ingest_receipts().expect("receipt count"), 1);
 
@@ -191,6 +287,17 @@ fn late_event_correlates_incrementally_inside_derived_window() {
     assert_eq!(result.max_rule_window_ms, 60_000);
     assert_eq!(result.opened_incidents, 1);
     assert_eq!(store.count_incidents().expect("incident count"), 1);
+    assert_eq!(
+        store
+            .list_incidents()
+            .expect("incident list")
+            .into_iter()
+            .next()
+            .expect("continuous sequence incident")
+            .id
+            .as_str(),
+        "inc:EDR-PI-001:7495016ca4679c8198690557f3efc99c9d15a6f5afecf7b9dd4c634fa226b293"
+    );
     assert!(result.candidate_events <= 2);
 
     let _ = fs::remove_file(db_path);

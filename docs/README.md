@@ -67,6 +67,10 @@ Current event schema: `skynet.event.v0`.
 
 Current documentation structure target: v0.4. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. If a page blurs that line, fix the page before building on it.
 
+## Structured attribute safety
+
+Canonical parsing and local event/incident storage validate JSON object keys across the complete `attributes` tree, including objects nested inside arrays. Every key must use the bounded ASCII safe-key syntax, and keys below the top level must not be sensitive; existing top-level sensitive attributes remain subject to the canonical redaction-metadata contract. Traversal is iterative and limited to 64 nested containers. Canonical input allows 4,096 total object-key/array-item units; direct storage allows 4,114 so a maximum-size canonical tree still fits after the fixed, typed 18-unit storage projection. Unsafe or larger trees are rejected as a whole before persistence or an incident transaction begins.
+
 ## Documentation checks
 
 Run the local documentation gate with:

@@ -229,7 +229,7 @@ fn sqlite_store_redacts_untrusted_event_payloads_before_persistence() {
 }
 
 #[test]
-fn sqlite_store_normalizes_hostile_redaction_metadata_before_persistence() {
+fn sqlite_store_drops_hostile_redaction_metadata_before_persistence() {
     let db_path = temp_path("metadata-redaction.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");
     let incident = sample_incident(
@@ -248,7 +248,12 @@ fn sqlite_store_normalizes_hostile_redaction_metadata_before_persistence() {
     let serialized = serde_json::to_string(&loaded_incident).expect("incident serializes");
 
     assert!(!serialized.contains("metadata-secret-value"));
-    assert!(serialized.contains("[REDACTED:secret]"));
+    assert!(!serialized.contains("[REDACTED:secret]"));
+    assert!(loaded_incident.redaction.redacted_fields.is_empty());
+    assert!(loaded_incident.events[0]
+        .redaction
+        .redacted_fields
+        .is_empty());
 
     fs::remove_file(db_path).expect("temporary db is removed");
 }

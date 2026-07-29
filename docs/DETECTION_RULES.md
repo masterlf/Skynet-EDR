@@ -30,7 +30,7 @@ These rules deliberately do not duplicate `EDR-EXFIL-001`; secret-read plus egre
 
 ## Rule semantics reference
 
-The following rule notes provide operator-facing semantics. The implementation status is listed above; `EDR-EXFIL-001` and `EDR-MALWARE-001` are currently implemented by the Hermes-specific correlators rather than the canonical sequence pack.
+The following rule notes provide operator-facing semantics. `EDR-EXFIL-001` and `EDR-MALWARE-001` are implemented by narrow Hermes correlators in authenticated continuous ingestion and the explicit normalized-trace importer rather than by the generic canonical sequence pack.
 
 ### EDR-MCP-001: MCP network tool request after instructional attack
 
@@ -56,7 +56,7 @@ Severity: Medium by itself, Critical if followed by egress or message sending.
 
 ### EDR-EXFIL-001: Secret read followed by network egress
 
-Detect sensitive file access followed by outbound network activity within a short window.
+Authenticated continuous ingestion requires a distinct reviewed Hermes `agent.tool.requested` file read/enumeration followed by one reviewed process/network/MCP egress or messaging-delivery shape. Both events must have `agent_action` trust, the same authenticated source, and the same non-empty projected trace or (only when both traces are absent) session join. The precursor must sort before the successor by `(observed_at_unix_ms,event_id)` and be at most 60,000 ms earlier. One deterministic nearest pair is selected per trigger; mutation/write classes are benign.
 
 Default window: 60 seconds.
 
@@ -64,9 +64,11 @@ Severity: Critical.
 
 ### EDR-MALWARE-001: Malware-like content sent to AI runtime
 
-Detect known safe malware-test indicators in untrusted Hermes tool output that is supplied back to the AI runtime for analysis. The current implementation uses deterministic test markers only, including a project-specific fake marker and defanged/EICAR-style test indicators; it does not require or ship real malware samples.
+Authenticated continuous ingestion requires the exact conjunction `agent.tool.completed`, `tool_output` trust, reviewed Hermes MCP source/provenance, `result_omitted=true`, `malware_indicator=true`, and an allowlisted safe test signature. Boolean-only, near-marker, wrong-source, wrong-trust, and raw-bearing shapes do not match. Producer `rule_id` is not detector evidence.
 
 Severity: High. Raw payload content must be omitted before storage; store only structured indicator metadata such as signature family.
+
+These correlators consume producer-asserted event metadata; AF_UNIX UID authorization does not attest the process or event truth. They are passive detection, not prevention. P1b config/cron/approval mutation producers remain dark and pending.
 
 ## Roadmap / candidate rule details
 

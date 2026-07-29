@@ -142,6 +142,8 @@ The Rust core currently enforces these v0 invariants:
 - `provenance`, `trust_level`, and `redaction` are mandatory;
 - `redaction.contains_sensitive_data` must match whether `redaction.redacted_fields` is empty;
 - every declared `redacted_fields` path must point to the stored replacement marker for `details` or `attributes.<key>`.
+- every object key throughout `attributes`, including objects inside arrays, must use the bounded ASCII safe-key syntax and must not be sensitive below the top level;
+- attribute validation uses an iterative walk bounded to 64 nested containers and 4,096 total object-key/array-item units; exceeding either limit rejects the event.
 
 This is deliberately strict. If a runtime needs more fields, add them through a versioned schema change or inside `attributes` after redaction.
 

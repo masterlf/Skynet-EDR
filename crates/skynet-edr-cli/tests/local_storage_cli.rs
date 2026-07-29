@@ -196,7 +196,15 @@ fn cli_ingests_hermes_fake_malware_trace_into_redacted_incident() {
     assert!(incident_json.contains("EDR-MALWARE-001"));
     assert!(incident_json.contains("malware_indicator"));
     assert!(incident_json.contains("skynet_fake_malware_test_string"));
-    assert!(incident_json.contains("[REDACTED:policy]"));
+    let incident_value: serde_json::Value = serde_json::from_str(&incident_json).unwrap();
+    assert_eq!(
+        incident_value["redaction"]["contains_sensitive_data"],
+        false
+    );
+    assert_eq!(
+        incident_value["redaction"]["redacted_fields"],
+        serde_json::json!([])
+    );
     assert!(!incident_json.contains(raw_marker));
     assert!(!incident_json.contains("simulated malware sample supplied"));
 

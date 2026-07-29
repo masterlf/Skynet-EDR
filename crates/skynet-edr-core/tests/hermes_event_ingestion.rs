@@ -55,7 +55,8 @@ fn ingests_terminal_network_tool_call_as_redacted_event() {
     assert!(!serialized.contains("super-secret"));
     assert!(!serialized.contains("/home/alice"));
     assert!(!serialized.contains("/root/.hermes/auth.json"));
-    assert!(event.redaction.contains_sensitive_data);
+    assert!(!event.redaction.contains_sensitive_data);
+    assert!(event.redaction.redacted_fields.is_empty());
 
     fs::remove_file(db_path).expect("temporary db is removed");
 }
@@ -227,7 +228,8 @@ fn detects_fake_malware_content_sent_to_ai_without_storing_payload() {
     assert!(incident.title.contains("Malware-like content sent to AI"));
     assert!(incident.summary.contains("EDR-MALWARE-001"));
 
-    assert!(incident.redaction.contains_sensitive_data);
+    assert!(!incident.redaction.contains_sensitive_data);
+    assert!(incident.redaction.redacted_fields.is_empty());
     let serialized = serde_json::to_string(&(&events, &incidents)).expect("stored data serializes");
     assert!(!serialized.contains(raw_marker));
     assert!(!serialized.contains("simulated malware sample supplied"));

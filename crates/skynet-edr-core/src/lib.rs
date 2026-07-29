@@ -4,7 +4,7 @@
 //! types without coupling event or incident handling to privileged OS APIs.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -17,6 +17,58 @@ use sha2::{Digest, Sha256};
 
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const LOCAL_STORE_SCHEMA_VERSION: i64 = 1;
+const MAX_CANONICAL_ATTRIBUTE_KEY_BYTES: usize = 128;
+const MAX_JSON_ATTRIBUTE_CONTAINER_DEPTH: usize = 64;
+const MAX_JSON_ATTRIBUTE_TREE_UNITS: usize = 4_096;
+// Canonical-to-storage projection adds at most six synthetic top-level fields and
+// twelve fixed typed child fields (provenance plus artifact).
+const MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS: usize = MAX_JSON_ATTRIBUTE_TREE_UNITS + 18;
+const SYNTHETIC_CANONICAL_ATTRIBUTES: [&str; 6] = [
+    "schema_version",
+    "event_type",
+    "trust_level",
+    "provenance",
+    "artifact",
+    "received_at_unix_ms",
+];
+
+/// Exact indexed trace-candidate statement used by continuous ingestion.
+pub const CONTINUOUS_TRACE_CANDIDATE_SQL: &str =
+    "SELECT payload_json FROM events INDEXED BY idx_events_ingest_source_trace_time
+     WHERE ingest_source_id = ?1
+       AND trace_id = ?2
+       AND observed_at_unix_ms BETWEEN ?3 AND ?4
+       AND id != ?5
+     ORDER BY observed_at_unix_ms DESC, id DESC
+     LIMIT ?6";
+
+/// Exact indexed session-candidate statement used by continuous ingestion.
+pub const CONTINUOUS_SESSION_CANDIDATE_SQL: &str =
+    "SELECT payload_json FROM events INDEXED BY idx_events_ingest_source_session_time
+     WHERE ingest_source_id = ?1
+       AND session_id = ?2
+       AND observed_at_unix_ms BETWEEN ?3 AND ?4
+       AND id != ?5
+     ORDER BY observed_at_unix_ms DESC, id DESC
+     LIMIT ?6";
+
+macro_rules! insert_continuous_incident_or_record_collision {
+    ($store:expr, $transaction:expr, $source_key:expr, $incident:expr) => {{
+        match insert_continuous_incident_on_connection(&$transaction, $incident) {
+            Ok(inserted) => inserted,
+            Err(ContinuousIngestError::IncidentCollision {
+                incident_fingerprint,
+            }) => {
+                drop($transaction);
+                $store.record_incident_collision_diagnostic($source_key, &incident_fingerprint)?;
+                return Err(ContinuousIngestError::IncidentCollision {
+                    incident_fingerprint,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }};
+}
 
 /// Operator-facing Skynet-EDR runtime mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +386,11 @@ pub enum ContinuousIngestError {
         /// Configured maximum number of candidate events.
         limit: usize,
     },
+    /// A deterministic incident identifier matched a different sanitized payload.
+    IncidentCollision {
+        /// Bounded fingerprint used only for deduplicated integrity diagnostics.
+        incident_fingerprint: String,
+    },
 }
 
 impl std::fmt::Display for ContinuousIngestError {
@@ -348,6 +405,9 @@ impl std::fmt::Display for ContinuousIngestError {
                 formatter,
                 "continuous ingest correlation candidate limit {limit} exceeded"
             ),
+            Self::IncidentCollision { .. } => {
+                formatter.write_str("continuous ingest incident collision")
+            }
         }
     }
 }
@@ -465,8 +525,38 @@ impl CanonicalEventEnvelope {
                 "redaction metadata is inconsistent with redacted_fields".to_owned(),
             ));
         }
+        validate_json_attribute_tree(&self.attributes, MAX_JSON_ATTRIBUTE_TREE_UNITS).map_err(
+            |()| {
+                CanonicalEventError::Validation(
+                    "canonical attributes contain unsafe or unbounded JSON object keys".to_owned(),
+                )
+            },
+        )?;
+        let mut redacted_paths = BTreeSet::new();
         for field in &self.redaction.redacted_fields {
+            if !redacted_paths.insert(field.path.as_str()) {
+                return Err(CanonicalEventError::Validation(
+                    "duplicate redaction field paths are forbidden".to_owned(),
+                ));
+            }
             self.validate_redacted_field(field)?;
+        }
+        if redact_attributes(&self.attributes).value != self.attributes {
+            return Err(CanonicalEventError::Validation(
+                "canonical attributes must already be safe under storage sanitization".to_owned(),
+            ));
+        }
+        for key in self.attributes.keys().filter(|key| is_sensitive_key(key)) {
+            let path = format!("attributes.{key}");
+            if !self.redaction.redacted_fields.iter().any(|field| {
+                field.path == path
+                    && field.reason == RedactionReason::Secret
+                    && field.replacement == SECRET_REPLACEMENT
+            }) {
+                return Err(CanonicalEventError::Validation(format!(
+                    "sensitive canonical attribute {key} requires coherent secret redaction metadata"
+                )));
+            }
         }
         Ok(())
     }
@@ -482,6 +572,19 @@ impl CanonicalEventEnvelope {
                 "redaction replacement must not be empty".to_owned(),
             ));
         }
+        let expected_replacement = if field.path == "attributes.params_preview"
+            && field.reason == RedactionReason::Policy
+        {
+            "[OMITTED:tool_params]"
+        } else {
+            replacement_for_reason(field.reason)
+        };
+        if field.replacement != expected_replacement {
+            return Err(CanonicalEventError::Validation(format!(
+                "redaction field {} does not use its canonical replacement",
+                field.path
+            )));
+        }
         match field.path.as_str() {
             "details" => match &self.details {
                 Some(details) if details == &field.replacement => Ok(()),
@@ -491,7 +594,16 @@ impl CanonicalEventEnvelope {
                 ))),
             },
             path if path.starts_with("attributes.") => {
-                let key = path.trim_start_matches("attributes.");
+                let key = path
+                    .strip_prefix("attributes.")
+                    .expect("match guard checked prefix");
+                validate_canonical_attribute_key(key)?;
+                if SYNTHETIC_CANONICAL_ATTRIBUTES.contains(&key) {
+                    return Err(CanonicalEventError::Validation(format!(
+                        "redaction field {} targets a synthetic storage attribute",
+                        field.path
+                    )));
+                }
                 match self.attributes.get(key) {
                     Some(serde_json::Value::String(value)) if value == &field.replacement => Ok(()),
                     Some(_) | None => Err(CanonicalEventError::Validation(format!(
@@ -506,6 +618,85 @@ impl CanonicalEventEnvelope {
             ))),
         }
     }
+}
+
+fn validate_canonical_attribute_key(key: &str) -> Result<(), CanonicalEventError> {
+    let mut bytes = key.bytes();
+    let Some(first) = bytes.next() else {
+        return Err(CanonicalEventError::Validation(
+            "canonical attribute keys must not be empty".to_owned(),
+        ));
+    };
+    if key.len() > MAX_CANONICAL_ATTRIBUTE_KEY_BYTES
+        || !first.is_ascii_alphanumeric()
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(CanonicalEventError::Validation(
+            "canonical attribute keys must use bounded unambiguous ASCII safe-key syntax"
+                .to_owned(),
+        ));
+    }
+    if redact_text(key).value != key {
+        return Err(CanonicalEventError::Validation(
+            "canonical attribute keys must not contain sensitive content".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_json_attribute_tree(
+    attributes: &BTreeMap<String, serde_json::Value>,
+    max_tree_units: usize,
+) -> Result<(), ()> {
+    let mut visited_units = attributes.len();
+    if visited_units > max_tree_units {
+        return Err(());
+    }
+
+    let mut pending = Vec::with_capacity(attributes.len().min(MAX_JSON_ATTRIBUTE_TREE_UNITS));
+    for (key, value) in attributes {
+        validate_canonical_attribute_key(key).map_err(|_| ())?;
+        pending.push((value, 0_usize));
+    }
+
+    while let Some((value, parent_container_depth)) = pending.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                let depth = parent_container_depth.checked_add(1).ok_or(())?;
+                if depth > MAX_JSON_ATTRIBUTE_CONTAINER_DEPTH {
+                    return Err(());
+                }
+                visited_units = visited_units.checked_add(object.len()).ok_or(())?;
+                if visited_units > max_tree_units {
+                    return Err(());
+                }
+                for (key, child) in object {
+                    validate_canonical_attribute_key(key).map_err(|_| ())?;
+                    if is_sensitive_key(key) {
+                        return Err(());
+                    }
+                    pending.push((child, depth));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                let depth = parent_container_depth.checked_add(1).ok_or(())?;
+                if depth > MAX_JSON_ATTRIBUTE_CONTAINER_DEPTH {
+                    return Err(());
+                }
+                visited_units = visited_units.checked_add(items.len()).ok_or(())?;
+                if visited_units > max_tree_units {
+                    return Err(());
+                }
+                pending.extend(items.iter().map(|item| (item, depth)));
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_artifact_provenance(artifact: &ArtifactProvenance) -> Result<(), CanonicalEventError> {
@@ -837,6 +1028,146 @@ fn sequence_match_incident(sequence_match: &SequenceMatch, stored_events: &[Even
 fn sequence_incident_id(sequence_match: &SequenceMatch) -> String {
     let digest = sequence_incident_digest(sequence_match);
     format!("inc:{}:{digest:016x}", sequence_match.rule_id)
+}
+
+fn continuous_sequence_match_incident(
+    sequence_match: &SequenceMatch,
+    stored_events: &[Event],
+) -> Incident {
+    let mut incident = sequence_match_incident(sequence_match, stored_events);
+    incident.id = IncidentId::new(continuous_sequence_incident_id(sequence_match));
+    incident
+}
+
+fn continuous_sequence_incident_id(sequence_match: &SequenceMatch) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"skynet-edr-continuous-sequence-incident-v1\0");
+    hasher.update(sequence_match.rule_id.as_bytes());
+    hasher.update(b"\0");
+    for event_id in &sequence_match.matched_event_ids {
+        hasher.update(event_id.as_str().as_bytes());
+        hasher.update(b"\0");
+    }
+    format!(
+        "inc:{}:{}",
+        sequence_match.rule_id,
+        hex_digest(hasher.finalize().as_slice())
+    )
+}
+
+fn continuous_sequence_matches_for_trigger(
+    rules: &[SequenceRule],
+    candidates: &[CanonicalEventEnvelope],
+    trigger_id: &EventId,
+) -> Result<Vec<SequenceMatch>, SequenceRuleError> {
+    validate_continuous_sequence_rules(rules)?;
+    let Some(trigger_index) = candidates
+        .iter()
+        .position(|candidate| &candidate.event_id == trigger_id)
+    else {
+        return Ok(Vec::new());
+    };
+    let trigger = &candidates[trigger_index];
+    let mut matches = Vec::new();
+
+    for rule in rules {
+        let trigger_join_key = event_join_key(trigger, rule.join);
+        let mut selected: Option<SequenceMatch> = None;
+
+        if step_matches(&rule.steps[0], trigger) {
+            if let Some(join_key) = trigger_join_key.as_deref() {
+                if let Some(successor) =
+                    candidates.iter().skip(trigger_index + 1).find(|candidate| {
+                        candidate.observed_at_unix_ms >= trigger.observed_at_unix_ms
+                            && candidate.observed_at_unix_ms - trigger.observed_at_unix_ms
+                                <= rule.window_ms
+                            && event_join_key(candidate, rule.join).as_deref() == Some(join_key)
+                            && step_matches(&rule.steps[1], candidate)
+                    })
+                {
+                    selected = Some(sequence_match_from_events(
+                        rule, trigger, successor, join_key,
+                    ));
+                }
+            }
+        }
+
+        if step_matches(&rule.steps[1], trigger) {
+            if let Some(join_key) = trigger_join_key.as_deref() {
+                let preceding = &candidates[..trigger_index];
+                let start_floor = preceding
+                    .iter()
+                    .rposition(|candidate| {
+                        event_join_key(candidate, rule.join).as_deref() == Some(join_key)
+                            && step_matches(&rule.steps[1], candidate)
+                    })
+                    .unwrap_or(0);
+                let predecessor = preceding[start_floor..]
+                    .iter()
+                    .filter(|candidate| {
+                        trigger.observed_at_unix_ms >= candidate.observed_at_unix_ms
+                            && trigger.observed_at_unix_ms - candidate.observed_at_unix_ms
+                                <= rule.window_ms
+                            && event_join_key(candidate, rule.join).as_deref() == Some(join_key)
+                            && step_matches(&rule.steps[0], candidate)
+                    })
+                    .min_by(|left, right| left.event_id.as_str().cmp(right.event_id.as_str()));
+                if let Some(predecessor) = predecessor {
+                    let candidate =
+                        sequence_match_from_events(rule, predecessor, trigger, join_key);
+                    if selected.as_ref().is_none_or(|current| {
+                        candidate.matched_event_ids < current.matched_event_ids
+                    }) {
+                        selected = Some(candidate);
+                    }
+                }
+            }
+        }
+
+        if let Some(selected) = selected {
+            matches.push(selected);
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        left.rule_id
+            .cmp(&right.rule_id)
+            .then_with(|| left.matched_event_ids.cmp(&right.matched_event_ids))
+    });
+    Ok(matches)
+}
+
+fn validate_continuous_sequence_rules(rules: &[SequenceRule]) -> Result<(), SequenceRuleError> {
+    let mut rule_ids = BTreeSet::new();
+    for rule in rules {
+        rule.validate()?;
+        if rule.steps.len() != 2 {
+            return Err(SequenceRuleError::Validation(
+                "continuous sequence rules require exactly two steps".to_owned(),
+            ));
+        }
+        if !rule_ids.insert(rule.id.as_str()) {
+            return Err(SequenceRuleError::Validation(
+                "continuous sequence rule IDs must be unique".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sequence_match_from_events(
+    rule: &SequenceRule,
+    first: &CanonicalEventEnvelope,
+    second: &CanonicalEventEnvelope,
+    join_key: &str,
+) -> SequenceMatch {
+    SequenceMatch {
+        rule_id: rule.id.clone(),
+        severity: rule.severity,
+        matched_event_ids: vec![first.event_id.clone(), second.event_id.clone()],
+        join_key: Some(join_key.to_owned()),
+        explanations: explain_sequence_match(rule, &[first, second]),
+    }
 }
 
 fn sequence_incident_digest(sequence_match: &SequenceMatch) -> u64 {
@@ -2493,8 +2824,7 @@ const SECRET_EGRESS_ATTACK_SIM_TRACE_JSON: &str = r#"[
     "file_accesses": [
       {
         "operation": "read",
-        "path": "/home/attack-sim/.skynet/fake-secret.env",
-        "secret_label": "FAKE_SKYNET_ATTACK_SIM_SECRET_DO_NOT_EXPOSE"
+        "path": "/home/attack-sim/.skynet/fake-secret.env"
       }
     ]
   },
@@ -3188,6 +3518,8 @@ pub enum StorageError {
     Io(std::io::Error),
     /// Existing database header indicates a non-rollback journal mode read-only paths reject.
     UnsupportedReadOnlyJournalMode,
+    /// Event attributes contain unsafe object keys or exceed traversal bounds.
+    UnsafeOrUnboundedAttributes,
     /// A fast writable connection found a database that startup has not migrated.
     SchemaVersionMismatch {
         /// Schema version required by this binary.
@@ -3214,6 +3546,12 @@ impl std::fmt::Display for StorageError {
                 formatter,
                 "unsupported SQLite journal mode for read-only local store"
             ),
+            Self::UnsafeOrUnboundedAttributes => {
+                write!(
+                    formatter,
+                    "local storage rejected unsafe or unbounded JSON attributes"
+                )
+            }
             Self::SchemaVersionMismatch { expected, actual } => write!(
                 formatter,
                 "local store schema version mismatch: expected {expected}, found {actual}"
@@ -3276,6 +3614,929 @@ fn reject_unsupported_header_for_read_only(path: &Path) -> StorageResult<()> {
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
         Err(error) => Err(StorageError::Io(error)),
     }
+}
+
+#[allow(clippy::too_many_lines)]
+fn project_continuous_event(
+    input: &CanonicalEventEnvelope,
+) -> Result<CanonicalEventEnvelope, CanonicalEventError> {
+    input.validate()?;
+    validate_safe_label(&input.source.sensor, 64, "source.sensor")?;
+    if let Some(integration) = &input.source.integration {
+        validate_safe_label(integration, 32, "source.integration")?;
+    }
+    validate_safe_label(&input.provenance.producer, 64, "provenance.producer")?;
+    validate_safe_label(&input.provenance.collector, 64, "provenance.collector")?;
+    if input.title.is_empty() || input.title.len() > 256 {
+        return projection_error("title must be non-empty and at most 256 bytes");
+    }
+    if input.details.is_some() {
+        return projection_error("details must be absent or null");
+    }
+
+    let p0_exception = is_p0_continuous_exception(input);
+    let (expected_kind, expected_trust, title) = match input.event_type.as_str() {
+        "agent.session.started" => (
+            &[SourceKind::Sensor][..],
+            TrustLevel::SensorObservation,
+            "Hermes session telemetry started",
+        ),
+        "agent.session.ended" => (
+            &[SourceKind::Sensor][..],
+            TrustLevel::SensorObservation,
+            "Hermes session telemetry ended",
+        ),
+        "agent.llm.call.requested" => (
+            &[SourceKind::Sensor][..],
+            TrustLevel::SensorObservation,
+            "Hermes LLM call requested",
+        ),
+        "agent.content.ingested" => (
+            &[SourceKind::McpTool][..],
+            TrustLevel::UntrustedContent,
+            "Untrusted content indicator observed",
+        ),
+        "agent.tool.requested" => (
+            &[SourceKind::File, SourceKind::Process, SourceKind::Messaging][..],
+            TrustLevel::AgentAction,
+            "Hermes tool action requested",
+        ),
+        "agent.mcp.tool.requested" => (
+            &[SourceKind::McpTool][..],
+            TrustLevel::AgentAction,
+            "Hermes MCP tool action requested",
+        ),
+        "agent.network.egress" => (
+            &[SourceKind::Process, SourceKind::Network][..],
+            TrustLevel::AgentAction,
+            "Hermes direct network egress requested",
+        ),
+        "agent.tool.completed" => (
+            &[
+                SourceKind::File,
+                SourceKind::Process,
+                SourceKind::Messaging,
+                SourceKind::McpTool,
+            ][..],
+            TrustLevel::ToolOutput,
+            "Hermes tool result classified",
+        ),
+        "agent.config.changed" => (
+            &[SourceKind::Configuration][..],
+            TrustLevel::AgentAction,
+            "Agent configuration change observed",
+        ),
+        "agent.automation.scheduled" => (
+            &[SourceKind::ScheduledTask][..],
+            TrustLevel::AgentAction,
+            "Agent automation schedule observed",
+        ),
+        "agent.approval.granted" => (
+            &[SourceKind::Sensor][..],
+            TrustLevel::AuthenticatedUser,
+            "Agent approval observed",
+        ),
+        _ => return projection_error("event_type is not allowlisted for continuous ingestion"),
+    };
+    if !expected_kind.contains(&input.source.kind) || input.trust_level != expected_trust {
+        return projection_error("event source kind or trust level does not match event type");
+    }
+
+    let mut attributes = if p0_exception {
+        project_p0_exception_attributes(&input.attributes)?
+    } else {
+        project_continuous_attributes(input)?
+    };
+    let session_id = attributes
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    if let Some(raw_session) = session_id {
+        attributes.insert(
+            "session_id".to_owned(),
+            serde_json::json!(pseudonym(
+                "session-sha256-",
+                "skynet-edr-session-v1\0",
+                &raw_session
+            )),
+        );
+    }
+
+    let exact_malware = input.event_type == "agent.tool.completed"
+        && input.source.kind == SourceKind::McpTool
+        && bool_attribute(&attributes, "result_omitted") == Some(true)
+        && bool_attribute(&attributes, "malware_indicator") == Some(true)
+        && matches!(
+            string_attribute(&attributes, "malware_signature"),
+            Some("eicar_test_string" | "skynet_fake_malware_test_string")
+        );
+    let indicator = |name| bool_attribute(&attributes, name) == Some(true);
+    let severity = match input.event_type.as_str() {
+        "agent.session.started" | "agent.session.ended" | "agent.llm.call.requested" => {
+            Severity::Informational
+        }
+        "agent.content.ingested" => {
+            if indicator("contains_instructional_attack") {
+                Severity::Medium
+            } else {
+                Severity::Informational
+            }
+        }
+        "agent.tool.requested" => {
+            if indicator("sensitive_access")
+                || indicator("network_indicator")
+                || indicator("delivery_indicator")
+            {
+                Severity::High
+            } else {
+                Severity::Low
+            }
+        }
+        "agent.mcp.tool.requested" => {
+            if indicator("network_indicator") {
+                Severity::High
+            } else {
+                Severity::Low
+            }
+        }
+        "agent.network.egress"
+        | "agent.config.changed"
+        | "agent.automation.scheduled"
+        | "agent.approval.granted" => Severity::High,
+        "agent.tool.completed" => {
+            if exact_malware || indicator("prompt_injection_indicator") {
+                Severity::High
+            } else {
+                Severity::Informational
+            }
+        }
+        _ => unreachable!("event type checked above"),
+    };
+
+    let source = EventSource {
+        kind: if input.event_type == "agent.network.egress" {
+            SourceKind::Network
+        } else {
+            input.source.kind
+        },
+        sensor: input.source.sensor.clone(),
+        integration: input.source.integration.clone(),
+    };
+    let provenance = EventProvenance {
+        producer: input.provenance.producer.clone(),
+        collector: input.provenance.collector.clone(),
+        tenant: project_optional_identity(
+            input.provenance.tenant.as_deref(),
+            "tenant-sha256-",
+            "skynet-edr-tenant-v1\0",
+        )?,
+        source_event_id: project_event_identity(
+            input.provenance.source_event_id.as_deref(),
+            input.event_id.as_str(),
+            "source-event-sha256-",
+            "skynet-edr-source-event-v1\0",
+        )?,
+        trace_id: project_optional_identity(
+            input.provenance.trace_id.as_deref(),
+            "trace-sha256-",
+            "skynet-edr-trace-v1\0",
+        )?,
+        span_id: project_event_identity(
+            input.provenance.span_id.as_deref(),
+            input.event_id.as_str(),
+            "span-sha256-",
+            "skynet-edr-span-v1\0",
+        )?,
+        parent_span_id: project_optional_identity(
+            input.provenance.parent_span_id.as_deref(),
+            "parent-span-sha256-",
+            "skynet-edr-parent-span-v1\0",
+        )?,
+    };
+
+    Ok(CanonicalEventEnvelope {
+        schema_version: EventSchemaVersion::V0,
+        event_id: input.event_id.clone(),
+        event_type: input.event_type.clone(),
+        observed_at_unix_ms: input.observed_at_unix_ms,
+        received_at_unix_ms: Some(current_unix_ms().map_err(|error| {
+            CanonicalEventError::Validation(format!("receive timestamp unavailable: {error}"))
+        })?),
+        severity,
+        source,
+        provenance,
+        artifact: project_artifact(input.artifact.as_ref(), input.trust_level)?,
+        trust_level: input.trust_level,
+        title: title.to_owned(),
+        details: None,
+        attributes,
+        redaction: RedactionMetadata {
+            contains_sensitive_data: false,
+            redacted_fields: Vec::new(),
+        },
+    })
+}
+
+fn projection_error<T>(message: &str) -> Result<T, CanonicalEventError> {
+    Err(CanonicalEventError::Validation(format!(
+        "continuous projection: {message}"
+    )))
+}
+
+fn validate_safe_label(
+    value: &str,
+    max_bytes: usize,
+    field: &str,
+) -> Result<(), CanonicalEventError> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > max_bytes
+        || !(bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        || bytes.iter().any(|byte| {
+            !(byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'.' | b'_' | b'-'))
+        })
+    {
+        return projection_error(&format!("{field} is not a safe label"));
+    }
+    Ok(())
+}
+
+fn validate_opaque_identity(value: &str, field: &str) -> Result<(), CanonicalEventError> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return projection_error(&format!("{field} is not a bounded opaque identifier"));
+    }
+    Ok(())
+}
+
+fn pseudonym(prefix: &str, domain: &str, value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(value.as_bytes());
+    format!("{prefix}{}", hex_digest(hasher.finalize().as_slice()))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut result, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    result
+}
+
+fn project_optional_identity(
+    value: Option<&str>,
+    prefix: &str,
+    domain: &str,
+) -> Result<Option<String>, CanonicalEventError> {
+    value
+        .map(|value| {
+            validate_opaque_identity(value, "provenance identity")?;
+            Ok(pseudonym(prefix, domain, value))
+        })
+        .transpose()
+}
+
+fn project_event_identity(
+    value: Option<&str>,
+    event_id: &str,
+    prefix: &str,
+    domain: &str,
+) -> Result<Option<String>, CanonicalEventError> {
+    value
+        .map(|value| {
+            validate_opaque_identity(value, "provenance event identity")?;
+            Ok(if value == event_id {
+                event_id.to_owned()
+            } else {
+                pseudonym(prefix, domain, value)
+            })
+        })
+        .transpose()
+}
+
+fn project_artifact(
+    artifact: Option<&ArtifactProvenance>,
+    trust: TrustLevel,
+) -> Result<Option<ArtifactProvenance>, CanonicalEventError> {
+    let Some(artifact) = artifact else {
+        return Ok(None);
+    };
+    if artifact.trust_level != trust || artifact.display_label.len() > 64 {
+        return projection_error("artifact trust or display label is invalid");
+    }
+    let (provider, label) = match artifact.kind {
+        ArtifactKind::Email => (Some("email"), "Email content"),
+        ArtifactKind::Url => (Some("browser"), "URL content"),
+        ArtifactKind::GitRepository => (Some("github"), "Git repository"),
+        ArtifactKind::Code => (Some("code"), "Code content"),
+        ArtifactKind::File => (Some("file"), "File content"),
+        ArtifactKind::Message => (Some("messaging"), "Message content"),
+        ArtifactKind::Mcp => (Some("mcp"), "MCP content"),
+        ArtifactKind::Terminal => (Some("terminal"), "Terminal output"),
+        ArtifactKind::Unknown => (None, "Unclassified artifact"),
+    };
+    if artifact.provider.as_deref() != provider {
+        return projection_error("artifact provider does not match artifact kind");
+    }
+    if artifact
+        .locator_hash
+        .as_deref()
+        .is_some_and(|hash| !valid_locator_hash(hash))
+    {
+        return projection_error("artifact locator hash is invalid");
+    }
+    Ok(Some(ArtifactProvenance {
+        kind: artifact.kind,
+        provider: provider.map(ToOwned::to_owned),
+        display_label: label.to_owned(),
+        locator_hash: artifact.locator_hash.clone(),
+        trust_level: trust,
+    }))
+}
+
+fn is_p0_continuous_exception(event: &CanonicalEventEnvelope) -> bool {
+    event.event_type == "agent.network.egress"
+        && event.source.kind == SourceKind::Process
+        && event.source.sensor == "hermes-event-ingestion"
+        && event.source.integration.as_deref() == Some("hermes")
+        && event.provenance.producer == "hermes-agent"
+        && event.provenance.collector == "skynet-edr-core"
+        && event.trust_level == TrustLevel::AgentAction
+}
+
+fn project_p0_exception_attributes(
+    input: &BTreeMap<String, serde_json::Value>,
+) -> Result<BTreeMap<String, serde_json::Value>, CanonicalEventError> {
+    require_exact_keys(
+        input,
+        &[
+            "command_class",
+            "network_indicator",
+            "direct_ip",
+            "command",
+            "token",
+        ],
+        &[],
+    )?;
+    require_string(input, "command_class", "network_egress")?;
+    require_bool(input, "network_indicator", Some(true))?;
+    require_bool(input, "direct_ip", Some(true))?;
+    require_string(input, "command", LOCAL_CONTEXT_REPLACEMENT)?;
+    require_string(input, "token", SECRET_REPLACEMENT)?;
+    Ok(BTreeMap::from([
+        ("tool_class".to_owned(), serde_json::json!("process")),
+        ("access_class".to_owned(), serde_json::json!("none")),
+        ("network_indicator".to_owned(), serde_json::json!(true)),
+        ("direct_ip".to_owned(), serde_json::json!(true)),
+        ("delivery_indicator".to_owned(), serde_json::json!(false)),
+        ("sensitive_access".to_owned(), serde_json::json!(false)),
+        (
+            "command_class".to_owned(),
+            serde_json::json!("network_egress"),
+        ),
+    ]))
+}
+
+fn project_continuous_attributes(
+    event: &CanonicalEventEnvelope,
+) -> Result<BTreeMap<String, serde_json::Value>, CanonicalEventError> {
+    let input = &event.attributes;
+    match event.event_type.as_str() {
+        "agent.session.started" | "agent.session.ended" => {
+            require_exact_keys(
+                input,
+                &["plugin_version", "argument_count", "keyword_count"],
+                &[],
+            )?;
+            let version = require_value_string(input, "plugin_version")?;
+            if version.len() > 32
+                || !version.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                || !version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+            {
+                return projection_error("plugin_version is invalid");
+            }
+            require_counter(input, "argument_count", 1024)?;
+            require_counter(input, "keyword_count", 1024)?;
+            Ok(input.clone())
+        }
+        "agent.llm.call.requested" => {
+            require_exact_keys(
+                input,
+                &["hook", "content_omitted", "argument_count", "keyword_count"],
+                &["message_count"],
+            )?;
+            require_string(input, "hook", "pre_llm_call")?;
+            require_bool(input, "content_omitted", Some(true))?;
+            require_counter(input, "argument_count", 1024)?;
+            require_counter(input, "keyword_count", 1024)?;
+            if input.contains_key("message_count") {
+                require_counter(input, "message_count", 65_536)?;
+            }
+            let mut output = input.clone();
+            output.remove("hook");
+            Ok(output)
+        }
+        "agent.content.ingested" => {
+            require_exact_keys(
+                input,
+                &[
+                    "hook",
+                    "tool_name",
+                    "content_omitted",
+                    "content_length",
+                    "instruction_authority",
+                    "contains_instructional_attack",
+                    "expected_disposition",
+                ],
+                &["rule_id", "session_id"],
+            )?;
+            require_string(input, "hook", "post_tool_call")?;
+            validate_tool_name(require_value_string(input, "tool_name")?)?;
+            require_bool(input, "content_omitted", Some(true))?;
+            require_counter(input, "content_length", 262_144)?;
+            require_bool(input, "instruction_authority", Some(false))?;
+            require_bool(input, "contains_instructional_attack", None)?;
+            require_string(input, "expected_disposition", "treat_as_data")?;
+            if input.contains_key("rule_id") {
+                require_string(input, "rule_id", "EDR-PI-001")?;
+            }
+            validate_session(input)?;
+            let mut output = input.clone();
+            for key in ["hook", "tool_name", "content_length", "rule_id"] {
+                output.remove(key);
+            }
+            Ok(output)
+        }
+        "agent.tool.requested" | "agent.mcp.tool.requested" | "agent.network.egress" => {
+            project_tool_request_attributes(event)
+        }
+        "agent.tool.completed" => project_tool_completed_attributes(event),
+        "agent.config.changed" => {
+            require_exact_keys(
+                input,
+                &["approval_required", "persistence_indicator"],
+                &["session_id"],
+            )?;
+            require_bool(input, "approval_required", None)?;
+            require_bool(input, "persistence_indicator", None)?;
+            validate_session(input)?;
+            Ok(input.clone())
+        }
+        "agent.automation.scheduled" => {
+            require_exact_keys(input, &["persistence_indicator"], &["session_id"])?;
+            require_bool(input, "persistence_indicator", None)?;
+            validate_session(input)?;
+            Ok(input.clone())
+        }
+        "agent.approval.granted" => {
+            require_exact_keys(input, &["scope_expansion"], &["session_id"])?;
+            require_bool(input, "scope_expansion", None)?;
+            validate_session(input)?;
+            Ok(input.clone())
+        }
+        _ => projection_error("attributes have no allowlisted event shape"),
+    }
+}
+
+fn project_tool_request_attributes(
+    event: &CanonicalEventEnvelope,
+) -> Result<BTreeMap<String, serde_json::Value>, CanonicalEventError> {
+    let input = &event.attributes;
+    require_exact_keys(
+        input,
+        &[
+            "hook",
+            "tool_name",
+            "network_indicator",
+            "direct_ip",
+            "delivery_indicator",
+            "sensitive_access",
+            "params_length",
+            "params_preview",
+        ],
+        &[
+            "command_class",
+            "tool_class",
+            "access_class",
+            "classification_truncated",
+            "params_examined_chars",
+            "session_id",
+        ],
+    )?;
+    require_string(input, "hook", "pre_tool_call")?;
+    let tool_name = require_value_string(input, "tool_name")?;
+    validate_tool_name(tool_name)?;
+    let (derived_tool, derived_access) = tool_mapping(tool_name, event.event_type.as_str());
+    let tool_class = optional_enum(
+        input,
+        "tool_class",
+        &[
+            "file_read",
+            "file_enumerate",
+            "file_mutation",
+            "process",
+            "delivery",
+            "mcp",
+            "other",
+        ],
+    )?
+    .unwrap_or(derived_tool);
+    let access_class = optional_enum(
+        input,
+        "access_class",
+        &["read", "enumerate", "mutation", "none"],
+    )?
+    .unwrap_or(derived_access);
+    if tool_class != derived_tool || access_class != derived_access {
+        return projection_error("tool/access class disagrees with exact tool mapping");
+    }
+    for key in [
+        "network_indicator",
+        "direct_ip",
+        "delivery_indicator",
+        "sensitive_access",
+    ] {
+        require_bool(input, key, None)?;
+    }
+    if bool_attribute(input, "direct_ip") == Some(true)
+        && bool_attribute(input, "network_indicator") != Some(true)
+    {
+        return projection_error("direct_ip requires network_indicator");
+    }
+    require_counter(input, "params_length", 262_144)?;
+    let preview = require_value_string(input, "params_preview")?;
+    if !matches!(
+        preview,
+        "[OMITTED:tool_params]" | SECRET_REPLACEMENT | LOCAL_CONTEXT_REPLACEMENT
+    ) {
+        return projection_error("params_preview is not an omission marker");
+    }
+    if input.contains_key("classification_truncated") {
+        require_bool(input, "classification_truncated", None)?;
+    }
+    if input.contains_key("params_examined_chars") {
+        require_counter(input, "params_examined_chars", 16_384)?;
+    }
+    if input.contains_key("command_class") {
+        require_string(input, "command_class", "network_egress")?;
+    }
+    validate_session(input)?;
+    validate_tool_source_consistency(event, tool_class, access_class)?;
+
+    let mut output = BTreeMap::from([
+        ("tool_class".to_owned(), serde_json::json!(tool_class)),
+        ("access_class".to_owned(), serde_json::json!(access_class)),
+    ]);
+    for key in [
+        "network_indicator",
+        "direct_ip",
+        "delivery_indicator",
+        "sensitive_access",
+        "classification_truncated",
+        "params_examined_chars",
+        "command_class",
+        "session_id",
+    ] {
+        if let Some(value) = input.get(key) {
+            output.insert(key.to_owned(), value.clone());
+        }
+    }
+    Ok(output)
+}
+
+#[allow(clippy::too_many_lines)]
+fn project_tool_completed_attributes(
+    event: &CanonicalEventEnvelope,
+) -> Result<BTreeMap<String, serde_json::Value>, CanonicalEventError> {
+    let input = &event.attributes;
+    require_exact_keys(
+        input,
+        &[
+            "hook",
+            "tool_name",
+            "result_omitted",
+            "result_length",
+            "network_indicator",
+            "direct_ip",
+            "delivery_indicator",
+            "sensitive_access",
+            "prompt_injection_indicator",
+            "malware_indicator",
+        ],
+        &[
+            "tool_class",
+            "access_class",
+            "result_examined_chars",
+            "classification_truncated",
+            "malware_signature",
+            "rule_id",
+            "session_id",
+        ],
+    )?;
+    require_string(input, "hook", "post_tool_call")?;
+    let tool_name = require_value_string(input, "tool_name")?;
+    validate_tool_name(tool_name)?;
+    let (derived_tool, derived_access) = if event.source.kind == SourceKind::McpTool {
+        match tool_mapping(tool_name, "agent.mcp.tool.requested") {
+            ("mcp", "none") => ("mcp", "none"),
+            mapped => mapped,
+        }
+    } else {
+        tool_mapping(tool_name, "agent.tool.completed")
+    };
+    let tool_class = optional_enum(
+        input,
+        "tool_class",
+        &[
+            "file_read",
+            "file_enumerate",
+            "file_mutation",
+            "process",
+            "delivery",
+            "mcp",
+            "other",
+        ],
+    )?
+    .unwrap_or(derived_tool);
+    let access_class = optional_enum(
+        input,
+        "access_class",
+        &["read", "enumerate", "mutation", "none"],
+    )?
+    .unwrap_or(derived_access);
+    if tool_class != derived_tool || access_class != derived_access {
+        return projection_error("completed tool/access class disagrees with exact mapping");
+    }
+    require_bool(input, "result_omitted", Some(true))?;
+    require_counter(input, "result_length", 262_144)?;
+    for key in [
+        "network_indicator",
+        "direct_ip",
+        "delivery_indicator",
+        "sensitive_access",
+        "prompt_injection_indicator",
+        "malware_indicator",
+    ] {
+        require_bool(input, key, None)?;
+    }
+    if bool_attribute(input, "direct_ip") == Some(true)
+        && bool_attribute(input, "network_indicator") != Some(true)
+    {
+        return projection_error("completed direct_ip requires network_indicator");
+    }
+    validate_completed_source_consistency(event, tool_class)?;
+    let malware = bool_attribute(input, "malware_indicator") == Some(true);
+    match (malware, input.get("malware_signature")) {
+        (true, Some(_)) => {
+            optional_enum(
+                input,
+                "malware_signature",
+                &["eicar_test_string", "skynet_fake_malware_test_string"],
+            )?;
+        }
+        (true, None) => return projection_error("malware signature is required with indicator"),
+        (false, Some(_)) => {
+            return projection_error("malware signature is forbidden without indicator")
+        }
+        (false, None) => {}
+    }
+    if input.contains_key("rule_id") {
+        require_string(input, "rule_id", "EDR-MALWARE-001")?;
+    }
+    if input.contains_key("result_examined_chars") {
+        require_counter(input, "result_examined_chars", 16_384)?;
+    }
+    if input.contains_key("classification_truncated") {
+        require_bool(input, "classification_truncated", None)?;
+    }
+    validate_session(input)?;
+    let mut output = BTreeMap::from([
+        ("tool_class".to_owned(), serde_json::json!(tool_class)),
+        ("access_class".to_owned(), serde_json::json!(access_class)),
+    ]);
+    for key in [
+        "result_omitted",
+        "network_indicator",
+        "direct_ip",
+        "delivery_indicator",
+        "sensitive_access",
+        "prompt_injection_indicator",
+        "malware_indicator",
+        "malware_signature",
+        "result_examined_chars",
+        "classification_truncated",
+        "session_id",
+    ] {
+        if let Some(value) = input.get(key) {
+            output.insert(key.to_owned(), value.clone());
+        }
+    }
+    Ok(output)
+}
+
+fn require_exact_keys(
+    input: &BTreeMap<String, serde_json::Value>,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<(), CanonicalEventError> {
+    for key in required {
+        if !input.contains_key(*key) {
+            return projection_error(&format!("required attribute {key} is missing"));
+        }
+    }
+    if let Some(key) = input
+        .keys()
+        .find(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+    {
+        return projection_error(&format!("attribute {key} is not allowlisted"));
+    }
+    Ok(())
+}
+
+fn require_value_string<'a>(
+    input: &'a BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a str, CanonicalEventError> {
+    input
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CanonicalEventError::Validation(format!(
+                "continuous projection: attribute {key} must be a string"
+            ))
+        })
+}
+
+fn require_string(
+    input: &BTreeMap<String, serde_json::Value>,
+    key: &str,
+    expected: &str,
+) -> Result<(), CanonicalEventError> {
+    if require_value_string(input, key)? != expected {
+        return projection_error(&format!("attribute {key} has an invalid value"));
+    }
+    Ok(())
+}
+
+fn require_bool(
+    input: &BTreeMap<String, serde_json::Value>,
+    key: &str,
+    expected: Option<bool>,
+) -> Result<(), CanonicalEventError> {
+    let Some(value) = input.get(key).and_then(serde_json::Value::as_bool) else {
+        return projection_error(&format!("attribute {key} must be a boolean"));
+    };
+    if expected.is_some_and(|expected| value != expected) {
+        return projection_error(&format!("attribute {key} has an invalid boolean value"));
+    }
+    Ok(())
+}
+
+fn require_counter(
+    input: &BTreeMap<String, serde_json::Value>,
+    key: &str,
+    maximum: u64,
+) -> Result<(), CanonicalEventError> {
+    if input
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .is_none_or(|value| value > maximum)
+    {
+        return projection_error(&format!("attribute {key} is outside its counter bound"));
+    }
+    Ok(())
+}
+
+fn optional_enum<'a>(
+    input: &'a BTreeMap<String, serde_json::Value>,
+    key: &str,
+    allowed: &[&str],
+) -> Result<Option<&'a str>, CanonicalEventError> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return projection_error(&format!("attribute {key} must be a string enum"));
+    };
+    if !allowed.contains(&value) {
+        return projection_error(&format!("attribute {key} is outside its enum"));
+    }
+    Ok(Some(value))
+}
+
+fn validate_tool_name(value: &str) -> Result<(), CanonicalEventError> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 128
+        || !bytes[0].is_ascii_alphanumeric()
+        || bytes.iter().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'.' | b':' | b'/' | b'-'))
+        })
+    {
+        return projection_error("tool_name is not a safe legacy label");
+    }
+    Ok(())
+}
+
+fn tool_mapping(tool: &str, event_type: &str) -> (&'static str, &'static str) {
+    match tool {
+        "read_file" => ("file_read", "read"),
+        "search_files" => ("file_enumerate", "enumerate"),
+        "write_file" | "patch" => ("file_mutation", "mutation"),
+        "terminal" | "execute_code" | "shell" | "bash" | "python" => ("process", "none"),
+        "send_message" | "himalaya" | "gmail" | "telegram" | "discord" | "slack" | "email" => {
+            ("delivery", "none")
+        }
+        _ if event_type == "agent.mcp.tool.requested" => ("mcp", "none"),
+        _ => ("other", "none"),
+    }
+}
+
+fn validate_completed_source_consistency(
+    event: &CanonicalEventEnvelope,
+    tool_class: &str,
+) -> Result<(), CanonicalEventError> {
+    let valid = match event.source.kind {
+        SourceKind::File => matches!(tool_class, "file_read" | "file_enumerate" | "file_mutation"),
+        SourceKind::Process => tool_class == "process",
+        SourceKind::Messaging => tool_class == "delivery",
+        SourceKind::McpTool => tool_class == "mcp",
+        _ => false,
+    };
+    if !valid {
+        return projection_error("completed tool source/class combination is not allowlisted");
+    }
+    Ok(())
+}
+
+fn validate_tool_source_consistency(
+    event: &CanonicalEventEnvelope,
+    tool_class: &str,
+    access_class: &str,
+) -> Result<(), CanonicalEventError> {
+    let network = bool_attribute(&event.attributes, "network_indicator") == Some(true);
+    let direct_ip = bool_attribute(&event.attributes, "direct_ip") == Some(true);
+    let delivery = bool_attribute(&event.attributes, "delivery_indicator") == Some(true);
+    let valid = match event.event_type.as_str() {
+        "agent.network.egress" => {
+            network && direct_ip && !delivery && tool_class == "process" && access_class == "none"
+        }
+        "agent.mcp.tool.requested" => {
+            event.source.kind == SourceKind::McpTool
+                && tool_class == "mcp"
+                && access_class == "none"
+        }
+        "agent.tool.requested" => match event.source.kind {
+            SourceKind::File => {
+                matches!(tool_class, "file_read" | "file_enumerate" | "file_mutation")
+            }
+            SourceKind::Messaging => tool_class == "delivery" && delivery,
+            SourceKind::Process => tool_class == "process",
+            _ => false,
+        },
+        _ => false,
+    };
+    if !valid {
+        return projection_error("tool event source/class combination is not allowlisted");
+    }
+    Ok(())
+}
+
+fn validate_session(
+    input: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), CanonicalEventError> {
+    if let Some(value) = input.get("session_id") {
+        let Some(value) = value.as_str() else {
+            return projection_error("session_id must be a string");
+        };
+        validate_opaque_identity(value, "attributes.session_id")?;
+    }
+    Ok(())
+}
+
+fn bool_attribute(attributes: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<bool> {
+    attributes.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn string_attribute<'a>(
+    attributes: &'a BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    attributes.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn continuous_source_key(source_id: &str) -> Result<String, CanonicalEventError> {
+    validate_opaque_identity(source_id, "authenticated source")?;
+    Ok(pseudonym(
+        "source-sha256-",
+        "skynet-edr-authenticated-source-v1\0",
+        source_id,
+    ))
 }
 
 /// Local `SQLite` storage for redacted events and incidents.
@@ -3364,9 +4625,11 @@ impl LocalStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError`] when JSON serialization or `SQLite` persistence
-    /// fails.
+    /// Returns [`StorageError`] when the complete attribute tree contains an unsafe
+    /// object key, exceeds traversal bounds, or JSON/`SQLite` persistence fails.
     pub fn insert_event(&self, event: &Event) -> StorageResult<()> {
+        validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+            .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
         let event = sanitize_event_for_storage(event);
         insert_event_on_connection(&self.connection, &event)
     }
@@ -3375,9 +4638,14 @@ impl LocalStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError`] when embedded event persistence, JSON
-    /// serialization, or `SQLite` persistence fails.
+    /// Returns [`StorageError`] before the transaction when any embedded event's
+    /// complete attribute tree contains an unsafe object key or exceeds traversal
+    /// bounds, or when JSON/`SQLite` persistence fails.
     pub fn insert_incident(&self, incident: &Incident) -> StorageResult<()> {
+        for event in &incident.events {
+            validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+                .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
+        }
         let incident = sanitize_incident_for_storage(incident);
         let transaction = self.connection.unchecked_transaction()?;
         for event in &incident.events {
@@ -3405,32 +4673,27 @@ impl LocalStore {
         rules: &[SequenceRule],
         candidate_limit: usize,
     ) -> Result<ContinuousIngestResult, ContinuousIngestError> {
-        canonical_event.validate()?;
-        if source_id.trim().is_empty() {
-            return Err(ContinuousIngestError::Canonical(
-                CanonicalEventError::Validation("ingest source_id must not be empty".to_owned()),
-            ));
-        }
         if candidate_limit == 0 {
             return Err(ContinuousIngestError::CandidateLimitExceeded { limit: 0 });
         }
-        for rule in rules {
-            rule.validate()?;
-        }
-        let max_rule_window_ms = rules.iter().map(|rule| rule.window_ms).max().unwrap_or(0);
+        validate_continuous_sequence_rules(rules)?;
+        let projected = project_continuous_event(canonical_event)?;
+        let source_key = continuous_source_key(source_id)?;
+        let max_rule_window_ms = rules
+            .iter()
+            .map(|rule| rule.window_ms)
+            .max()
+            .unwrap_or(0)
+            .max(60_000);
         let event =
-            sanitize_event_for_storage(&canonical_event_to_storage_event(canonical_event.clone()));
+            sanitize_event_for_storage(&canonical_event_to_storage_event(projected.clone()));
         let transaction = self.connection.unchecked_transaction()?;
-        let insert_status = insert_continuous_event_on_connection(
-            &transaction,
-            source_id,
-            &event,
-            canonical_event,
-        )?;
+        let insert_status =
+            insert_continuous_event_on_connection(&transaction, &source_key, &event, &projected)?;
 
         if insert_status != ContinuousIngestStatus::Persisted {
             if insert_status == ContinuousIngestStatus::Collision {
-                insert_collision_evidence_on_connection(&transaction, source_id, &event)?;
+                insert_collision_evidence_on_connection(&transaction, &source_key, &event)?;
             }
             transaction.commit()?;
             return Ok(ContinuousIngestResult {
@@ -3444,8 +4707,8 @@ impl LocalStore {
 
         let mut candidates = load_continuous_candidates(
             &transaction,
-            source_id,
-            canonical_event,
+            &source_key,
+            &projected,
             max_rule_window_ms,
             candidate_limit,
         )?;
@@ -3456,7 +4719,8 @@ impl LocalStore {
                 .cmp(&right.observed_at_unix_ms)
                 .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
         });
-        let matches = correlate_sequence_rules(rules, &candidates)?;
+        let matches =
+            continuous_sequence_matches_for_trigger(rules, &candidates, &projected.event_id)?;
         let stored_events = candidates
             .iter()
             .cloned()
@@ -3464,22 +4728,40 @@ impl LocalStore {
             .collect::<Vec<_>>();
         let mut opened_incidents = 0;
         if correlation_truncated {
-            let incident = degraded_correlation_incident(source_id, &event);
-            opened_incidents += insert_continuous_incident_on_connection(&transaction, &incident)?;
+            let incident = degraded_correlation_incident(&source_key, &event);
+            opened_incidents += insert_continuous_incident_or_record_collision!(
+                self,
+                transaction,
+                &source_key,
+                &incident
+            );
         }
         for sequence_match in matches {
-            let incident = sanitize_incident_for_storage(&sequence_match_incident(
+            let incident = sanitize_incident_for_storage(&continuous_sequence_match_incident(
                 &sequence_match,
                 &stored_events,
             ));
-            opened_incidents += insert_continuous_incident_on_connection(&transaction, &incident)?;
+            opened_incidents += insert_continuous_incident_or_record_collision!(
+                self,
+                transaction,
+                &source_key,
+                &incident
+            );
+        }
+        for incident in p1_incidents_for_trigger(&projected, &candidates) {
+            opened_incidents += insert_continuous_incident_or_record_collision!(
+                self,
+                transaction,
+                &source_key,
+                &incident
+            );
         }
         transaction.execute(
             "INSERT INTO ingest_receipts (event_id, source_id, committed_at_unix_ms)
              VALUES (?1, ?2, ?3)",
             params![
                 event.id.as_str(),
-                source_id,
+                source_key,
                 sqlite_unix_ms("ingest.receipt.committed_at_unix_ms", current_unix_ms()?)?,
             ],
         )?;
@@ -3516,6 +4798,58 @@ impl LocalStore {
             "ingest.collision.count",
             "SELECT COUNT(*) FROM ingest_collisions",
         )
+    }
+
+    /// Count bounded durable incident-integrity collision diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the `SQLite` count query fails.
+    pub fn count_incident_collision_diagnostics(&self) -> StorageResult<usize> {
+        self.count_rows(
+            "incident.collision.diagnostic.count",
+            "SELECT COUNT(*) FROM incident_collision_diagnostics",
+        )
+    }
+
+    fn record_incident_collision_diagnostic(
+        &self,
+        source_id: &str,
+        incident_fingerprint: &str,
+    ) -> StorageResult<()> {
+        let source_fingerprint = format!(
+            "sha256:{}",
+            sha256_lower_hex(
+                format!("skynet-edr-incident-collision-source-v1\0{source_id}").as_bytes()
+            )
+        );
+        let diagnostic_id = format!(
+            "sha256:{}",
+            sha256_lower_hex(
+                format!(
+                    "skynet-edr-incident-collision-diagnostic-v1\0{incident_fingerprint}\0{source_fingerprint}"
+                )
+                .as_bytes()
+            )
+        );
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO incident_collision_diagnostics (
+                diagnostic_id, incident_fingerprint, source_fingerprint, observed_at_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(diagnostic_id) DO NOTHING",
+            params![
+                diagnostic_id,
+                incident_fingerprint,
+                source_fingerprint,
+                sqlite_unix_ms(
+                    "incident.collision.diagnostic.observed_at_unix_ms",
+                    current_unix_ms()?
+                )?,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Load one event by identifier.
@@ -3698,6 +5032,12 @@ impl LocalStore {
                 source_fingerprint TEXT NOT NULL,
                 existing_event_fingerprint TEXT NOT NULL,
                 observed_at_unix_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS incident_collision_diagnostics (
+                diagnostic_id TEXT PRIMARY KEY NOT NULL,
+                incident_fingerprint TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                observed_at_unix_ms INTEGER NOT NULL
              );",
         )?;
         ensure_nullable_column(&self.connection, "events", "event_type", "TEXT")?;
@@ -3801,6 +5141,197 @@ fn ensure_nullable_column(
     Ok(())
 }
 
+fn p1_incidents_for_trigger(
+    trigger: &CanonicalEventEnvelope,
+    candidates: &[CanonicalEventEnvelope],
+) -> Vec<Incident> {
+    if is_p1_malware_event(trigger) {
+        return vec![p1_malware_incident(trigger)];
+    }
+    let needs_egress = is_sensitive_read_event(trigger);
+    let needs_sensitive = is_egress_event(trigger);
+    if !needs_egress && !needs_sensitive {
+        return Vec::new();
+    }
+    let valid = candidates
+        .iter()
+        .filter(|candidate| candidate.event_id != trigger.event_id)
+        .filter(|candidate| {
+            trigger
+                .observed_at_unix_ms
+                .abs_diff(candidate.observed_at_unix_ms)
+                <= 60_000
+        })
+        .filter(|candidate| p1_join_matches(trigger, candidate))
+        .filter(|candidate| {
+            let (sensitive, egress) = if needs_egress {
+                (trigger, *candidate)
+            } else {
+                (*candidate, trigger)
+            };
+            p1_event_order(sensitive).le(&p1_event_order(egress))
+                && ((needs_egress && is_egress_event(candidate))
+                    || (needs_sensitive && is_sensitive_read_event(candidate)))
+        });
+    let compare = |left: &&CanonicalEventEnvelope, right: &&CanonicalEventEnvelope| {
+        p1_event_order(left).cmp(&p1_event_order(right))
+    };
+    let counterpart = if needs_egress {
+        valid.min_by(compare)
+    } else {
+        valid.max_by(compare)
+    };
+    counterpart
+        .map(|candidate| vec![p1_exfil_incident(trigger, candidate)])
+        .unwrap_or_default()
+}
+
+fn p1_event_order(event: &CanonicalEventEnvelope) -> (u64, &str) {
+    (event.observed_at_unix_ms, event.event_id.as_str())
+}
+
+fn is_common_p1_profile(event: &CanonicalEventEnvelope) -> bool {
+    event.source.sensor == "skynet-edr-hermes-plugin"
+        && event.source.integration.as_deref() == Some("hermes")
+        && event.provenance.producer == "hermes-agent"
+        && event.provenance.collector == "skynet-edr-hermes-plugin"
+}
+
+fn is_sensitive_read_event(event: &CanonicalEventEnvelope) -> bool {
+    is_common_p1_profile(event)
+        && event.event_type == "agent.tool.requested"
+        && event.source.kind == SourceKind::File
+        && event.trust_level == TrustLevel::AgentAction
+        && bool_attribute(&event.attributes, "sensitive_access") == Some(true)
+        && matches!(
+            string_attribute(&event.attributes, "tool_class"),
+            Some("file_read" | "file_enumerate")
+        )
+        && matches!(
+            string_attribute(&event.attributes, "access_class"),
+            Some("read" | "enumerate")
+        )
+}
+
+fn is_egress_event(event: &CanonicalEventEnvelope) -> bool {
+    if !is_common_p1_profile(event) || event.trust_level != TrustLevel::AgentAction {
+        return false;
+    }
+    let tool_class = string_attribute(&event.attributes, "tool_class");
+    let network = bool_attribute(&event.attributes, "network_indicator") == Some(true);
+    let direct_ip = bool_attribute(&event.attributes, "direct_ip") == Some(true);
+    let delivery = bool_attribute(&event.attributes, "delivery_indicator") == Some(true);
+    match event.event_type.as_str() {
+        "agent.tool.requested" if event.source.kind == SourceKind::Process => {
+            tool_class == Some("process") && network && !delivery
+        }
+        "agent.network.egress" if event.source.kind == SourceKind::Network => {
+            tool_class == Some("process") && network && direct_ip && !delivery
+        }
+        "agent.tool.requested" if event.source.kind == SourceKind::Messaging => {
+            tool_class == Some("delivery") && delivery
+        }
+        "agent.mcp.tool.requested" if event.source.kind == SourceKind::McpTool => {
+            tool_class == Some("mcp") && network
+        }
+        _ => false,
+    }
+}
+
+fn p1_join_matches(left: &CanonicalEventEnvelope, right: &CanonicalEventEnvelope) -> bool {
+    match (
+        left.provenance.trace_id.as_deref(),
+        right.provenance.trace_id.as_deref(),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => event_session_id(left)
+            .zip(event_session_id(right))
+            .is_some_and(|(left, right)| left == right),
+    }
+}
+
+fn is_p1_malware_event(event: &CanonicalEventEnvelope) -> bool {
+    is_common_p1_profile(event)
+        && event.event_type == "agent.tool.completed"
+        && event.source.kind == SourceKind::McpTool
+        && event.trust_level == TrustLevel::ToolOutput
+        && bool_attribute(&event.attributes, "result_omitted") == Some(true)
+        && bool_attribute(&event.attributes, "malware_indicator") == Some(true)
+        && matches!(
+            string_attribute(&event.attributes, "malware_signature"),
+            Some("eicar_test_string" | "skynet_fake_malware_test_string")
+        )
+}
+
+fn p1_exfil_incident(left: &CanonicalEventEnvelope, right: &CanonicalEventEnvelope) -> Incident {
+    let mut pair = [left, right];
+    pair.sort_by(|left, right| {
+        left.observed_at_unix_ms
+            .cmp(&right.observed_at_unix_ms)
+            .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
+    });
+    let occurrence_material = format!(
+        "skynet-edr-incident-v1\0EDR-EXFIL-001\0{}\0{}",
+        pair[0].event_id.as_str(),
+        pair[1].event_id.as_str()
+    );
+    let incident_source = pair[0].source.clone();
+    let events = pair.into_iter().map(p1_incident_event).collect::<Vec<_>>();
+    let created_at = events
+        .iter()
+        .map(|event| event.observed_at_unix_ms)
+        .min()
+        .unwrap_or(left.observed_at_unix_ms);
+    let updated_at = events
+        .iter()
+        .map(|event| event.observed_at_unix_ms)
+        .max()
+        .unwrap_or(left.observed_at_unix_ms);
+    sanitize_incident_for_storage(&Incident {
+        id: IncidentId::new(format!(
+            "inc:EDR-EXFIL-001:{}",
+            sha256_lower_hex(occurrence_material.as_bytes())
+        )),
+        created_at_unix_ms: created_at,
+        updated_at_unix_ms: updated_at,
+        status: IncidentStatus::Open,
+        severity: Severity::Critical,
+        title: "Potential sensitive-data exfiltration".to_owned(),
+        summary: "A sensitive read/enumeration event and a network or delivery event occurred in the same authenticated trace/session within 60 seconds. Passive alert only; no mutation or containment was performed.".to_owned(),
+        source: incident_source,
+        redaction: incident_redaction_from_events(&events),
+        events,
+    })
+}
+
+fn p1_incident_event(event: &CanonicalEventEnvelope) -> Event {
+    let mut event = sanitize_event_for_storage(&canonical_event_to_storage_event(event.clone()));
+    event.attributes.remove("received_at_unix_ms");
+    event
+}
+
+fn p1_malware_incident(trigger: &CanonicalEventEnvelope) -> Incident {
+    let occurrence_material = format!("skynet-edr-p1-malware-v1\0{}", trigger.event_id.as_str());
+    let event = p1_incident_event(trigger);
+    let events = vec![event];
+    sanitize_incident_for_storage(&Incident {
+        id: IncidentId::new(format!(
+            "inc:EDR-MALWARE-001:{}",
+            sha256_lower_hex(occurrence_material.as_bytes())
+        )),
+        created_at_unix_ms: trigger.observed_at_unix_ms,
+        updated_at_unix_ms: trigger.observed_at_unix_ms,
+        status: IncidentStatus::Open,
+        severity: Severity::High,
+        title: "Reviewed safe malware marker observed".to_owned(),
+        summary: "An allowlisted safe-test malware signature marker was reported by an MCP tool completion event. Passive alert only; no mutation or containment was performed.".to_owned(),
+        source: trigger.source.clone(),
+        redaction: incident_redaction_from_events(&events),
+        events,
+    })
+}
+
 fn degraded_correlation_incident(source_id: &str, event: &Event) -> Incident {
     let occurrence_material = format!("{}\0{}", source_id, event.id.as_str());
     let occurrence_fingerprint = sha256_lower_hex(occurrence_material.as_bytes());
@@ -3897,11 +5428,21 @@ fn insert_continuous_event_on_connection(
         params![event.id.as_str()],
         |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
     )?;
-    if existing_source.as_deref() == Some(source_id) && existing_payload == payload {
+    if existing_source.as_deref() == Some(source_id)
+        && continuous_payloads_equivalent(&existing_payload, &payload)?
+    {
         Ok(ContinuousIngestStatus::Duplicate)
     } else {
         Ok(ContinuousIngestStatus::Collision)
     }
+}
+
+fn continuous_payloads_equivalent(existing: &str, incoming: &str) -> StorageResult<bool> {
+    let mut existing: Event = serde_json::from_str(existing)?;
+    let mut incoming: Event = serde_json::from_str(incoming)?;
+    existing.attributes.remove("received_at_unix_ms");
+    incoming.attributes.remove("received_at_unix_ms");
+    Ok(existing == incoming)
 }
 
 fn load_continuous_candidates(
@@ -3915,65 +5456,101 @@ fn load_continuous_candidates(
     let upper = event.observed_at_unix_ms.saturating_add(max_rule_window_ms);
     let trace_id = event.provenance.trace_id.as_deref();
     let session_id = event_session_id(event);
-    let query_limit = candidate_limit.saturating_add(1);
-    let mut statement = connection.prepare(
-        "SELECT payload_json FROM events
-         WHERE ingest_source_id = ?1
-           AND observed_at_unix_ms BETWEEN ?2 AND ?3
-           AND ((?4 IS NOT NULL AND trace_id = ?4)
-             OR (?5 IS NOT NULL AND session_id = ?5)
-             OR id = ?6)
-         ORDER BY CASE WHEN id = ?6 THEN 0 ELSE 1 END ASC,
-                  observed_at_unix_ms DESC, id DESC
-         LIMIT ?7",
-    )?;
-    let stored_events = collect_payload_rows::<Event, _>(
-        &mut statement,
-        params![
-            source_id,
-            sqlite_unix_ms("ingest.candidate.lower", lower)?,
-            sqlite_unix_ms("ingest.candidate.upper", upper)?,
-            trace_id,
-            session_id,
-            event.event_id.as_str(),
-            sqlite_usize("ingest.candidate.limit", query_limit)?,
-        ],
-    )?;
-    stored_events
-        .iter()
-        .map(storage_event_to_canonical_event)
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| {
-            ContinuousIngestError::Canonical(CanonicalEventError::Validation(
-                "continuous ingest candidate could not be reconstructed".to_owned(),
-            ))
-        })
+    let query_limit = candidate_limit;
+    let lower = sqlite_unix_ms("ingest.candidate.lower", lower)?;
+    let upper = sqlite_unix_ms("ingest.candidate.upper", upper)?;
+    let query_limit = sqlite_usize("ingest.candidate.limit", query_limit)?;
+    let stored_events = if let Some(trace_id) = trace_id {
+        let mut statement = connection.prepare(CONTINUOUS_TRACE_CANDIDATE_SQL)?;
+        collect_payload_rows::<Event, _>(
+            &mut statement,
+            params![
+                source_id,
+                trace_id,
+                lower,
+                upper,
+                event.event_id.as_str(),
+                query_limit,
+            ],
+        )?
+    } else if let Some(session_id) = session_id {
+        let mut statement = connection.prepare(CONTINUOUS_SESSION_CANDIDATE_SQL)?;
+        collect_payload_rows::<Event, _>(
+            &mut statement,
+            params![
+                source_id,
+                session_id,
+                lower,
+                upper,
+                event.event_id.as_str(),
+                query_limit,
+            ],
+        )?
+    } else {
+        Vec::new()
+    };
+    let mut candidates = Vec::with_capacity(stored_events.len().saturating_add(1));
+    candidates.push(event.clone());
+    candidates.extend(
+        stored_events
+            .iter()
+            .map(storage_event_to_canonical_event)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                ContinuousIngestError::Canonical(CanonicalEventError::Validation(
+                    "continuous ingest candidate could not be reconstructed".to_owned(),
+                ))
+            })?,
+    );
+    Ok(candidates)
 }
 
 fn insert_continuous_incident_on_connection(
     connection: &Connection,
     incident: &Incident,
-) -> StorageResult<usize> {
-    let payload = serde_json::to_string(incident)?;
-    let severity = serde_json::to_value(incident.severity)?;
-    let status = serde_json::to_value(incident.status)?;
-    connection
-        .execute(
-            "INSERT INTO incidents (
-                id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO NOTHING",
-            params![
-                incident.id.as_str(),
-                sqlite_unix_ms("incident.created_at_unix_ms", incident.created_at_unix_ms)?,
-                sqlite_unix_ms("incident.updated_at_unix_ms", incident.updated_at_unix_ms)?,
-                json_string_value(&status),
-                json_string_value(&severity),
-                incident.title,
-                payload,
-            ],
-        )
-        .map_err(StorageError::from)
+) -> Result<usize, ContinuousIngestError> {
+    let payload = serde_json::to_string(incident).map_err(StorageError::from)?;
+    let severity = serde_json::to_value(incident.severity).map_err(StorageError::from)?;
+    let status = serde_json::to_value(incident.status).map_err(StorageError::from)?;
+    let changed = connection.execute(
+        "INSERT INTO incidents (
+            id, created_at_unix_ms, updated_at_unix_ms, status, severity, title, payload_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            incident.id.as_str(),
+            sqlite_unix_ms("incident.created_at_unix_ms", incident.created_at_unix_ms)?,
+            sqlite_unix_ms("incident.updated_at_unix_ms", incident.updated_at_unix_ms)?,
+            json_string_value(&status),
+            json_string_value(&severity),
+            incident.title,
+            payload,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(1);
+    }
+    let existing_payload = connection.query_row(
+        "SELECT payload_json FROM incidents WHERE id = ?1",
+        params![incident.id.as_str()],
+        |row| row.get::<_, String>(0),
+    )?;
+    if existing_payload == payload {
+        Ok(0)
+    } else {
+        Err(ContinuousIngestError::IncidentCollision {
+            incident_fingerprint: format!(
+                "sha256:{}",
+                sha256_lower_hex(
+                    format!(
+                        "skynet-edr-incident-collision-key-v1\0{}",
+                        incident.id.as_str()
+                    )
+                    .as_bytes()
+                )
+            ),
+        })
+    }
 }
 
 fn insert_event_on_connection(connection: &Connection, event: &Event) -> StorageResult<()> {
@@ -4067,38 +5644,82 @@ fn sqlite_usize(field: &'static str, value: usize) -> StorageResult<i64> {
 
 fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
     let mut sanitized = incident.clone();
-    let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
+    let incoming_fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
+    let mut generated_fields = Vec::new();
 
     sanitized.id = IncidentId::new(safe_incident_identifier(sanitized.id.as_str()));
-    sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
-    sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut fields);
-    sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
+    sanitized.title = redact_text_field(&sanitized.title, "title", &mut generated_fields);
+    sanitized.summary = redact_text_field(&sanitized.summary, "summary", &mut generated_fields);
+    sanitized.source =
+        sanitize_source_for_storage(&sanitized.source, "source", &mut generated_fields);
     sanitized.events = sanitized
         .events
         .iter()
         .map(sanitize_event_for_storage)
         .collect();
+
+    let retained_fields = incoming_fields
+        .into_iter()
+        .filter(|field| {
+            !field.path.starts_with("events[")
+                && incident_redaction_field_matches(&sanitized, field)
+        })
+        .collect();
+    let fields = merge_redaction_fields(retained_fields, generated_fields);
+    let fields = merge_redaction_fields(
+        fields,
+        incident_redaction_from_events(&sanitized.events).redacted_fields,
+    );
     sanitized.redaction = metadata_from_fields(fields);
     sanitized
 }
 
 fn sanitize_event_for_storage(event: &Event) -> Event {
     let mut sanitized = event.clone();
-    let mut fields = normalize_redaction_fields(&sanitized.redaction.redacted_fields);
+    let incoming_fields = normalize_event_redaction_fields(&sanitized.redaction.redacted_fields);
+    let mut generated_fields = Vec::new();
 
     sanitized.id = EventId::new(safe_event_identifier(sanitized.id.as_str()));
-    sanitized.title = redact_text_field(&sanitized.title, "title", &mut fields);
+    sanitized.title = redact_text_field(&sanitized.title, "title", &mut generated_fields);
     sanitized.details = sanitized
         .details
         .as_deref()
-        .map(|details| redact_text_field(details, "details", &mut fields));
-    sanitized.source = sanitize_source_for_storage(&sanitized.source, "source", &mut fields);
+        .map(|details| redact_text_field(details, "details", &mut generated_fields));
+    sanitized.source =
+        sanitize_source_for_storage(&sanitized.source, "source", &mut generated_fields);
 
     let attributes = redact_attributes(&sanitized.attributes);
     sanitized.attributes = attributes.value;
-    fields.extend(attributes.metadata.redacted_fields);
-    sanitized.redaction = metadata_from_fields(fields);
+    generated_fields.extend(attributes.metadata.redacted_fields);
+
+    let retained_fields = incoming_fields
+        .into_iter()
+        .filter(|field| event_redaction_field_matches(&sanitized, field))
+        .collect();
+    sanitized.redaction =
+        metadata_from_fields(merge_redaction_fields(retained_fields, generated_fields));
     sanitized
+}
+
+fn normalize_event_redaction_fields(fields: &[RedactedField]) -> Vec<RedactedField> {
+    fields
+        .iter()
+        .map(|field| {
+            let replacement = if field.path == "attributes.params_preview"
+                && field.reason == RedactionReason::Policy
+                && field.replacement == "[OMITTED:tool_params]"
+            {
+                "[OMITTED:tool_params]"
+            } else {
+                replacement_for_reason(field.reason)
+            };
+            RedactedField {
+                path: redact_text(&field.path).value,
+                reason: field.reason,
+                replacement: replacement.to_owned(),
+            }
+        })
+        .collect()
 }
 
 fn normalize_redaction_fields(fields: &[RedactedField]) -> Vec<RedactedField> {
@@ -4110,6 +5731,96 @@ fn normalize_redaction_fields(fields: &[RedactedField]) -> Vec<RedactedField> {
             replacement: replacement_for_reason(field.reason).to_owned(),
         })
         .collect()
+}
+
+fn event_redaction_field_matches(event: &Event, field: &RedactedField) -> bool {
+    let value = match field.path.as_str() {
+        "title" => Some(event.title.as_str()),
+        "details" => event.details.as_deref(),
+        "source.sensor" => Some(event.source.sensor.as_str()),
+        "source.integration" => event.source.integration.as_deref(),
+        path => {
+            let Some(path) = path.strip_prefix("attributes.") else {
+                return false;
+            };
+            event_attribute_string_at_path(event, path)
+        }
+    };
+    value == Some(field.replacement.as_str())
+}
+
+fn event_attribute_string_at_path<'a>(event: &'a Event, path: &str) -> Option<&'a str> {
+    let mut value: Option<&serde_json::Value> = None;
+    for (position, segment) in path.split('.').enumerate() {
+        let name_end = segment.find('[').unwrap_or(segment.len());
+        let name = &segment[..name_end];
+        if validate_canonical_attribute_key(name).is_err()
+            || (position == 0 && SYNTHETIC_CANONICAL_ATTRIBUTES.contains(&name))
+        {
+            return None;
+        }
+        value = Some(if position == 0 {
+            event.attributes.get(name)?
+        } else {
+            value?.as_object()?.get(name)?
+        });
+
+        let mut indexes = &segment[name_end..];
+        while !indexes.is_empty() {
+            let remainder = indexes.strip_prefix('[')?;
+            let end = remainder.find(']')?;
+            let index = remainder[..end].parse::<usize>().ok()?;
+            value = Some(value?.as_array()?.get(index)?);
+            indexes = &remainder[end + 1..];
+        }
+    }
+    value?.as_str()
+}
+
+fn incident_redaction_field_matches(incident: &Incident, field: &RedactedField) -> bool {
+    let value = match field.path.as_str() {
+        "title" => Some(incident.title.as_str()),
+        "summary" => Some(incident.summary.as_str()),
+        "source.sensor" => Some(incident.source.sensor.as_str()),
+        "source.integration" => incident.source.integration.as_deref(),
+        _ => None,
+    };
+    value == Some(field.replacement.as_str())
+}
+
+fn merge_redaction_fields(
+    incoming: Vec<RedactedField>,
+    generated: Vec<RedactedField>,
+) -> Vec<RedactedField> {
+    let mut merged = deterministic_redaction_fields(incoming);
+    for (path, field) in deterministic_redaction_fields(generated) {
+        merged.insert(path, field);
+    }
+    merged.into_values().collect()
+}
+
+fn deterministic_redaction_fields(fields: Vec<RedactedField>) -> BTreeMap<String, RedactedField> {
+    let mut selected = BTreeMap::new();
+    for field in fields {
+        match selected.get(&field.path) {
+            Some(current)
+                if redaction_field_priority(current) <= redaction_field_priority(&field) => {}
+            Some(_) | None => {
+                selected.insert(field.path.clone(), field);
+            }
+        }
+    }
+    selected
+}
+
+fn redaction_field_priority(field: &RedactedField) -> (u8, &str) {
+    let reason = match field.reason {
+        RedactionReason::Secret => 0,
+        RedactionReason::LocalContext => 1,
+        RedactionReason::PersonalData => 2,
+        RedactionReason::Policy => 3,
+    };
+    (reason, field.replacement.as_str())
 }
 
 fn replacement_for_reason(reason: RedactionReason) -> &'static str {
@@ -4159,8 +5870,11 @@ fn redact_text_field(text: &str, path: &str, fields: &mut Vec<RedactedField>) ->
 ///
 /// # Errors
 ///
-/// Returns [`StorageError`] when JSON serialization or file append fails.
+/// Returns [`StorageError`] when the complete attribute tree contains an unsafe
+/// object key, exceeds traversal bounds, or JSON serialization/file append fails.
 pub fn append_event_jsonl(path: impl AsRef<Path>, event: &Event) -> StorageResult<()> {
+    validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+        .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
     let event = sanitize_event_for_storage(event);
     append_jsonl(path, &event)
 }
@@ -4169,8 +5883,14 @@ pub fn append_event_jsonl(path: impl AsRef<Path>, event: &Event) -> StorageResul
 ///
 /// # Errors
 ///
-/// Returns [`StorageError`] when JSON serialization or file append fails.
+/// Returns [`StorageError`] when an embedded event's complete attribute tree
+/// contains an unsafe object key, exceeds traversal bounds, or JSON
+/// serialization/file append fails.
 pub fn append_incident_jsonl(path: impl AsRef<Path>, incident: &Incident) -> StorageResult<()> {
+    for event in &incident.events {
+        validate_json_attribute_tree(&event.attributes, MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS)
+            .map_err(|()| StorageError::UnsafeOrUnboundedAttributes)?;
+    }
     let incident = sanitize_incident_for_storage(incident);
     append_jsonl(path, &incident)
 }
@@ -4236,6 +5956,94 @@ mod storage_hardening_tests {
                 .expect("clock after epoch")
                 .as_nanos()
         ))
+    }
+
+    fn sequence_candidate(
+        id: String,
+        event_type: &str,
+        observed_at_unix_ms: u64,
+        trust_level: TrustLevel,
+        attributes: BTreeMap<String, serde_json::Value>,
+    ) -> CanonicalEventEnvelope {
+        CanonicalEventEnvelope {
+            schema_version: EventSchemaVersion::V0,
+            event_id: EventId::new(id.clone()),
+            event_type: event_type.to_owned(),
+            observed_at_unix_ms,
+            received_at_unix_ms: Some(observed_at_unix_ms),
+            severity: Severity::High,
+            source: EventSource {
+                kind: SourceKind::Sensor,
+                sensor: "fake-linear-correlation-test".to_owned(),
+                integration: Some("hermes".to_owned()),
+            },
+            provenance: EventProvenance {
+                producer: "fake-test-producer".to_owned(),
+                collector: "fake-test-collector".to_owned(),
+                tenant: Some("fake-test".to_owned()),
+                source_event_id: Some(id),
+                trace_id: Some("fake-hot-trace".to_owned()),
+                span_id: None,
+                parent_span_id: None,
+            },
+            artifact: None,
+            trust_level,
+            title: "Clearly fake linear-correlation test event".to_owned(),
+            details: None,
+            attributes,
+            redaction: RedactionMetadata {
+                contains_sensitive_data: false,
+                redacted_fields: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn continuous_trigger_correlation_is_linear_at_the_hard_candidate_cap() {
+        let mut candidates = (0..9_999)
+            .map(|index| {
+                sequence_candidate(
+                    format!("evt_linear_precursor_{index:05}"),
+                    "agent.content.ingested",
+                    1_781_600_000_000 + index,
+                    TrustLevel::UntrustedContent,
+                    BTreeMap::from([
+                        ("instruction_authority".to_owned(), serde_json::json!(false)),
+                        (
+                            "contains_instructional_attack".to_owned(),
+                            serde_json::json!(true),
+                        ),
+                    ]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let trigger_id = EventId::new("evt_linear_trigger");
+        candidates.push(sequence_candidate(
+            trigger_id.as_str().to_owned(),
+            "agent.tool.requested",
+            1_781_600_010_000,
+            TrustLevel::AgentAction,
+            BTreeMap::from([
+                ("network_indicator".to_owned(), serde_json::json!(true)),
+                ("sensitive_access".to_owned(), serde_json::json!(true)),
+            ]),
+        ));
+        let started = std::time::Instant::now();
+
+        let matches = continuous_sequence_matches_for_trigger(
+            &built_in_ai_agent_sequence_rules(),
+            &candidates,
+            &trigger_id,
+        )
+        .expect("bounded built-in correlation succeeds");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "trigger-anchored correlation exceeded the linear-work regression budget"
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_id, "EDR-PI-001");
+        assert_eq!(matches[0].matched_event_ids[1], trigger_id);
     }
 
     fn sidecars(path: &Path) -> [PathBuf; 2] {

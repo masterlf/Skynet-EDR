@@ -59,9 +59,16 @@ The fallback, checkpoint, and log are user-private where supported.
 - No inline blocking in v0.4.
 - Raw tool parameters and raw tool output are omitted; only lengths and
   indicators are stored.
-- Sensitive parameter previews are replaced as whole fields with
-  `[REDACTED:secret]` or `[REDACTED:local_context]`; otherwise parameter
-  previews are `[OMITTED:tool_params]`.
+- Newly emitted parameter previews are always `[OMITTED:tool_params]`.
+  Sensitive-pattern metadata records that fixed omission without raw values or
+  reason-specific preview markers.
+- Legacy canonical import rejects duplicate or ambiguous redaction paths and
+  unsafe attribute keys before persistence. Keys use bounded ASCII
+  `[A-Za-z0-9][A-Za-z0-9_-]*`; paths use exactly one `attributes.` prefix and a
+  single top-level key. The complete canonical attribute payload must already be
+  unchanged by storage sanitization; sensitive names require an already-redacted
+  value and coherent Secret metadata. Unsafe keys are rejected, never silently
+  renamed.
 - Hook failures are logged and swallowed so Hermes remains usable.
 
 ## Risk Explorer

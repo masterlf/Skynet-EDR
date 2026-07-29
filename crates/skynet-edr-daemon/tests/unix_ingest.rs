@@ -76,6 +76,68 @@ fn frame(payload: &[u8]) -> Vec<u8> {
     framed
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn p1a_event(
+    id: &str,
+    event_type: &str,
+    kind: &str,
+    trust: &str,
+    observed: u64,
+    trace: &str,
+    attributes: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": "skynet.event.v0",
+        "event_id": id,
+        "event_type": event_type,
+        "observed_at_unix_ms": observed,
+        "received_at_unix_ms": observed,
+        "severity": "informational",
+        "source": {"kind": kind, "sensor": "skynet-edr-hermes-plugin", "integration": "hermes"},
+        "provenance": {
+            "producer": "hermes-agent",
+            "collector": "skynet-edr-hermes-plugin",
+            "tenant": "FAKE_UNIX_TENANT",
+            "source_event_id": id,
+            "trace_id": trace,
+            "span_id": id,
+            "parent_span_id": null
+        },
+        "trust_level": trust,
+        "title": "FAKE Unix P1a producer title",
+        "details": null,
+        "attributes": attributes,
+        "redaction": {"contains_sensitive_data": false, "redacted_fields": []}
+    })
+}
+
+fn p1a_request_attributes(tool: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hook": "pre_tool_call",
+        "tool_name": tool,
+        "network_indicator": false,
+        "direct_ip": false,
+        "delivery_indicator": false,
+        "sensitive_access": false,
+        "params_length": 0,
+        "params_preview": "[OMITTED:tool_params]"
+    })
+}
+
+fn p1a_exchange(
+    uid: u32,
+    config: &UnixIngestConfig,
+    db_path: &std::path::Path,
+    event: &serde_json::Value,
+) -> String {
+    exchange(
+        uid,
+        config,
+        db_path,
+        &frame(&serde_json::to_vec(event).expect("event serializes")),
+    )
+}
+
 fn exchange(
     uid: u32,
     config: &UnixIngestConfig,
@@ -877,4 +939,344 @@ candidate_limit = 10000
         before
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unix_exfil_ack_after_atomic_visibility() {
+    let db_path = temp_path("p1a-exfil-visibility.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("p1a-exfil-visibility.sock"), vec![1_301]);
+    let mut precursor_attrs = p1a_request_attributes("read_file");
+    precursor_attrs["sensitive_access"] = serde_json::json!(true);
+    let precursor = p1a_event(
+        "evt_p1a_unix_26_a",
+        "agent.tool.requested",
+        "file",
+        "agent_action",
+        1_781_600_000_000,
+        "FAKE_UNIX_TRACE_26",
+        precursor_attrs,
+    );
+    let mut successor_attrs = p1a_request_attributes("terminal");
+    successor_attrs["network_indicator"] = serde_json::json!(true);
+    successor_attrs["command_class"] = serde_json::json!("network_egress");
+    let successor = p1a_event(
+        "evt_p1a_unix_26_b",
+        "agent.tool.requested",
+        "process",
+        "agent_action",
+        1_781_600_000_001,
+        "FAKE_UNIX_TRACE_26",
+        successor_attrs,
+    );
+    assert!(p1a_exchange(1_301, &config, &db_path, &precursor).contains("persisted"));
+    let ack = p1a_exchange(1_301, &config, &db_path, &successor);
+    assert!(ack.contains("persisted"), "{ack}");
+    let visible = LocalStore::open_read_only(&db_path).unwrap();
+    assert_eq!(visible.count_ingest_receipts().unwrap(), 2);
+    assert!(visible
+        .list_incidents()
+        .unwrap()
+        .iter()
+        .any(|incident| incident.id.as_str().contains("EDR-EXFIL-001")));
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn unix_malware_ack_after_atomic_visibility() {
+    let db_path = temp_path("p1a-malware-visibility.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("p1a-malware-visibility.sock"), vec![1_302]);
+    let event = p1a_event(
+        "evt_p1a_unix_27",
+        "agent.tool.completed",
+        "mcp_tool",
+        "tool_output",
+        1_781_600_000_000,
+        "FAKE_UNIX_TRACE_27",
+        serde_json::json!({
+            "hook":"post_tool_call","tool_name":"remote.fetch","result_omitted":true,
+            "result_length":0,"network_indicator":false,"direct_ip":false,
+            "delivery_indicator":false,"sensitive_access":false,
+            "prompt_injection_indicator":false,"malware_indicator":true,
+            "malware_signature":"eicar_test_string"
+        }),
+    );
+    let ack = p1a_exchange(1_302, &config, &db_path, &event);
+    assert!(ack.contains("persisted"), "{ack}");
+    let visible = LocalStore::open_read_only(&db_path).unwrap();
+    assert_eq!(visible.count_ingest_receipts().unwrap(), 1);
+    assert!(visible
+        .list_incidents()
+        .unwrap()
+        .iter()
+        .any(|incident| incident.id.as_str().contains("EDR-MALWARE-001")));
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn unix_derived_incident_failure_returns_retry_later() {
+    let db_path = temp_path("p1a-incident-failure.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("p1a-incident-failure.sock"), vec![1_303]);
+    let mut precursor_attrs = p1a_request_attributes("read_file");
+    precursor_attrs["sensitive_access"] = serde_json::json!(true);
+    let precursor = p1a_event(
+        "evt_p1a_unix_28_a",
+        "agent.tool.requested",
+        "file",
+        "agent_action",
+        1_781_600_000_000,
+        "FAKE_UNIX_TRACE_28",
+        precursor_attrs,
+    );
+    assert!(p1a_exchange(1_303, &config, &db_path, &precursor).contains("persisted"));
+    rusqlite::Connection::open(&db_path).unwrap().execute_batch("CREATE TRIGGER p1a_unix_fail BEFORE INSERT ON incidents BEGIN SELECT RAISE(FAIL, 'forced unix p1a incident failure'); END;").unwrap();
+    let mut successor_attrs = p1a_request_attributes("terminal");
+    successor_attrs["network_indicator"] = serde_json::json!(true);
+    successor_attrs["command_class"] = serde_json::json!("network_egress");
+    let successor = p1a_event(
+        "evt_p1a_unix_28_b",
+        "agent.tool.requested",
+        "process",
+        "agent_action",
+        1_781_600_000_001,
+        "FAKE_UNIX_TRACE_28",
+        successor_attrs,
+    );
+    let ack = p1a_exchange(1_303, &config, &db_path, &successor);
+    assert!(ack.contains("retry_later"), "{ack}");
+    let visible = LocalStore::open_read_only(&db_path).unwrap();
+    assert!(visible.get_event("evt_p1a_unix_28_b").unwrap().is_none());
+    assert_eq!(visible.count_ingest_receipts().unwrap(), 1);
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn unix_incident_collision_is_terminal_visible_and_atomic() {
+    let db_path = temp_path("p1a-incident-collision.sqlite");
+    let oracle_path = temp_path("p1a-incident-collision-oracle.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    drop(LocalStore::open(&oracle_path).expect("oracle schema initializes"));
+    let config = config(temp_path("p1a-incident-collision.sock"), vec![1_306]);
+    let mut precursor_attrs = p1a_request_attributes("read_file");
+    precursor_attrs["sensitive_access"] = serde_json::json!(true);
+    let precursor = p1a_event(
+        "evt_p1a_unix_collision_a",
+        "agent.tool.requested",
+        "file",
+        "agent_action",
+        1_781_600_000_000,
+        "FAKE_UNIX_TRACE_COLLISION",
+        precursor_attrs,
+    );
+    let mut successor_attrs = p1a_request_attributes("terminal");
+    successor_attrs["network_indicator"] = serde_json::json!(true);
+    successor_attrs["command_class"] = serde_json::json!("network_egress");
+    let successor = p1a_event(
+        "evt_p1a_unix_collision_b",
+        "agent.tool.requested",
+        "process",
+        "agent_action",
+        1_781_600_000_001,
+        "FAKE_UNIX_TRACE_COLLISION",
+        successor_attrs,
+    );
+    for path in [&db_path, &oracle_path] {
+        assert!(p1a_exchange(1_306, &config, path, &precursor).contains("persisted"));
+    }
+    assert!(p1a_exchange(1_306, &config, &oracle_path, &successor).contains("persisted"));
+    let incident_id = LocalStore::open_read_only(&oracle_path)
+        .unwrap()
+        .list_incidents()
+        .unwrap()
+        .into_iter()
+        .find(|incident| incident.id.as_str().contains("EDR-EXFIL-001"))
+        .unwrap()
+        .id;
+    rusqlite::Connection::open(&db_path).unwrap().execute(
+        "INSERT INTO incidents (id,created_at_unix_ms,updated_at_unix_ms,status,severity,title,payload_json)
+         VALUES (?1,0,0,'open','high','collision','{}')", [incident_id.as_str()],
+    ).unwrap();
+
+    let health = IngestionHealth::default();
+    let ack = exchange_with_health(
+        1_306,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&successor).unwrap()),
+        &health,
+    );
+    assert!(ack.contains(r#""status":"rejected_permanent""#), "{ack}");
+    assert!(ack.contains(r#""reason":"incident_collision""#), "{ack}");
+    let visible = LocalStore::open_read_only(&db_path).unwrap();
+    assert!(visible
+        .get_event("evt_p1a_unix_collision_b")
+        .unwrap()
+        .is_none());
+    assert_eq!(visible.count_ingest_receipts().unwrap(), 1);
+    assert_eq!(visible.count_incidents().unwrap(), 1);
+    assert_eq!(visible.count_incident_collision_diagnostics().unwrap(), 1);
+    assert_eq!(health.snapshot().incident_integrity_collision_total, 1);
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["incident_integrity_collision_total"], 1);
+    assert_eq!(
+        status["sources"][0]["last_error_category"],
+        "incident_collision"
+    );
+    let diagnostics = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT diagnostic_id || ' ' || incident_fingerprint || ' ' || source_fingerprint
+         FROM incident_collision_diagnostics",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    for raw in [
+        incident_id.as_str(),
+        "evt_p1a_unix_collision_a",
+        "evt_p1a_unix_collision_b",
+        "FAKE_UNIX_TRACE_COLLISION",
+        "uid:1306",
+    ] {
+        assert!(!diagnostics.contains(raw), "raw marker leaked: {raw}");
+    }
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(oracle_path);
+}
+
+#[test]
+fn unix_incident_collision_diagnostic_failure_returns_retry_later() {
+    let db_path = temp_path("p1a-incident-collision-diagnostic-failure.sqlite");
+    let oracle_path = temp_path("p1a-incident-collision-diagnostic-failure-oracle.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    drop(LocalStore::open(&oracle_path).expect("oracle schema initializes"));
+    let config = config(
+        temp_path("p1a-incident-collision-diagnostic-failure.sock"),
+        vec![1_307],
+    );
+    let mut precursor_attrs = p1a_request_attributes("read_file");
+    precursor_attrs["sensitive_access"] = serde_json::json!(true);
+    let precursor = p1a_event(
+        "evt_p1a_unix_collision_fail_a",
+        "agent.tool.requested",
+        "file",
+        "agent_action",
+        1_781_600_000_000,
+        "FAKE_UNIX_TRACE_COLLISION_FAIL",
+        precursor_attrs,
+    );
+    let mut successor_attrs = p1a_request_attributes("terminal");
+    successor_attrs["network_indicator"] = serde_json::json!(true);
+    successor_attrs["command_class"] = serde_json::json!("network_egress");
+    let successor = p1a_event(
+        "evt_p1a_unix_collision_fail_b",
+        "agent.tool.requested",
+        "process",
+        "agent_action",
+        1_781_600_000_001,
+        "FAKE_UNIX_TRACE_COLLISION_FAIL",
+        successor_attrs,
+    );
+    for path in [&db_path, &oracle_path] {
+        assert!(p1a_exchange(1_307, &config, path, &precursor).contains("persisted"));
+    }
+    assert!(p1a_exchange(1_307, &config, &oracle_path, &successor).contains("persisted"));
+    let incident_id = LocalStore::open_read_only(&oracle_path)
+        .unwrap()
+        .list_incidents()
+        .unwrap()
+        .into_iter()
+        .find(|incident| incident.id.as_str().contains("EDR-EXFIL-001"))
+        .unwrap()
+        .id;
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection.execute(
+        "INSERT INTO incidents (id,created_at_unix_ms,updated_at_unix_ms,status,severity,title,payload_json)
+         VALUES (?1,0,0,'open','high','collision','{}')", [incident_id.as_str()],
+    ).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_incident_collision_diagnostic
+         BEFORE INSERT ON incident_collision_diagnostics
+         BEGIN SELECT RAISE(FAIL, 'forced incident collision diagnostic failure'); END;",
+        )
+        .unwrap();
+    let ack = p1a_exchange(1_307, &config, &db_path, &successor);
+    assert!(ack.contains(r#""status":"retry_later""#), "{ack}");
+    let visible = LocalStore::open_read_only(&db_path).unwrap();
+    assert!(visible
+        .get_event("evt_p1a_unix_collision_fail_b")
+        .unwrap()
+        .is_none());
+    assert_eq!(visible.count_ingest_receipts().unwrap(), 1);
+    assert_eq!(visible.count_incidents().unwrap(), 1);
+    assert_eq!(visible.count_incident_collision_diagnostics().unwrap(), 0);
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(oracle_path);
+}
+
+#[test]
+fn unix_different_peer_uids_do_not_correlate() {
+    let db_path = temp_path("p1a-uid-isolation.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("p1a-uid-isolation.sock"), vec![1_304, 2_304]);
+    let mut precursor_attrs = p1a_request_attributes("read_file");
+    precursor_attrs["sensitive_access"] = serde_json::json!(true);
+    let precursor = p1a_event(
+        "evt_p1a_unix_29_a",
+        "agent.tool.requested",
+        "file",
+        "agent_action",
+        1_781_600_000_000,
+        "FAKE_UNIX_TRACE_29",
+        precursor_attrs,
+    );
+    let mut successor_attrs = p1a_request_attributes("terminal");
+    successor_attrs["network_indicator"] = serde_json::json!(true);
+    successor_attrs["command_class"] = serde_json::json!("network_egress");
+    let successor = p1a_event(
+        "evt_p1a_unix_29_b",
+        "agent.tool.requested",
+        "process",
+        "agent_action",
+        1_781_600_000_001,
+        "FAKE_UNIX_TRACE_29",
+        successor_attrs,
+    );
+    assert!(p1a_exchange(1_304, &config, &db_path, &precursor).contains("persisted"));
+    assert!(p1a_exchange(2_304, &config, &db_path, &successor).contains("persisted"));
+    assert!(LocalStore::open_read_only(&db_path)
+        .unwrap()
+        .list_incidents()
+        .unwrap()
+        .iter()
+        .all(|incident| !incident.id.as_str().contains("EDR-EXFIL-001")));
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn unix_invalid_event_is_permanently_rejected_before_storage() {
+    let db_path = temp_path("p1a-invalid.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("p1a-invalid.sock"), vec![1_305]);
+    let mut attrs = p1a_request_attributes("terminal");
+    attrs["raw_command"] = serde_json::json!("FAKE_RAW_UNIX_30");
+    let invalid = p1a_event(
+        "evt_p1a_unix_30",
+        "agent.tool.requested",
+        "process",
+        "agent_action",
+        1_781_600_000_000,
+        "FAKE_UNIX_TRACE_30",
+        attrs,
+    );
+    let ack = p1a_exchange(1_305, &config, &db_path, &invalid);
+    assert!(ack.contains("rejected_permanent"), "{ack}");
+    let visible = LocalStore::open_read_only(&db_path).unwrap();
+    assert_eq!(visible.count_events().unwrap(), 0);
+    assert_eq!(visible.count_incidents().unwrap(), 0);
+    assert_eq!(visible.count_ingest_receipts().unwrap(), 0);
+    let _ = fs::remove_file(db_path);
 }
