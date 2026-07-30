@@ -15,18 +15,21 @@ v0.3.0 is a passive Linux-first prerelease. It provides:
 
 It does **not** provide inline pause, approval, blocking, or active containment.
 
-## Current milestone: v0.4.0 reliable passive prerelease
+## Current milestone: v0.4.1 reliable passive prerelease
 
-The v0.4.0 milestone closes the operator-trust and detection-coverage gaps that remained after v0.3.0:
+The v0.4.1 milestone completes the P1 reliability and continuous-coverage work on top of v0.4.0:
 
 - deterministic sequence-capable correlation and the reviewed high-signal AI-agent rule pack;
 - `skynet-edr doctor` and private, redaction-safe diagnostics collection;
-- clean-host package install/remove evidence;
+- authenticated bounded continuous ingestion with privacy-safe EXFIL/MALWARE detection;
+- completed-outcome telemetry for exact successful Hermes cron create/update operations;
+- explicit fail-dark treatment for unsupported config, persistence, and approval-scope outcomes;
+- clean-host package install/remove, upgrade, restart-persistence, and rollback evidence;
 - public download, checksum, extraction, and version verification;
 - green Rust, Python, documentation, SAST, secret-scanning, dependency, and packaging gates;
 - release notes that separate implemented behavior from limitations.
 
-The release remains passive and is published as a prerelease until production gates such as signing, provenance, SBOM policy, upgrade/rollback evidence, and broader platform validation are complete.
+The release remains passive and is published as a prerelease until production gates such as signing, provenance, SBOM policy, and broader platform validation are complete.
 
 ## Next milestone: guard mode design
 

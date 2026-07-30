@@ -102,7 +102,7 @@ Start with the [documentation hub](docs/README.md). The documentation is organiz
 - [Detections](docs/DETECTIONS.md) — detection philosophy, rule families, severity, and alert evidence.
 - [Operations](docs/OPERATIONS.md) — local store, API/MCP posture, evidence handling, and troubleshooting.
 - [Release process](docs/RELEASE_PROCESS.md) and [packaging plan](docs/PACKAGING.md) — release gates, artifacts, publishing, and rollback.
-- [Current roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [v0.4.0 release notes](docs/releases/v0.4.0.md) — shipped scope and remaining limitations.
+- [Current roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [v0.4.1 release notes](docs/releases/v0.4.1.md) — shipped scope and remaining limitations.
 
 ## Naming
 

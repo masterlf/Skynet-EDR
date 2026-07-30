@@ -105,13 +105,13 @@ Download packages from the GitHub Releases page:
 https://github.com/masterlf/Skynet-EDR/releases
 ```
 
-For `v0.4.0`, the expected Linux `amd64` artifacts are:
+For `v0.4.1`, the expected Linux `amd64` artifacts are:
 
 ```text
-skynet-edr_0.4.0_amd64.deb
-skynet-edr-0.4.0-1.x86_64.rpm
-skynet-edr-0.4.0-1-x86_64.pkg.tar.zst
-skynet-edr-0.4.0-x86_64-unknown-linux-gnu.tar.gz
+skynet-edr_0.4.1_amd64.deb
+skynet-edr-0.4.1-1.x86_64.rpm
+skynet-edr-0.4.1-1-x86_64.pkg.tar.zst
+skynet-edr-0.4.1-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
 ```
 
@@ -127,7 +127,7 @@ After downloading the `.deb` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo apt install ./skynet-edr_0.4.0_amd64.deb
+sudo apt install ./skynet-edr_0.4.1_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -192,7 +192,7 @@ After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo dnf install ./skynet-edr-0.4.0-1.x86_64.rpm
+sudo dnf install ./skynet-edr-0.4.1-1.x86_64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -215,7 +215,7 @@ After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo pacman -U ./skynet-edr-0.4.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-0.4.1-1-x86_64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```
