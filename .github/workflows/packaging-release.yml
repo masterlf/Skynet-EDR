@@ -54,7 +54,9 @@ jobs:
 
       - name: Validate packaging metadata
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          if [[ -n "${SKYNET_EDR_VERSION}" ]]; then
+            export SKYNET_EDR_EXPECTED_VERSION="${SKYNET_EDR_VERSION}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             export SKYNET_EDR_EXPECTED_VERSION="${GITHUB_REF_NAME#v}"
           fi
           packaging/scripts/validate-packaging.sh
