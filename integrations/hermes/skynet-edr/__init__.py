@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover - continuous ingestion is Linux-first
     fcntl = None
 
 PLUGIN_NAME = "skynet-edr"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 SCHEMA_VERSION = "skynet.event.v0"
 DEFAULT_MAX_FIELD_CHARS = 4096
 DEFAULT_MAX_LOG_BYTES = 1_048_576

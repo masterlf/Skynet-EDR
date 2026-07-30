@@ -199,7 +199,7 @@ event = {
     },
     "trust_level": "sensor_observation",
     "title": "Harmless local continuous-ingestion canary",
-    "attributes": {"plugin_version": "0.4.0", "argument_count": 0, "keyword_count": 0},
+    "attributes": {"plugin_version": "0.4.1", "argument_count": 0, "keyword_count": 0},
     "redaction": {"contains_sensitive_data": False, "redacted_fields": []},
 }
 payload = json.dumps(event, separators=(",", ":"), sort_keys=True).encode()

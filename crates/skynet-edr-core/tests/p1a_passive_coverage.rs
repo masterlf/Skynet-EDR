@@ -1323,7 +1323,7 @@ fn continuous_projection_accepts_hermes_plugin_p0_and_rejects_generic_golden_pro
             "sensor_observation",
             BASE_TIME,
             Some("FAKE_TRACE_39"),
-            json!({"plugin_version":"0.4.0","argument_count":0,"keyword_count":0}),
+            json!({"plugin_version":"0.4.1","argument_count":0,"keyword_count":0}),
         ),
         plugin_event(
             "evt_p1a_39_end",
@@ -1332,7 +1332,7 @@ fn continuous_projection_accepts_hermes_plugin_p0_and_rejects_generic_golden_pro
             "sensor_observation",
             BASE_TIME + 1,
             Some("FAKE_TRACE_39"),
-            json!({"plugin_version":"0.4.0","argument_count":0,"keyword_count":0}),
+            json!({"plugin_version":"0.4.1","argument_count":0,"keyword_count":0}),
         ),
         plugin_event(
             "evt_p1a_39_llm",

@@ -15,6 +15,7 @@ packaging/tarball/install.sh
 packaging/tarball/uninstall.sh
 packaging/scripts/build-tarball.sh
 packaging/scripts/build-packages.sh
+packaging/scripts/check-release-version.py
 packaging/scripts/stage-hermes-plugin-payload.sh
 packaging/scripts/inspect-artifacts.sh
 packaging/scripts/smoke-install-artifacts.sh
@@ -39,6 +40,12 @@ for file in $required_files; do
     exit 1
   fi
 done
+
+if [ -n "${SKYNET_EDR_EXPECTED_VERSION:-}" ]; then
+  python3 packaging/scripts/check-release-version.py --expected "$SKYNET_EDR_EXPECTED_VERSION"
+else
+  python3 packaging/scripts/check-release-version.py
+fi
 
 for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then

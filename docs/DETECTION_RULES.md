@@ -68,7 +68,7 @@ Authenticated continuous ingestion requires the exact conjunction `agent.tool.co
 
 Severity: High. Raw payload content must be omitted before storage; store only structured indicator metadata such as signature family.
 
-These correlators consume producer-asserted event metadata; AF_UNIX UID authorization does not attest the process or event truth. They are passive detection, not prevention. P1b config/cron/approval mutation producers remain dark and pending.
+These correlators consume producer-asserted event metadata; AF_UNIX UID authorization does not attest the process or event truth. They are passive detection, not prevention. Exact successful Hermes cron create/update results now have an outcome-gated producer; config, persistence, and approval-scope mutation producers remain explicitly dark until authoritative post-mutation evidence exists.
 
 ## Roadmap / candidate rule details
 
