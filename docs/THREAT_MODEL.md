@@ -91,7 +91,7 @@ Unexpected changes introduce new tools, MCP servers, webhook routes, scheduled j
 - AF_UNIX peer UID and filesystem permissions authorize a local producer but do not attest its process identity or the truth of its events.
 - Event timestamps and trace/session joins are producer asserted. Same-UID forgery, delayed replay, and clock skew remain possible even though correlation identities are pseudonymized before storage.
 - Queue/fallback loss, bounded-classifier truncation, and bounded-candidate overflow can make telemetry incomplete; absence of an incident is not proof of safety.
-- Passive detection does not prevent the observed action. P1b mutation/config/cron/approval producer coverage remains pending.
+- Passive detection does not prevent the observed action. Exact active Hermes cron `create`/`update` outcomes now have a bounded producer, but config, persistence, and approval-scope mutation coverage remains dark until Hermes exposes authoritative post-mutation outcomes. Built-in tool/plugin compromise can forge producer evidence.
 
 ## Initial response philosophy
 

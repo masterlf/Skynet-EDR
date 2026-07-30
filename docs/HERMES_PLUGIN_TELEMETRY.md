@@ -70,6 +70,41 @@ The v0.4 plugin registers:
 | `pre_tool_call` | Emits tool intent metadata, including network/sensitive indicators. |
 | `post_tool_call` | Emits tool-result metadata and prompt-injection/malware-test indicators. |
 
+
+## Mutation outcome semantics
+
+Mutation-specific events are emitted only from documented after-action hooks with
+exact allowlists. A request event is not treated as proof that endpoint state
+changed.
+
+For cron scheduling, the only accepted tool name is case-sensitive `cronjob` and
+the only accepted actions are case-sensitive `create` and `update`. The
+`post_tool_call` result must be an exact string no longer than 16,384 characters,
+decode to a JSON object with boolean `success=true`, contain no top-level `error`,
+and carry a bounded active `job` object whose identifier matches the create
+identifier when present, with `enabled=true`, `state="scheduled"`, and a valid
+timezone-aware ISO-8601 `next_run_at`. When Hermes supplies observer status
+metadata, `status` must be `ok`
+and `error_type` must be absent. Only then does the plugin emit
+`agent.automation.scheduled` with the fixed attribute
+`persistence_indicator=true`. `list`, `run`, `pause`, `resume`, `remove`, unknown
+or near-name tools/actions, failed/malformed/oversized results, and intent-only
+hooks do not emit a schedule-mutation event. Duplicate JSON keys, non-standard
+JSON constants, and integers exceeding the runtime parser limit also fail dark
+without aborting the hook. Prompts, schedules, job identifiers,
+delivery targets, scripts, model configuration, and result content are examined
+only as bounded in-memory evidence where needed and are not copied into that
+event.
+
+`EDR-CONFIG-001`, `EDR-PERSIST-001`, and `EDR-SCOPE-001` remain deliberately dark
+for the shipped Hermes plugin. Hermes currently exposes no dedicated structured
+config-save outcome to the agent-loop plugin. A successful terminal process or
+generic file write does not prove that Hermes parsed, accepted, or loaded the
+configuration, so the plugin does not mislabel either as `agent.config.changed`.
+The documented `post_approval_response` callback fires after a prompted choice
+but before Hermes applies session/permanent approval state; it therefore does not
+prove completed scope expansion and is not emitted as `agent.approval.granted`.
+
 ## Risk Explorer boundaries
 
 The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, and optional `GET /status` under Hermes' plugin API mount. It proxies to the fixed loopback Skynet-EDR listener at `127.0.0.1:8787` unless `SKYNET_EDR_API_PORT` is set to a valid numeric port. It denies redirects, maps upstream 404 risk detail misses to generic `risk_not_found`, and has no SQLite access, shell/subprocess use, caller-controlled upstream URL, or mutation route.
@@ -134,8 +169,17 @@ the packaged telemetry. The plugin does not yet fully classify IPv6 literals or
 indirect egress inside arbitrary Python, SDK, cloud-client,
 `scp`, `rsync`, `ftp://`, or `s3://` payloads. Safe malware-test markers require
 ASCII token boundaries; adjacent prefix/suffix near-matches are not classified.
-Treat missed network indicators
-as a coverage limitation, not proof of safety. Trace/session identifiers and observed timestamps are producer asserted and pseudonymized by continuous ingestion before storage. Socket UID authorization permits the producer but does not attest process identity or event truth. The plugin and correlators are passive: they do not prevent delivery, egress, or tool execution. P1b mutation-success/config/cron/approval producers remain pending.
+Unicode case-folding confusables are also rejected. Treat missed network
+indicators as a coverage limitation, not proof of safety. Cron outcomes depend on
+the exact built-in Hermes `cronjob` result contract; a compromised or overridden
+producer can forge these self-reported observations. Config, persistence, and
+approval-scope mutation coverage remains absent rather than inferred from intent,
+terminal output, generic file-write output, or a pre-persistence approval callback.
+Trace/session identifiers and observed timestamps are producer asserted and
+pseudonymized by continuous ingestion before storage. Socket UID authorization
+permits the producer but does not attest process identity or event truth. The
+plugin and correlators are passive: they do not prevent delivery, egress, tool
+execution, scheduling, or approval-scope changes.
 
 ## Legacy manual ingestion
 
