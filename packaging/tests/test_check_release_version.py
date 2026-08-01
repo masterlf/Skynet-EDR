@@ -136,6 +136,61 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                 finally:
                     plugin.write_text(original, encoding="utf-8")
 
+    def test_rejects_dynamic_python_plugin_version_rebinding(self) -> None:
+        plugin = self.fixture_root / "integrations/hermes/skynet-edr/__init__.py"
+        rebindings = (
+            'exec("PLUGIN_VERSION = \'9.9.9\'")',
+            'globals()["PLUGIN_VERSION"] = "9.9.9"',
+            'vars()["PLUGIN_VERSION"] = "9.9.9"',
+        )
+        for rebinding in rebindings:
+            with self.subTest(rebinding=rebinding):
+                original = plugin.read_text(encoding="utf-8")
+                plugin.write_text(original + f"\n{rebinding}\n", encoding="utf-8")
+                try:
+                    runtime = {
+                        "__file__": str(plugin),
+                        "__name__": "hostile_plugin_fixture",
+                    }
+                    exec(compile(plugin.read_text(encoding="utf-8"), plugin, "exec"), runtime)
+                    self.assertEqual(runtime["PLUGIN_VERSION"], "9.9.9")
+
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn("unsafe Hermes plugin version", str(failure.exception))
+                finally:
+                    plugin.write_text(original, encoding="utf-8")
+
+    def test_rejects_unsafe_python_namespace_mutation_surfaces(self) -> None:
+        plugin = self.fixture_root / "integrations/hermes/skynet-edr/__init__.py"
+        unsafe_surfaces = (
+            "namespace = globals",
+            'locals()["PLUGIN_VERSION"] = "9.9.9"',
+            'eval("PLUGIN_VERSION")',
+            'compile("PLUGIN_VERSION = \'9.9.9\'", "<hostile>", "exec")',
+            'setattr(module, "PLUGIN_VERSION", "9.9.9")',
+            'delattr(module, "PLUGIN_VERSION")',
+            'import builtins as hostile_builtins\nhostile_builtins.exec("pass")',
+            'from builtins import exec as run\nrun("pass")',
+            '__builtins__["exec"]("pass")',
+            'module.__dict__["PLUGIN_VERSION"] = "9.9.9"',
+            'module.PLUGIN_VERSION = "9.9.9"',
+            "del module.PLUGIN_VERSION",
+        )
+        for unsafe_surface in unsafe_surfaces:
+            with self.subTest(unsafe_surface=unsafe_surface):
+                original = plugin.read_text(encoding="utf-8")
+                plugin.write_text(
+                    original + f"\n{unsafe_surface}\n",
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn("unsafe Hermes plugin version", str(failure.exception))
+                finally:
+                    plugin.write_text(original, encoding="utf-8")
+
     def test_rejects_duplicate_plugin_yaml_version_keys(self) -> None:
         manifest = self.fixture_root / "integrations/hermes/skynet-edr/plugin.yaml"
         for duplicate_key, duplicate_value in (

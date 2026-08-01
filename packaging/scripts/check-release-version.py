@@ -14,6 +14,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPENDENCY_TABLES = ("dependencies", "build-dependencies", "dev-dependencies")
+UNSAFE_PYTHON_NAMESPACE_NAMES = {
+    "__builtins__",
+    "compile",
+    "delattr",
+    "eval",
+    "exec",
+    "globals",
+    "locals",
+    "setattr",
+    "vars",
+}
 
 
 def text(path: str) -> str:
@@ -47,11 +58,54 @@ def require_unique_yaml_scalar(path: str, value_pattern: str, label: str) -> str
     return match.group(1)
 
 
+def reject_unsafe_python_namespace_mutation(
+    module: ast.Module,
+    path: str,
+    name: str,
+    label: str,
+) -> None:
+    """Reject bounded dynamic surfaces that can obscure a module authority."""
+    for node in ast.walk(module):
+        unsafe = (
+            isinstance(node, ast.Name)
+            and node.id in UNSAFE_PYTHON_NAMESPACE_NAMES
+        ) or (
+            isinstance(node, ast.Import)
+            and any(alias.name == "builtins" for alias in node.names)
+        ) or (
+            isinstance(node, ast.ImportFrom) and node.module == "builtins"
+        ) or (
+            isinstance(node, ast.Attribute)
+            and (
+                node.attr == "__dict__"
+                or (
+                    node.attr == name
+                    and isinstance(node.ctx, (ast.Store, ast.Del))
+                )
+                or (
+                    node.attr in UNSAFE_PYTHON_NAMESPACE_NAMES - {"compile"}
+                )
+                or (
+                    node.attr == "compile"
+                    and not (
+                        isinstance(node.value, ast.Name) and node.value.id == "re"
+                    )
+                )
+            )
+        )
+        if unsafe:
+            line_number = getattr(node, "lineno", "unknown")
+            raise SystemExit(
+                f"unsafe {label} namespace mutation surface in {path}:{line_number}"
+            )
+
+
 def python_string_assignment(path: str, name: str, label: str) -> str:
     try:
         module = ast.parse(text(path), filename=path)
     except SyntaxError as error:
         raise SystemExit(f"invalid Python in {path}: {error.msg}") from error
+    reject_unsafe_python_namespace_mutation(module, path, name, label)
     direct_assignments = [
         statement
         for statement in module.body
