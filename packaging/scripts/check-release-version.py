@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import dis
 import json
 import re
 import tomllib
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,11 +20,83 @@ def text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def require_match(path: str, pattern: str, label: str) -> str:
-    match = re.search(pattern, text(path), flags=re.MULTILINE)
-    if match is None:
+def require_unique_yaml_scalar(path: str, value_pattern: str, label: str) -> str:
+    authorities: list[str] = []
+    for line_number, line in enumerate(text(path).splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#") or line.startswith(" "):
+            continue
+        mapping = re.fullmatch(r"([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)", line)
+        if mapping is not None:
+            key, value = mapping.groups()
+        else:
+            quoted_version = re.fullmatch(r'''["']version["']\s*:\s*(.*)''', line)
+            if quoted_version is None:
+                raise SystemExit(
+                    f"unsupported root YAML syntax in {path}:{line_number}"
+                )
+            key, value = "version", quoted_version.group(1)
+        if key == "version":
+            authorities.append(value)
+    if not authorities:
         raise SystemExit(f"missing {label} in {path}")
+    if len(authorities) != 1:
+        raise SystemExit(f"duplicate {label} in {path}")
+    match = re.fullmatch(value_pattern, authorities[0])
+    if match is None:
+        raise SystemExit(f"invalid {label} in {path}")
     return match.group(1)
+
+
+def python_string_assignment(path: str, name: str, label: str) -> str:
+    try:
+        module = ast.parse(text(path), filename=path)
+    except SyntaxError as error:
+        raise SystemExit(f"invalid Python in {path}: {error.msg}") from error
+    direct_assignments = [
+        statement
+        for statement in module.body
+        if isinstance(statement, (ast.Assign, ast.AnnAssign))
+        and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in (
+                statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            )
+        )
+    ]
+    bindings = []
+    pending_code = [(compile(module, path, "exec"), True)]
+    while pending_code:
+        code, is_module = pending_code.pop()
+        binding_operations = {"STORE_GLOBAL", "DELETE_GLOBAL"}
+        if is_module:
+            binding_operations.update({"STORE_NAME", "DELETE_NAME"})
+        bindings.extend(
+            instruction
+            for instruction in dis.get_instructions(code)
+            if instruction.opname in binding_operations and instruction.argval == name
+        )
+        pending_code.extend(
+            (constant, False)
+            for constant in code.co_consts
+            if isinstance(constant, types.CodeType)
+        )
+    if not bindings:
+        raise SystemExit(f"missing {label} in {path}")
+    if len(bindings) != 1 or len(direct_assignments) != 1:
+        raise SystemExit(f"duplicate {label} in {path}")
+    value = direct_assignments[0].value
+    if not isinstance(value, ast.Constant) or type(value.value) is not str:
+        raise SystemExit(f"invalid {label} in {path}")
+    return value.value
+
+
+def reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
 
 def dependency_tables(manifest: dict, manifest_label: str):
@@ -209,23 +284,24 @@ def main() -> None:
 
     observed = {
         "Cargo.toml workspace": workspace_version,
-        "nFPM default": require_match(
+        "nFPM default": require_unique_yaml_scalar(
             "packaging/nfpm.yaml",
-            r"^version:\s+\$\{SKYNET_EDR_VERSION:-([^}]+)\}$",
+            r"\$\{SKYNET_EDR_VERSION:-([^}]+)\}",
             "nFPM default version",
         ),
-        "Hermes plugin Python": require_match(
+        "Hermes plugin Python": python_string_assignment(
             "integrations/hermes/skynet-edr/__init__.py",
-            r'^PLUGIN_VERSION\s*=\s*"([^"]+)"$',
+            "PLUGIN_VERSION",
             "Hermes plugin version",
         ),
-        "Hermes plugin manifest": require_match(
+        "Hermes plugin manifest": require_unique_yaml_scalar(
             "integrations/hermes/skynet-edr/plugin.yaml",
-            r'^version:\s+"([^"]+)"$',
+            r'"([^"]+)"',
             "Hermes plugin manifest version",
         ),
         "dashboard manifest": json.loads(
-            text("integrations/hermes/skynet-edr/dashboard/manifest.json")
+            text("integrations/hermes/skynet-edr/dashboard/manifest.json"),
+            object_pairs_hook=reject_duplicate_json_keys,
         )["version"],
     }
 
@@ -303,6 +379,14 @@ def main() -> None:
     if missing_lock_entries:
         raise SystemExit(
             "internal packages missing from Cargo.lock: " + ", ".join(missing_lock_entries)
+        )
+    unexpected_lock_entries = sorted(
+        internal_lock_entries.keys() - internal_manifest_crates
+    )
+    if unexpected_lock_entries:
+        raise SystemExit(
+            "unexpected internal packages in Cargo.lock: "
+            + ", ".join(unexpected_lock_entries)
         )
 
     mismatches = {

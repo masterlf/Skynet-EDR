@@ -108,6 +108,136 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         ):
             self.checker.main()
 
+    def test_rejects_duplicate_python_plugin_version_assignments(self) -> None:
+        plugin = self.fixture_root / "integrations/hermes/skynet-edr/__init__.py"
+        duplicate_assignments = (
+            'PLUGIN_VERSION = "0.4.1"',
+            'PLUGIN_VERSION = "9.9.9"',
+            'if True:\n    PLUGIN_VERSION = "9.9.9"',
+            'PLUGIN_VERSION += ".hostile"',
+            "try:\n    raise RuntimeError\nexcept RuntimeError as PLUGIN_VERSION:\n    pass",
+            (
+                "class HostileVersion:\n"
+                "    global PLUGIN_VERSION\n"
+                '    PLUGIN_VERSION = "9.9.9"'
+            ),
+        )
+        for duplicate_assignment in duplicate_assignments:
+            with self.subTest(duplicate_assignment=duplicate_assignment):
+                original = plugin.read_text(encoding="utf-8")
+                plugin.write_text(
+                    original + f"\n{duplicate_assignment}\n",
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn("duplicate Hermes plugin version", str(failure.exception))
+                finally:
+                    plugin.write_text(original, encoding="utf-8")
+
+    def test_rejects_duplicate_plugin_yaml_version_keys(self) -> None:
+        manifest = self.fixture_root / "integrations/hermes/skynet-edr/plugin.yaml"
+        for duplicate_key, duplicate_value in (
+            ("version", '"0.4.1"'),
+            ("version", '"9.9.9"'),
+            ("version", "9.9.9"),
+            ('"version"', '"9.9.9"'),
+        ):
+            with self.subTest(duplicate_value=duplicate_value):
+                original = manifest.read_text(encoding="utf-8")
+                manifest.write_text(
+                    original + f"\n{duplicate_key}: {duplicate_value}\n",
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn(
+                        "duplicate Hermes plugin manifest version",
+                        str(failure.exception),
+                    )
+                finally:
+                    manifest.write_text(original, encoding="utf-8")
+
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + '\n? version\n: "9.9.9"\n',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SystemExit) as failure:
+            self.run_checker()
+        self.assertIn("unsupported root YAML syntax", str(failure.exception))
+
+    def test_rejects_duplicate_nfpm_version_keys(self) -> None:
+        manifest = self.fixture_root / "packaging/nfpm.yaml"
+        for duplicate_key, duplicate_value in (
+            ("version", "${SKYNET_EDR_VERSION:-0.4.1}"),
+            ("version", "${SKYNET_EDR_VERSION:-9.9.9}"),
+            ("version", "9.9.9"),
+            ('"version"', "9.9.9"),
+        ):
+            with self.subTest(duplicate_value=duplicate_value):
+                original = manifest.read_text(encoding="utf-8")
+                manifest.write_text(
+                    original + f"\n{duplicate_key}: {duplicate_value}\n",
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn("duplicate nFPM default version", str(failure.exception))
+                finally:
+                    manifest.write_text(original, encoding="utf-8")
+
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + '\n? version\n: "9.9.9"\n',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SystemExit) as failure:
+            self.run_checker()
+        self.assertIn("unsupported root YAML syntax", str(failure.exception))
+
+    def test_rejects_duplicate_dashboard_json_version_keys(self) -> None:
+        manifest = (
+            self.fixture_root
+            / "integrations/hermes/skynet-edr/dashboard/manifest.json"
+        )
+        for duplicate_version in ("0.4.1", "9.9.9"):
+            with self.subTest(duplicate_version=duplicate_version):
+                original = manifest.read_text(encoding="utf-8")
+                manifest.write_text(
+                    original.replace(
+                        '"version": "0.4.1",',
+                        '"version": "0.4.1",\n'
+                        f'  "version": "{duplicate_version}",',
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn("duplicate JSON key", str(failure.exception))
+                finally:
+                    manifest.write_text(original, encoding="utf-8")
+
+    def test_rejects_unexpected_internal_prefixed_cargo_lock_identity(self) -> None:
+        lockfile = self.fixture_root / "Cargo.lock"
+        with lockfile.open("a", encoding="utf-8") as lock:
+            lock.write(
+                '\n[[package]]\nname = "skynet-edr-ghost"\nversion = "0.4.1"\n'
+            )
+
+        with self.assertRaises(SystemExit) as failure:
+            self.run_checker()
+
+        self.assertIn(
+            "unexpected internal packages in Cargo.lock: skynet-edr-ghost",
+            str(failure.exception),
+        )
+
     def test_rejects_mismatch_in_each_internal_dependency(self) -> None:
         dependencies = (
             ("skynet-edr-cli", "skynet-edr-core"),
