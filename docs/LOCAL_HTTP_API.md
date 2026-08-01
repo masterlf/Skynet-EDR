@@ -11,7 +11,7 @@ Phase 11 adds a tiny HTML console router on top of the same Phase 10 API project
 - Only `GET` is accepted.
 - `POST`, `PUT`, `PATCH`, and `DELETE` return `405 method_not_allowed`.
 - No response actions, containment actions, sensor starts, config writes, or approval mutations are exposed.
-- Local store data is read through the same read-only projection used by the MCP visibility surface.
+- Local store data is read through the same read-only projection used by the MCP handler library.
 - Daemon startup performs one explicit writable initialization/migration phase for the configured active SQLite store before spool ingestion and before listener startup, then drops that writable handle. That writable phase converts the local store to rollback-journal (`DELETE`) mode and checkpoints existing WAL stores so committed rows are preserved before read-only serving begins.
 - The HTTP listener startup preflights the configured SQLite store read-only and fails closed on missing, empty, WAL-mode, or incompatible schema without creating a DB, WAL, SHM, schema, or indexes. Active HTTP requests inspect the SQLite header before opening SQLite, then use a read-only, `query_only` connection. `/api/status`, `/api/v1/risks`, and `/api/v1/risks/<id>` are the bounded Risk Explorer paths.
 - The v0.4 local operator store intentionally prefers a verifiable no-sidecar read path over WAL reader/writer concurrency. Readers produce no `-wal`/`-shm` sidecars; short writer/read contention may return a generic unavailable response rather than weakening the read-only posture.
@@ -63,7 +63,10 @@ Unknown routes return `404 not_found`.
 
 ## Current implementation note
 
-Phase 10 implements the validated configuration and side-effect-free request router. Phase 11 adds the side-effect-free HTML console router; a future listener can attach both routers to the same validated localhost-only bind without changing route semantics.
+Phase 10 implements the validated configuration and side-effect-free request
+router. Phase 11 adds the side-effect-free HTML console router. The current
+daemon starts both through its loopback-only TCP listener when the HTTP API is
+enabled and the read-only store preflight succeeds; the listener exists now.
 
 ## Verification
 

@@ -17,7 +17,7 @@ The current MVP is passive and Linux-first. It emphasizes redacted local evidenc
 | Daemon/service | Passive runtime path | [Install](INSTALL.md#what-is-installed) |
 | AF_UNIX ingestion | Authenticated, bounded producer transport | [Continuous ingestion operations](#continuous-ingestion-operations) |
 | Local HTTP API | Localhost-only read-only visibility | [Local read-only HTTP API and console](LOCAL_HTTP_API.md) |
-| MCP server | Read-only visibility for agent runtimes | [Read-only MCP integration](MCP_READ_ONLY.md) |
+| MCP handler crate | Implemented read-only handler surface; no network MCP server | [Read-only MCP integration](MCP_READ_ONLY.md) |
 
 ## First-run checks
 
@@ -253,7 +253,7 @@ See [Local read-only HTTP API and console](LOCAL_HTTP_API.md#security-boundary).
 
 ## MCP operations
 
-The MVP MCP integration is read-only. Use it to inspect status, incidents, rule metadata, sensor metadata, and config drift. Do not grant it write/containment authority without a separate design and tests.
+The MVP provides a read-only MCP handler library, not an operational MCP integration. It defines handlers for status, incidents, rule metadata, sensor metadata, and config drift, but ships no MCP transport, process, socket, server registration, or operator-runnable Hermes visibility path. Do not grant a future adapter write/containment authority without a separate design and tests.
 
 See [Read-only MCP integration](MCP_READ_ONLY.md#tools).
 
@@ -278,7 +278,7 @@ Before trusting an operational setup:
 - package installed from expected source;
 - local store initialized with correct filesystem permissions;
 - read-only API exposed only as intended;
-- MCP integration remains read-only;
+- MCP handler library remains side-effect-free and is not an operational integration;
 - test fixtures use fake honeytokens only;
 - alert output is redacted;
 - logs do not contain raw secrets;

@@ -1,5 +1,10 @@
 # Concept Architecture
 
+This is a conceptual target architecture, not a claim that every depicted
+sensor, channel, response action, or deployment mode ships in v0.4.1. The
+current product boundary is passive local evidence and read-only visibility;
+see the [MVP public support contract](MVP_SUPPORT_MATRIX.md).
+
 ## Overview
 
 Skynet-EDR is designed as an agent-aware detection and response layer.
@@ -27,7 +32,7 @@ Alerts + response actions
 
 ## Components
 
-### 1. Agent event sensor
+### 1. Agent event sensor (conceptual; current coverage is producer-specific)
 
 Captures agent-native events:
 
@@ -41,7 +46,7 @@ Captures agent-native events:
 - tool arguments, redacted
 - cron/background task context
 
-### 2. Content provenance tracker
+### 2. Content provenance tracker (conceptual)
 
 Labels content by source and trust level:
 
@@ -56,7 +61,7 @@ Labels content by source and trust level:
 
 This helps distinguish command from data.
 
-### 3. MCP/config sensor
+### 3. MCP/config sensor (conceptual; fixture-scanner coverage is narrow)
 
 Monitors agent configuration for:
 
@@ -68,7 +73,7 @@ Monitors agent configuration for:
 - suspicious encoded payloads
 - profile/config drift
 
-### 4. Secret/file access sensor
+### 4. Secret/file access sensor (conceptual)
 
 Detects reads or attempted transmission of sensitive paths:
 
@@ -79,7 +84,7 @@ Detects reads or attempted transmission of sensitive paths:
 - password stores
 - agent config/memory/skills/cron definitions
 
-### 5. Network sensor
+### 5. Network sensor (conceptual; post-MVP)
 
 Collects outbound metadata:
 
@@ -97,7 +102,7 @@ Possible implementations:
 - Zeek/Suricata for network metadata
 - proxy logs
 
-### 6. Correlation engine
+### 6. Correlation engine (implemented only for documented narrow rules)
 
 Combines events into attack stories.
 
@@ -111,16 +116,16 @@ untrusted GitHub issue contained instruction-like text
 → high-severity exfiltration alert
 ```
 
-### 7. Response layer
+### 7. Response layer (conceptual; not shipped)
 
-Initial response actions:
+Candidate guard-mode response actions:
 
 - send alert
 - write incident JSON
 - pause task
 - require human approval
 
-Future response actions:
+Later enforcement candidates:
 
 - block egress
 - disable MCP entry
@@ -130,18 +135,20 @@ Future response actions:
 
 ## Deployment modes
 
-### Passive mode
+### Passive mode (current v0.4.1 and planned v0.5.0)
 
 Reads logs, config, and network metadata. Does not block.
 
-### Guard mode
+### Guard mode (v0.6+ candidate)
 
 Can pause tasks and require approval for risky chains.
 
-### Enforcement mode
+### Enforcement mode (post-guard candidate)
 
 Can block high-confidence exfiltration and disable malicious runtime entries.
 
 ## MVP recommendation
 
-Start with passive mode plus alerts. Add blocking only for very high-confidence detections.
+Historical recommendation: start with passive local evidence and read-only
+visibility. v0.5.0 plans durable local alerting; guard-mode blocking is v0.6+
+work after an exercised pre-execution control point exists.

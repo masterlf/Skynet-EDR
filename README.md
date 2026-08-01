@@ -1,6 +1,6 @@
 # Skynet-EDR
 
-**AI-Agent Detection and Response for autonomous AI runtimes.**
+**AI-Agent Detection and Response research project for autonomous AI runtimes.**
 
 Skynet-EDR is an early-stage security project focused on detecting and responding to attacks against AI agents, especially prompt-injection-driven abuse, malicious MCP/tool behavior, credential access, and data-exfiltration chains.
 
@@ -33,9 +33,9 @@ untrusted email / web page / PDF / repo file
 
 Traditional HIDS/EDR may see a process or network event. LLM guardrails may see suspicious text. Skynet-EDR is intended to correlate both worlds.
 
-## Initial scope
+## Research scope
 
-The first research/MVP scope is detection and alerting for:
+The project research scope includes detection and alerting for:
 
 1. Prompt-injection attempts in untrusted content.
 2. Suspicious tool calls outside the user-approved task scope.
@@ -53,18 +53,18 @@ The first research/MVP scope is detection and alerting for:
 - **Least privilege:** reduce agent tool and credential blast radius.
 - **Operator-friendly evidence:** every alert should include source, evidence, attempted action, affected asset, and recommended containment.
 - **Privacy-aware telemetry:** redact secrets, minimize captured content, and prefer hashes/snippets where possible.
-- **Detection before blocking:** start passive; block only high-confidence exfiltration patterns.
+- **Detection before blocking:** v0.4.1 is passive; guard-mode blocking is future v0.6+ work and requires an exercised control point.
 
 ## Status
 
-Skynet-EDR v0.4 is a passive Linux-first prerelease. It is installable from GitHub Releases and focuses on redacted local evidence, Hermes/OpenClaw canonical telemetry, read-only visibility, and deterministic high-signal AI-agent sequence correlation. It detects and records; it does not yet block agent actions.
+Skynet-EDR v0.4.1 is an installable passive Linux-first prerelease. The shipped live producer is Hermes; OpenClaw and other runtime references are adapter contracts or external-producer paths, not shipped live integrations. It detects and records redacted local evidence but does not block agent actions. Read the [MVP public support contract](docs/MVP_SUPPORT_MATRIX.md) before relying on a package, rule, or integration claim.
 
 Current crates:
 
 - `skynet-edr-core`: shared product metadata, canonical schema, redaction, local storage, spool ingestion, and sequence-capable correlation rules.
 - `skynet-edr-cli`: `skynet-edr` command-line entry point for doctor/diagnostics, storage, event ingestion/export, and incident handling.
 - `skynet-edr-daemon`: passive daemon/runtime monitor primitives, including the Linux fixture scanner, localhost-only read-only HTTP API router, and conservative `run --config` service path.
-- `skynet-edr-mcp`: read-only MCP integration surface for Hermes visibility: status, incidents, rules, sensors, and config-drift findings.
+- `skynet-edr-mcp`: side-effect-free read-only MCP handler library for status, incidents, rules, sensors, and config-drift findings; it has no MCP transport, registration, or operator-runnable Hermes integration.
 
 See [Rust workspace](docs/WORKSPACE.md) for layout and commands.
 
@@ -101,6 +101,7 @@ Start with the [documentation hub](docs/README.md). The documentation is organiz
 - [Hermes plugin telemetry](docs/HERMES_PLUGIN_TELEMETRY.md) — passive Hermes lifecycle hook plugin and sanitized logs.
 - [Detections](docs/DETECTIONS.md) — detection philosophy, rule families, severity, and alert evidence.
 - [Operations](docs/OPERATIONS.md) — local store, API/MCP posture, evidence handling, and troubleshooting.
+- [MVP public support contract](docs/MVP_SUPPORT_MATRIX.md) — evidence-backed platform tiers, live/producer-dependent/dark capability status, and exclusions.
 - [Release process](docs/RELEASE_PROCESS.md) and [packaging plan](docs/PACKAGING.md) — release gates, artifacts, publishing, and rollback.
 - [Current roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [v0.4.1 release notes](docs/releases/v0.4.1.md) — shipped scope and remaining limitations.
 

@@ -226,4 +226,8 @@ Rollback notes must accompany every release once packages are published.
 
 ## Current limitation
 
-This repository currently contains a daemon skeleton. The package/service baseline is useful now, but production service enablement must wait for a persistent daemon command and tested runtime behavior.
+The repository now includes a conservative long-running `skynet-edr-daemon run
+--config <path>` path, authenticated local ingestion, and a loopback-only
+read-only HTTP listener. Package/service enablement remains an operator
+decision: the v0.4.1 prerelease does not establish production runtime support,
+upgrade/rollback proof, or response outcomes.

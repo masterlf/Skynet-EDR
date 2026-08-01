@@ -8,6 +8,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 | Need | Read |
 |---|---|
+| Check what this prerelease actually supports | [MVP public support contract](MVP_SUPPORT_MATRIX.md) |
 | Install a release package | [Install](INSTALL.md) |
 | Run the MVP quickly | [Quickstart](QUICKSTART.md) |
 | Understand what Skynet-EDR is and is not | [Concepts](CONCEPTS.md) |
@@ -23,6 +24,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 ### User and operator docs
 
 - [Install](INSTALL.md) covers supported Linux scope, package install commands, checksum verification, upgrades, rollback, uninstall, and troubleshooting.
+- [MVP public support contract](MVP_SUPPORT_MATRIX.md) defines evidence-backed Tier 1/Tier 2 availability, live/producer-dependent/dark coverage, and post-MVP exclusions.
 - [Quickstart](QUICKSTART.md) gives a minimal local verification path after install or source build.
 - [Operations](OPERATIONS.md) covers local storage, API exposure, daemon/service posture, evidence handling, and routine checks.
 
@@ -46,11 +48,11 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 ### Event schema, integrations, and detections
 
 - [Canonical event schema](EVENT_SCHEMA.md) is the source of truth for `skynet.event.v0` event envelopes.
-- [Integrations](INTEGRATIONS.md) is the integration index for Hermes, OpenClaw, MCP visibility, and local HTTP surfaces.
+- [Integrations](INTEGRATIONS.md) is the integration index for Hermes, OpenClaw, the MCP handler-library contract, and local HTTP surfaces.
 - [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.4 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
 - [Hermes event ingestion](HERMES_EVENT_INGESTION.md) documents supported Hermes trace shapes and normalization.
 - [OpenClaw integration](OPENCLAW_INTEGRATION.md) documents MVP adapter requirements.
-- [Read-only MCP integration](MCP_READ_ONLY.md) documents safe MCP visibility tools.
+- [Read-only MCP integration](MCP_READ_ONLY.md) documents the side-effect-free MCP handler library, not an operator-runnable MCP integration.
 - [Detections](DETECTIONS.md) is the detection and alerting index.
 - [Initial detection rules](DETECTION_RULES.md) documents rule candidates and alert shape.
 
@@ -65,7 +67,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 Current event schema: `skynet.event.v0`.
 
-Current documentation structure target: v0.4. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. If a page blurs that line, fix the page before building on it.
+Current documentation structure target: v0.4.1. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. The [MVP public support contract](MVP_SUPPORT_MATRIX.md) is the release-facing source for current support and capability status; if another page blurs that line, fix the page before building on it.
 
 ## Structured attribute safety
 
