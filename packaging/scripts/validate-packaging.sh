@@ -16,6 +16,7 @@ packaging/tarball/uninstall.sh
 packaging/scripts/build-tarball.sh
 packaging/scripts/build-packages.sh
 packaging/scripts/check-release-version.py
+packaging/tests/test_check_release_version.py
 packaging/scripts/stage-hermes-plugin-payload.sh
 packaging/scripts/inspect-artifacts.sh
 packaging/scripts/smoke-install-artifacts.sh
@@ -41,11 +42,12 @@ for file in $required_files; do
   fi
 done
 
-if [ -n "${SKYNET_EDR_EXPECTED_VERSION:-}" ]; then
+if [ "${SKYNET_EDR_EXPECTED_VERSION+x}" = x ]; then
   python3 packaging/scripts/check-release-version.py --expected "$SKYNET_EDR_EXPECTED_VERSION"
 else
   python3 packaging/scripts/check-release-version.py
 fi
+python3 -m unittest discover -s packaging/tests -p 'test_*.py'
 
 for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then

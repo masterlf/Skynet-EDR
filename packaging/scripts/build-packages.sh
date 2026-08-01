@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="${SKYNET_EDR_VERSION:-$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "skynet-edr-cli"))')}"
+VERSION="${SKYNET_EDR_VERSION:-$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "skynet-edr-cli"))')}"
 DEB_ARCH="${NFPM_ARCH:-amd64}"
 RPM_ARCH="${NFPM_RPM_ARCH:-x86_64}"
 ARCHLINUX_ARCH="${NFPM_ARCHLINUX_ARCH:-x86_64}"
@@ -10,7 +10,7 @@ CARGO_RELEASE_DIR="${CARGO_TARGET_DIR:-target}/release"
 STAGED_HERMES_PLUGIN="dist/staging/nfpm/hermes-plugin/skynet-edr"
 
 mkdir -p dist
-cargo build --release --workspace --bins
+cargo build --locked --release --workspace --bins
 
 if ! command -v nfpm >/dev/null 2>&1; then
   echo "nfpm is required to build deb/rpm/arch packages" >&2
