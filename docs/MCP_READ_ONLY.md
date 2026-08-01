@@ -1,6 +1,6 @@
 # Read-only MCP integration
 
-Skynet-EDR exposes an initial read-only MCP surface for local operator visibility. The current Rust crate does not start a networked MCP server yet; it defines the stable tool metadata and side-effect-free handlers that a future server adapter can call.
+Skynet-EDR provides an initial read-only MCP handler library. The current Rust crate defines stable tool metadata and side-effect-free handlers that a future server adapter can call; it does not start, register, or configure an MCP transport, process, socket, or server. It is therefore not an operator-runnable Hermes visibility integration.
 
 ## Security boundary
 

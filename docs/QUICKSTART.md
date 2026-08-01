@@ -59,7 +59,7 @@ For Hermes trace ingestion, use the workflow in [Hermes event ingestion](HERMES_
 
 - CLI inspection: [Local storage and CLI](LOCAL_STORAGE.md#event-inspection-commands)
 - Local HTTP visibility: [Local read-only HTTP API and console](LOCAL_HTTP_API.md#initial-routes)
-- MCP visibility for Hermes: [Read-only MCP integration](MCP_READ_ONLY.md#tools)
+- MCP handler-library contract (not an operator-runnable Hermes integration): [Read-only MCP integration](MCP_READ_ONLY.md#tools)
 
 These surfaces are read-only in the current MVP. They should expose redacted evidence and metadata, not become a remote-control plane.
 

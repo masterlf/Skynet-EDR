@@ -7,7 +7,7 @@
 - Hardened authenticated continuous ingestion with exact per-event projection, pseudonymized correlation identities, transactional bounded EXFIL/MALWARE correlation, trigger-anchored linear two-step sequence evaluation, and collision-safe acknowledgements.
 - Added bounded Hermes parameter/result classification metadata without persisting raw tool input or output.
 - Added an outcome-gated Hermes cron scheduling producer; config, persistence, and approval-scope rules remain explicitly dark until Hermes exposes authoritative post-mutation outcomes.
-- Added release-tag/package-version consistency validation and exercised clean-host install, upgrade, restart persistence, and rollback on Ubuntu.
+- Added release-tag/package-version consistency validation and exercised clean-container Ubuntu DEB and tarball install/remove/purge lifecycle checks without service start. Runtime upgrade, restart-persistence, rollback, service, and API-health behavior remain unproven.
 
 ## 0.4.0 - 2026-07-24
 

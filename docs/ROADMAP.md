@@ -10,7 +10,7 @@ v0.4.1 is a passive Linux-first prerelease. Within the narrow evidence-backed sc
 - Hermes trace and canonical JSONL spool ingestion;
 - passive Hermes lifecycle-hook telemetry;
 - specific secret-egress and safe malware-test correlation;
-- read-only CLI, local HTTP, console, and MCP visibility;
+- read-only CLI, local HTTP, console, and MCP handler-library visibility;
 - Linux `x86_64`/`amd64` release artifacts.
 
 It does **not** provide inline pause, approval, blocking, or active containment.

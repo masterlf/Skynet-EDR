@@ -19,7 +19,7 @@ The common event contract is [Canonical event schema](EVENT_SCHEMA.md). Integrat
 |---|---|---|---|
 | Hermes plugin telemetry | v0.4 live passive path | Observe Hermes lifecycle hooks, emit canonical JSONL, and write sanitized plugin logs | [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) |
 | Hermes trace ingestion | MVP/import path | Normalize Hermes/AI-agent traces into canonical events | [Hermes event ingestion](HERMES_EVENT_INGESTION.md) |
-| Read-only MCP visibility | MVP path | Let Hermes inspect Skynet status, incidents, rules, sensors, and config drift | [Read-only MCP integration](MCP_READ_ONLY.md) |
+| Read-only MCP handler library | Implemented library contract | Defines side-effect-free handlers and metadata for a future adapter; no MCP transport, registration, or operator-runnable Hermes integration is shipped | [Read-only MCP integration](MCP_READ_ONLY.md) |
 | OpenClaw adapter | Adapter contract | Map OpenClaw-style observations into canonical event properties | [OpenClaw integration](OPENCLAW_INTEGRATION.md) |
 | Local HTTP API and console | MVP visibility | Localhost-only read-only visibility for status/events/incidents | [Local read-only HTTP API and console](LOCAL_HTTP_API.md) |
 | CLI storage/import/export | MVP operator path | Initialize local store and inspect events/incidents | [Local storage and CLI](LOCAL_STORAGE.md) |
@@ -54,9 +54,9 @@ Hermes integration should focus on trace shapes that explain agent behavior:
 
 Implementation details and verification are in [Hermes event ingestion](HERMES_EVENT_INGESTION.md#verification).
 
-## MCP visibility
+## MCP handler library
 
-The current MCP direction is read-only. Skynet-EDR may expose status and redacted evidence to an agent runtime, but MCP output remains untrusted data from the consuming agent's perspective. Do not turn the MVP MCP server into a containment interface without new threat modeling and tests.
+The current MCP implementation is a read-only handler library. It does not start or register an MCP transport, process, socket, or server, so it is not an operator-runnable Hermes visibility integration. A future adapter may expose status and redacted evidence to an agent runtime; that output must remain untrusted data from the consuming agent's perspective. Do not add containment authority without new threat modeling and tests.
 
 See [Read-only MCP integration](MCP_READ_ONLY.md#security-boundary).
 

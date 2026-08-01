@@ -39,7 +39,7 @@ The current Linux-first MVP is passive. It focuses on:
 - redacted local event and incident evidence;
 - canonical `skynet.event.v0` event ingestion;
 - Hermes/AI-agent trace normalization;
-- read-only CLI, local HTTP, and MCP visibility surfaces;
+- read-only CLI and local HTTP visibility surfaces, plus a side-effect-free MCP handler library without an MCP transport;
 - high-signal correlation such as secret/config access followed by network egress;
 - packaging and reproducible release artifacts.
 

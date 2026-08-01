@@ -64,7 +64,7 @@ Current crates:
 - `skynet-edr-core`: shared product metadata, canonical schema, redaction, local storage, spool ingestion, and sequence-capable correlation rules.
 - `skynet-edr-cli`: `skynet-edr` command-line entry point for doctor/diagnostics, storage, event ingestion/export, and incident handling.
 - `skynet-edr-daemon`: passive daemon/runtime monitor primitives, including the Linux fixture scanner, localhost-only read-only HTTP API router, and conservative `run --config` service path.
-- `skynet-edr-mcp`: read-only MCP integration surface for Hermes visibility: status, incidents, rules, sensors, and config-drift findings.
+- `skynet-edr-mcp`: side-effect-free read-only MCP handler library for status, incidents, rules, sensors, and config-drift findings; it has no MCP transport, registration, or operator-runnable Hermes integration.
 
 See [Rust workspace](docs/WORKSPACE.md) for layout and commands.
 

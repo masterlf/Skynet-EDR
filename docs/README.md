@@ -48,11 +48,11 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 ### Event schema, integrations, and detections
 
 - [Canonical event schema](EVENT_SCHEMA.md) is the source of truth for `skynet.event.v0` event envelopes.
-- [Integrations](INTEGRATIONS.md) is the integration index for Hermes, OpenClaw, MCP visibility, and local HTTP surfaces.
+- [Integrations](INTEGRATIONS.md) is the integration index for Hermes, OpenClaw, the MCP handler-library contract, and local HTTP surfaces.
 - [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.4 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
 - [Hermes event ingestion](HERMES_EVENT_INGESTION.md) documents supported Hermes trace shapes and normalization.
 - [OpenClaw integration](OPENCLAW_INTEGRATION.md) documents MVP adapter requirements.
-- [Read-only MCP integration](MCP_READ_ONLY.md) documents safe MCP visibility tools.
+- [Read-only MCP integration](MCP_READ_ONLY.md) documents the side-effect-free MCP handler library, not an operator-runnable MCP integration.
 - [Detections](DETECTIONS.md) is the detection and alerting index.
 - [Initial detection rules](DETECTION_RULES.md) documents rule candidates and alert shape.
 

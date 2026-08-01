@@ -19,7 +19,7 @@ bounded in-memory queue → producer-owned AF_UNIX forwarder
 authenticated daemon transaction (event + correlation + receipt)
         ↘ private events-v1.jsonl fallback on retryable failure
         ↓
-local events, incidents, API, MCP visibility
+local events, incidents, API, MCP handler library
 ```
 
 The same authenticated socket accepts strict, bounded `producer_health` control frames. Version 2 adds only an allowlisted runtime role (`gateway`, `dashboard`, `worker`, or `unknown`) and a 64-byte lowercase alphanumeric/hyphen process-instance identifier to the version-1 checkpoint/backlog counters and fixed transport state. Kernel DAC and `SO_PEERCRED` remain the authorization boundary. Role and instance are authorized-UID self-reported operational attribution, never authentication or process attestation: same-UID compromise, a malicious root process in the shared trust domain, or a global/mistaken role assignment can forge them. A correctly configured per-unit dashboard role cannot satisfy a required reported gateway role, but this is enrollment evidence rather than security-grade role attestation. Legacy version-1 frames remain observable separately and cannot satisfy an explicitly required reported role. Paths, labels, event payloads, commands, PIDs, and secrets are neither accepted nor exposed.
