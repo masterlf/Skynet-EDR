@@ -21,7 +21,7 @@
 
 ## 0.3.0
 
-- Added the passive Linux-first daemon, local API/MCP visibility, packaging, and AI-agent adapter baseline.
+- Added the passive Linux-first daemon, local API visibility, a read-only MCP handler/library baseline only (no transport, server, registration, or operator-runnable Hermes integration), packaging, and AI-agent adapter baseline.
 
 ## 0.2.0
 
