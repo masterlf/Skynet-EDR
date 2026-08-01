@@ -2,16 +2,16 @@
 
 This page is the authoritative milestone map. [Implementation plan](IMPLEMENTATION_PLAN.md) remains the long-form architecture and historical design record.
 
-## Shipped baseline: v0.3.0
+## Shipped baseline: v0.4.1
 
-v0.3.0 is a passive Linux-first prerelease. It provides:
+v0.4.1 is a passive Linux-first prerelease. Within the narrow evidence-backed scope in the [MVP public support contract](MVP_SUPPORT_MATRIX.md), it provides:
 
 - canonical event schema and local redacted storage;
 - Hermes trace and canonical JSONL spool ingestion;
 - passive Hermes lifecycle-hook telemetry;
 - specific secret-egress and safe malware-test correlation;
 - read-only CLI, local HTTP, console, and MCP visibility;
-- Linux packages and release artifacts.
+- Linux `x86_64`/`amd64` release artifacts.
 
 It does **not** provide inline pause, approval, blocking, or active containment.
 
@@ -24,12 +24,12 @@ The v0.4.1 milestone completes the P1 reliability and continuous-coverage work o
 - authenticated bounded continuous ingestion with privacy-safe EXFIL/MALWARE detection;
 - completed-outcome telemetry for exact successful Hermes cron create/update operations;
 - explicit fail-dark treatment for unsupported config, persistence, and approval-scope outcomes;
-- clean-host package install/remove, upgrade, restart-persistence, and rollback evidence;
+- clean-container Ubuntu `.deb` and tarball install/remove/purge evidence without service start;
 - public download, checksum, extraction, and version verification;
 - green Rust, Python, documentation, SAST, secret-scanning, dependency, and packaging gates;
 - release notes that separate implemented behavior from limitations.
 
-The release remains passive and is published as a prerelease until production gates such as signing, provenance, SBOM policy, and broader platform validation are complete.
+The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, repeatable runtime upgrade/rollback proof, and a bounded Hermes compatibility contract remain open.
 
 ## Next milestone: guard mode design
 

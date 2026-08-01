@@ -1,6 +1,6 @@
 # Skynet-EDR Linux installation guide
 
-Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installation model is designed for hosts that run or supervise local AI agents such as Hermes Agent, OpenClaw, Codex, Claude Code, and similar tool-using runtimes.
+Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installable prerelease has a shipped live Hermes producer only; OpenClaw, Codex, Claude Code, and similar runtimes require an external conforming producer and are not shipped live integrations.
 
 The install goal is conservative: collect and normalize local AI-agent security evidence without creating a new root-level attack surface. No privileged runtime sensor is enabled by default.
 
@@ -8,16 +8,15 @@ The install goal is conservative: collect and normalize local AI-agent security 
 
 | Tier | Distributions | Install path | Support promise |
 |---|---|---|---|
-| Tier 1 | Ubuntu LTS, Debian stable, Linux Mint current | `.deb`, custom tarball | Primary MVP target. |
-| Tier 2 | RHEL-compatible Linux, Fedora current | `.rpm`, custom tarball | MVP package available; SELinux policy remains future hardening. |
-| Tier 3 | Arch Linux | Arch package artifact / PKGBUILD style recipe, custom tarball | Best-effort rolling distribution support. |
-| Tier 4 | Other systemd Linux distributions | custom tarball | Advanced-user path, no production claim until tested. |
+| Tier 1 | Ubuntu 24.04 `x86_64`/`amd64` | `.deb`, custom tarball | Clean-container install/remove/purge evidence without service start; evaluation support for that package lifecycle only. |
+| Tier 2 | Published `x86_64`/`amd64` artifacts for Debian, Mint, RHEL-compatible Linux, Fedora, Arch, and custom tarball targets | `.deb`, `.rpm`, Arch package, custom tarball | Lab/advanced-user availability only; no native runtime-support promise at this baseline. |
 
 Initial architecture targets:
 
 - `x86_64` / `amd64`: primary.
-- `aarch64` / `arm64`: planned after x86_64 package flow is stable.
-- `musl`/Alpine and non-systemd hosts: not first-class yet.
+- `aarch64` / `arm64`, musl/Alpine, non-systemd hosts, Windows, and macOS: unsupported or unproven.
+
+The published RPM and Arch artifacts do not establish RHEL/Fedora/Arch runtime compatibility. The custom tarball does not provision the `skynet-edr-ingest` group or sysusers/tmpfiles state needed for authenticated continuous ingress. See the [MVP public support contract](MVP_SUPPORT_MATRIX.md) before enabling a daemon or producer.
 
 ## What is installed
 
@@ -289,11 +288,11 @@ Initial target agents:
 
 | Agent/runtime | Protection approach |
 |---|---|
-| Hermes Agent | Native trace/event ingestion, MCP visibility, local profile/config awareness. |
-| OpenClaw | Generic agent trace ingestion, process/file/network correlation, future adapter. |
-| Codex CLI / OpenAI coding agents | Terminal/tool-call trace ingestion where available; process/file/network correlation. |
-| Claude Code | Tool-call trace ingestion where available; process/file/network correlation. |
-| Similar AI agents | Generic JSON/JSONL trace ingestion and local runtime indicators. |
+| Hermes Agent | Shipped passive producer path, subject to explicit enrollment and documented coverage limits. |
+| OpenClaw | Adapter contract/fixture model only; no shipped live producer. |
+| Codex CLI / OpenAI coding agents | External conforming producer required; no shipped live producer. |
+| Claude Code | External conforming producer required; no shipped live producer. |
+| Similar AI agents | External conforming producer required; no shipped live producer. |
 
 Design rule: prefer agent-provided audit/event traces and read-only local APIs. Avoid making agent secret stores readable by the Skynet-EDR daemon unless a narrow, explicit sensor justifies it.
 
