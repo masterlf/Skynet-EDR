@@ -8,8 +8,8 @@ Skynet-EDR starts as a small Rust workspace. The core must remain platform-indep
 |---|---|---|
 | `skynet-edr-core` | library | Shared product metadata, platform-independent event/rule/incident primitives, Hermes event ingestion, and local SQLite/JSONL storage. |
 | `skynet-edr-cli` | binary | Operator CLI. Supports status/version/help plus local store initialization, incident ingestion, Hermes trace ingestion, incident/event listing/showing, and JSONL export. |
-| `skynet-edr-daemon` | binary + library | Future long-running runtime monitor. Current skeleton exposes safe status only, starts no privileged sensors, includes a root-scoped passive Linux fixture scanner, models manual-only Linux lab safety plans, and provides a localhost-only read-only HTTP API router. |
-| `skynet-edr-mcp` | library | Future read-only MCP integration for Hermes visibility. Current skeleton defines read-only tool names and status metadata. |
+| `skynet-edr-daemon` | binary + library | Conservative long-running passive runtime path with authenticated local ingestion, no privileged sensors by default, a root-scoped passive Linux fixture scanner, manual-only Linux lab safety plans, and a localhost-only read-only HTTP listener/router. |
+| `skynet-edr-mcp` | library | Implemented side-effect-free read-only handler surface for Hermes visibility; it defines handler functions and metadata but does not start an MCP transport or network server. |
 
 ## Development commands
 

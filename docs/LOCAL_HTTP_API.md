@@ -63,7 +63,10 @@ Unknown routes return `404 not_found`.
 
 ## Current implementation note
 
-Phase 10 implements the validated configuration and side-effect-free request router. Phase 11 adds the side-effect-free HTML console router; a future listener can attach both routers to the same validated localhost-only bind without changing route semantics.
+Phase 10 implements the validated configuration and side-effect-free request
+router. Phase 11 adds the side-effect-free HTML console router. The current
+daemon starts both through its loopback-only TCP listener when the HTTP API is
+enabled and the read-only store preflight succeeds; the listener exists now.
 
 ## Verification
 

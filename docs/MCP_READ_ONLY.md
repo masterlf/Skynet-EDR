@@ -25,15 +25,24 @@ Incident and event data returned by these handlers comes from `LocalStore`, whic
 | `skynet_list_sensors` | Current sensor metadata and scope. | Static metadata |
 | `skynet_get_config_drift` | Compact config-drift findings from stored `EDR-CONFIG-001` events. | `LocalStore::list_events` projection |
 
-## Current built-in rules exposed as metadata
+## Current built-in rule metadata
 
-- `EDR-MCP-001`: MCP shell plus egress.
-- `EDR-CRON-001`: risky unattended Hermes automation.
-- `EDR-CONFIG-001`: agent config drift.
+`skynet_list_rules` returns five static metadata entries: `EDR-MCP-001`,
+`EDR-CRON-001`, `EDR-CONFIG-001`, `EDR-EXFIL-001`, and `EDR-MALWARE-001`.
+This metadata list is not a claim that every rule has live coverage from the
+Hermes producer; consult the [rule-to-producer coverage matrix](DETECTIONS.md#rule-to-producer-coverage-matrix).
 
 ## Current sensor metadata
 
-- `linux-passive-fixture`: Linux fixture scanner using bounded root-scoped reads of Hermes config and cron fixtures. It is intentionally passive and emits the current MVP rule findings.
+- `linux-passive-fixture`: Linux fixture scanner using bounded root-scoped reads
+  of Hermes config and cron fixtures. It is intentionally passive and its
+  static metadata lists `EDR-MCP-001`, `EDR-CRON-001`, and `EDR-CONFIG-001`.
+
+The six implemented handler functions are `skynet_status`,
+`skynet_list_incidents`, `skynet_get_incident`, `skynet_list_rules`,
+`skynet_list_sensors`, and `skynet_get_config_drift`. They are library
+handlers, not registered network tools: no MCP transport, process, socket, or
+network server is started by this crate.
 
 ## Verification
 

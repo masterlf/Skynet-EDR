@@ -46,6 +46,12 @@ Agent hook execution remains fail-open so Skynet-EDR does not disrupt the observ
 
 ## Post-MVP exclusions
 
-The following require a separate design, threat model, implementation, and end-to-end validation before they can be claimed: guard or enforcement mode; automated containment; privileged/kernel/eBPF sensors; fleet or remote administration; alert delivery; supported non-Hermes producers; Windows or macOS sensors; signed supply-chain artifacts; and production support/SLA commitments.
+The following require a separate design, threat model, implementation, and
+end-to-end validation before they can be claimed: guard or enforcement mode;
+automated containment; privileged/kernel/eBPF sensors; fleet or remote
+administration; external/outbound webhook, email, or SIEM delivery; supported
+non-Hermes producers; Windows or macOS sensors; signed supply-chain artifacts;
+and production support/SLA commitments. This exclusion does not rule out the
+planned v0.5.0 passive local durable alert/evidence presentation.
 
 For rule-level detail, see [Detections](DETECTIONS.md#rule-to-producer-coverage-matrix). For installation evidence and caveats, see [Install](INSTALL.md). For future work, see [Current roadmap](ROADMAP.md).

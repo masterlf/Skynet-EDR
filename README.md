@@ -1,6 +1,6 @@
 # Skynet-EDR
 
-**AI-Agent Detection and Response for autonomous AI runtimes.**
+**AI-Agent Detection and Response research project for autonomous AI runtimes.**
 
 Skynet-EDR is an early-stage security project focused on detecting and responding to attacks against AI agents, especially prompt-injection-driven abuse, malicious MCP/tool behavior, credential access, and data-exfiltration chains.
 
@@ -53,7 +53,7 @@ The project research scope includes detection and alerting for:
 - **Least privilege:** reduce agent tool and credential blast radius.
 - **Operator-friendly evidence:** every alert should include source, evidence, attempted action, affected asset, and recommended containment.
 - **Privacy-aware telemetry:** redact secrets, minimize captured content, and prefer hashes/snippets where possible.
-- **Detection before blocking:** start passive; block only high-confidence exfiltration patterns.
+- **Detection before blocking:** v0.4.1 is passive; guard-mode blocking is future v0.6+ work and requires an exercised control point.
 
 ## Status
 

@@ -1,5 +1,10 @@
 # Implementation Plan
 
+> Historical design and implementation narrative. It contains proposals and
+> future possibilities; it is not a v0.4.1 public capability contract. For
+> current behavior, use the [MVP public support contract](MVP_SUPPORT_MATRIX.md)
+> and [Current roadmap](ROADMAP.md).
+
 ## Executive recommendation
 
 Skynet-EDR should be built as a **Linux-first, cross-platform agent runtime security monitor**.

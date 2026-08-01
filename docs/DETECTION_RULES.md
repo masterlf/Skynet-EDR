@@ -20,8 +20,8 @@ The built-in AI-agent sequence pack currently ships these rules:
 | EDR-MCP-001 | Untrusted prompt-injection content followed by an MCP tool request with `network_indicator=true` in the same trace. | High |
 | EDR-CONFIG-001 | Untrusted prompt-injection content followed by an agent configuration change with `approval_required=false`. | High |
 | EDR-CRON-001 | Untrusted prompt-injection content followed by automation scheduling with `persistence_indicator=true`. | High |
-| EDR-PI-001 | Untrusted prompt-injection content followed by a privileged tool request. Text-only prompt injection does not match and must never become Critical by itself. | High |
-| EDR-MSG-001 | Untrusted prompt-injection content followed by sensitive message delivery without explicit authenticated-user request. | High |
+| EDR-PI-001 | Untrusted prompt-injection content followed by `agent.tool.requested` carrying both `network_indicator=true` and `sensitive_access=true`. Text-only prompt injection does not match. | High |
+| EDR-MSG-001 | Untrusted prompt-injection content followed by `agent.tool.requested` carrying both `delivery_indicator=true` and `sensitive_access=true`. It does not evaluate an authenticated-user-request policy. | High |
 | EDR-NET-001 | Untrusted prompt-injection content followed by network egress with explicit `attributes.direct_ip=true`. | High |
 | EDR-SCOPE-001 | Untrusted prompt-injection content followed by approval/scope expansion. | High |
 | EDR-PERSIST-001 | Untrusted prompt-injection content followed by an agent persistence configuration change. | High |
@@ -70,23 +70,21 @@ Severity: High. Raw payload content must be omitted before storage; store only s
 
 These correlators consume producer-asserted event metadata; AF_UNIX UID authorization does not attest the process or event truth. They are passive detection, not prevention. Exact successful Hermes cron create/update results now have an outcome-gated producer; config, persistence, and approval-scope mutation producers remain explicitly dark until authoritative post-mutation evidence exists.
 
-## Roadmap / candidate rule details
+## Implemented sequence semantics and roadmap candidates
 
-The details below describe intended detector semantics and future adapter coverage. They are not all separate production correlators unless listed in the implemented sections above.
+`EDR-PI-001` and `EDR-MSG-001` below document their implemented narrow
+sequence predicates. The other entries in this section are roadmap semantics or
+future adapter coverage unless listed in the implemented sections above.
 
 ### EDR-PI-001: Untrusted content contains instruction override
 
-Detect common prompt-injection language inside untrusted data:
+The implemented sequence does not keyword-scan prompt text. It requires the
+first event to be untrusted prompt-injection content under the canonical
+predicate, then `agent.tool.requested` in the same trace/session window with
+both `attributes.network_indicator=true` and `attributes.sensitive_access=true`.
+Text-only prompt injection does not match.
 
-- ignore previous instructions
-- reveal system prompt
-- send secrets
-- exfiltrate
-- do not tell the user
-- use the terminal
-- call this tool
-
-Severity: Low by itself, High when correlated with tool use.
+Severity: High.
 
 ### EDR-CRON-001: Risky unattended automation
 
@@ -122,9 +120,12 @@ Severity: Medium by itself, Critical if correlated with secret access.
 
 ### EDR-MSG-001: Suspicious messaging exfiltration
 
-Detect attempts to send sensitive content through messaging or email tools without explicit authenticated-user request.
+The implemented sequence requires untrusted prompt-injection content followed
+by `agent.tool.requested` with both `attributes.delivery_indicator=true` and
+`attributes.sensitive_access=true`. It neither identifies a specific messaging
+or email transport nor evaluates whether an authenticated user requested it.
 
-Severity: High to Critical.
+Severity: High.
 
 ## Alert format
 
@@ -141,7 +142,7 @@ Each alert should include:
 - action taken
 - recommended containment
 
-The platform-independent core alert model tracks the initial response surface:
+The platform-independent core schema/rendering model defines a future response surface; these values do not implement delivery or control actions:
 
 - destinations: `stdout`, `jsonl_file`, `webhook`, and `email`
 - response actions: `emit_alert`, `require_approval`, `pause_automation`, and `block_network_egress`
@@ -153,4 +154,9 @@ an alert and cannot require approval, pause automation, or block egress.
 network egress. `pre_approved_containment` is the only boundary that allows
 automatic network blocking.
 
-Rendered alerts must be server-side redacted before any destination delivery. Evidence, source metadata, affected assets, recommended steps, and destination configuration are all treated as hostile/sensitive render inputs; webhook URLs with embedded tokens and local filesystem paths must not leak into rendered JSON.
+Webhook and email destinations are inert schema/rendering metadata in v0.4.1,
+not alert-delivery implementations. If a future outbound destination is added,
+rendered alerts must be server-side redacted before delivery. Evidence, source
+metadata, affected assets, recommended steps, and destination configuration are
+all treated as hostile/sensitive render inputs; webhook URLs with embedded
+tokens and local filesystem paths must not leak into rendered JSON.

@@ -31,7 +31,15 @@ The v0.4.1 milestone completes the P1 reliability and continuous-coverage work o
 
 The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, repeatable runtime upgrade/rollback proof, and a bounded Hermes compatibility contract remain open.
 
-## Next milestone: guard mode design
+## Next milestone: v0.5.0 Passive Public MVP
+
+v0.5.0 remains passive. It will turn the v0.4.1 prerelease baseline into a
+clearer public evaluation milestone without adding a control plane. Planned
+work includes durable local alert/evidence presentation and release-facing
+support documentation; it does not include outbound webhook, email, or SIEM
+delivery, inline pause, approval, blocking, or containment.
+
+## v0.6+ candidate: guard mode design
 
 Guard mode requires a real pre-execution control point in each supported agent runtime. Its design must define:
 
@@ -42,7 +50,7 @@ Guard mode requires a real pre-execution control point in each supported agent r
 - degradation behavior when Skynet-EDR is unavailable;
 - explicit compatibility contracts for Hermes and other runtimes.
 
-No user-facing surface may claim guard mode before those controls are implemented and exercised end to end.
+No user-facing surface may claim guard mode before those controls are implemented and exercised end to end. Guard mode is not part of v0.5.0.
 
 ## Later milestones
 
