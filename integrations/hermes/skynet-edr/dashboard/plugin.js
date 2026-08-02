@@ -875,6 +875,7 @@
     const [statusFilter, setStatusFilter] = useState("all");
     const [artifactKind, setArtifactKind] = useState("all");
     const rowRefs = useRef(Object.create(null));
+    const tabRefs = useRef(Object.create(null));
 
     const statusLoader = useCallback(function () {
       return SDK.fetchJSON(statusPath()).then(validateStatus);
@@ -908,6 +909,31 @@
         delete rowRefs.current[id];
       }
     }, []);
+
+    const setTabRef = useCallback(function (id, node) {
+      if (node) {
+        tabRefs.current[id] = node;
+      } else {
+        delete tabRefs.current[id];
+      }
+    }, []);
+
+    function selectTabAndFocus(id) {
+      setActiveTab(id);
+      const node = tabRefs.current[id];
+      if (node && typeof node.focus === "function") node.focus();
+    }
+
+    function onTabKeyDown(event, currentTab) {
+      if (!event) return;
+      let nextTab = null;
+      if (event.key === "Home") nextTab = "telemetry";
+      if (event.key === "End") nextTab = "rules";
+      if (event.key === "ArrowRight" || event.key === "ArrowLeft") nextTab = currentTab === "telemetry" ? "rules" : "telemetry";
+      if (!nextTab) return;
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      selectTabAndFocus(nextTab);
+    }
 
     const focusRiskRow = useCallback(function (id) {
       const node = id ? rowRefs.current[id] : null;
@@ -992,8 +1018,8 @@
         h("div", { className: "max-w-3xl" },
           h("div", { className: "mb-2 flex flex-wrap gap-2" },
             h(Badge, { variant: "outline" }, versionLabel),
-            h(Badge, { variant: "outline", className: engineChecking ? "text-muted-foreground" : (engineOnline ? "border-green-600 text-green-600" : "border-red-600 text-red-600") }, engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
-            h(Badge, { variant: "outline", className: mode === "passive" ? "border-orange-500 text-orange-500" : (mode === "active" ? "border-green-600 text-green-600" : "text-muted-foreground") }, mode ? labelFor(mode).replace(/^./, function (value) { return value.toUpperCase(); }) + " mode" : "Mode unavailable"),
+            h(Badge, { variant: engineChecking ? "outline" : (engineOnline ? "default" : "destructive"), className: engineChecking ? "text-muted-foreground" : undefined }, engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
+            h(Badge, { variant: mode === "active" ? "default" : (mode === "passive" ? "secondary" : "outline"), className: mode ? undefined : "text-muted-foreground" }, mode ? labelFor(mode).replace(/^./, function (value) { return value.toUpperCase(); }) + " mode" : "Mode unavailable"),
             h(Badge, { variant: health.error || risks.error ? "destructive" : "secondary" }, backendHealth(health, risks))
           ),
           h("h2", { id: "skynet-risk-heading", className: "text-2xl font-semibold tracking-tight" }, "Skynet-EDR Risk Explorer"),
@@ -1002,10 +1028,26 @@
         h(Button, { type: "button", variant: "outline", onClick: refreshAll, disabled: refreshing, "aria-label": "Refresh Risk Explorer" }, refreshing ? "Refreshing…" : "Refresh")
       ),
       h("div", { role: "tablist", "aria-label": "Skynet-EDR dashboard sections", className: "flex gap-2 border-b pb-2" },
-        h(Button, { type: "button", role: "tab", "aria-selected": activeTab === "telemetry", onClick: function () { setActiveTab("telemetry"); } }, "Telemetry"),
-        h(Button, { type: "button", role: "tab", "aria-selected": activeTab === "rules", onClick: function () { setActiveTab("rules"); } }, "Rules")
+        h(Button, {
+          type: "button", id: "skynet-tab-telemetry", role: "tab", "aria-controls": "skynet-panel-telemetry",
+          "aria-selected": activeTab === "telemetry", tabIndex: activeTab === "telemetry" ? 0 : -1,
+          variant: activeTab === "telemetry" ? "default" : "ghost",
+          ref: function (node) { setTabRef("telemetry", node); },
+          onClick: function () { setActiveTab("telemetry"); },
+          onKeyDown: function (event) { onTabKeyDown(event, "telemetry"); },
+        }, "Telemetry"),
+        h(Button, {
+          type: "button", id: "skynet-tab-rules", role: "tab", "aria-controls": "skynet-panel-rules",
+          "aria-selected": activeTab === "rules", tabIndex: activeTab === "rules" ? 0 : -1,
+          variant: activeTab === "rules" ? "default" : "ghost",
+          ref: function (node) { setTabRef("rules", node); },
+          onClick: function () { setActiveTab("rules"); },
+          onKeyDown: function (event) { onTabKeyDown(event, "rules"); },
+        }, "Rules")
       ),
-      activeTab === "rules" ? h(RulesPanel, { resource: rules }) : h("div", { role: "tabpanel", "aria-label": "Telemetry", className: "grid gap-4" },
+      activeTab === "rules"
+        ? h("div", { id: "skynet-panel-rules", role: "tabpanel", "aria-labelledby": "skynet-tab-rules", className: "grid gap-4" }, h(RulesPanel, { resource: rules }))
+        : h("div", { id: "skynet-panel-telemetry", role: "tabpanel", "aria-labelledby": "skynet-tab-telemetry", className: "grid gap-4" },
       health.data && health.data.ingestion ? h(IngestionHealthPanel, { ingestion: health.data.ingestion }) : null,
       risks.data ? h(Pagination, { page: risks.data.page, historyLength: navigation.history.length, onPrevious: goPrevious, onNext: goNext }) : null,
       h(FilterBar, {

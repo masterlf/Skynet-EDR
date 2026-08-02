@@ -954,7 +954,7 @@ test('Previous follows exact history and a filter reset returns to offset zero',
   assert.equal(riskCalls.at(-1), '/api/plugins/skynet-edr/risks?limit=50&offset=0');
 });
 
-test('header shows daemon version plus truthful engine and passive mode semantic colours', async () => {
+test('header uses host theme semantic badge variants for engine and mode status', async () => {
   const harness = createHarness({
     '/api/plugins/skynet-edr/status': canonicalStatus,
     '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
@@ -964,9 +964,11 @@ test('header shows daemon version plus truthful engine and passive mode semantic
   const tree = harness.render();
   assert.match(textOf(tree), /EDR 0\.4\.1/);
   const online = findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator');
-  assert.match(online.props.className, /green/);
+  assert.equal(online.props.variant, 'default');
+  assert.equal(online.props.className, undefined);
   const passive = findNode(tree, (node) => textOf(node) === 'Passive mode', 'passive mode indicator');
-  assert.match(passive.props.className, /orange/);
+  assert.equal(passive.props.variant, 'secondary');
+  assert.equal(passive.props.className, undefined);
 
   const activeHarness = createHarness({
     '/api/plugins/skynet-edr/status': { ...canonicalStatus, run_mode: 'active' },
@@ -975,7 +977,8 @@ test('header shows daemon version plus truthful engine and passive mode semantic
   activeHarness.render();
   await activeHarness.flushEffects();
   const active = findNode(activeHarness.render(), (node) => textOf(node) === 'Active mode', 'active mode indicator');
-  assert.match(active.props.className, /green/);
+  assert.equal(active.props.variant, 'default');
+  assert.equal(active.props.className, undefined);
 
   const invalid = { ...canonicalStatus, version: '<script>bad</script>' };
   const invalidHarness = createHarness({
@@ -986,7 +989,8 @@ test('header shows daemon version plus truthful engine and passive mode semantic
   await invalidHarness.flushEffects();
   const invalidTree = invalidHarness.render();
   const offline = findNode(invalidTree, (node) => textOf(node) === 'Engine Offline', 'offline engine indicator');
-  assert.match(offline.props.className, /red/);
+  assert.equal(offline.props.variant, 'destructive');
+  assert.equal(offline.props.className, undefined);
   assert.doesNotMatch(textOf(invalidTree), /script|bad/);
 });
 
@@ -1001,7 +1005,8 @@ test('a failed latest status poll marks the engine offline while telemetry data 
   await harness.runInterval(0);
   const tree = harness.render();
   const offline = findNode(tree, (node) => textOf(node) === 'Engine Offline', 'stale offline engine indicator');
-  assert.match(offline.props.className, /red/);
+  assert.equal(offline.props.variant, 'destructive');
+  assert.equal(offline.props.className, undefined);
   assert.match(textOf(tree), /EDR version unavailable/);
   assert.match(textOf(tree), /Mode unavailable/);
   assert.doesNotMatch(textOf(tree), /EDR 0\.4\.1|Passive mode/);
@@ -1009,7 +1014,7 @@ test('a failed latest status poll marks the engine offline while telemetry data 
   assert.doesNotMatch(textOf(tree), /private failure/);
 });
 
-test('top-level Telemetry and Rules tabs render strictly validated compiled-active metadata', async () => {
+test('top-level tabs and panels have stable complete ARIA relationships and selected styling', async () => {
   const harness = createHarness({
     '/api/plugins/skynet-edr/status': canonicalStatus,
     '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
@@ -1021,12 +1026,33 @@ test('top-level Telemetry and Rules tabs render strictly validated compiled-acti
   const telemetry = findButton(tree, 'Telemetry');
   const rules = findButton(tree, 'Rules');
   assert.equal(telemetry.props.role, 'tab');
+  assert.equal(telemetry.props.id, 'skynet-tab-telemetry');
+  assert.equal(telemetry.props['aria-controls'], 'skynet-panel-telemetry');
   assert.equal(telemetry.props['aria-selected'], true);
+  assert.equal(telemetry.props.tabIndex, 0);
+  assert.equal(telemetry.props.variant, 'default');
   assert.equal(rules.props.role, 'tab');
+  assert.equal(rules.props.id, 'skynet-tab-rules');
+  assert.equal(rules.props['aria-controls'], 'skynet-panel-rules');
+  assert.equal(rules.props['aria-selected'], false);
+  assert.equal(rules.props.tabIndex, -1);
+  assert.equal(rules.props.variant, 'ghost');
+  let panel = findNode(tree, (node) => node.props?.id === 'skynet-panel-telemetry', 'telemetry tabpanel');
+  assert.equal(panel.props.role, 'tabpanel');
+  assert.equal(panel.props['aria-labelledby'], 'skynet-tab-telemetry');
   rules.props.onClick();
   harness.render();
   await harness.flushEffects();
   tree = harness.render();
+  const selectedRules = findButton(tree, 'Rules');
+  assert.equal(selectedRules.props['aria-selected'], true);
+  assert.equal(selectedRules.props.tabIndex, 0);
+  assert.equal(selectedRules.props.variant, 'default');
+  assert.equal(findButton(tree, 'Telemetry').props.tabIndex, -1);
+  assert.equal(findButton(tree, 'Telemetry').props.variant, 'ghost');
+  panel = findNode(tree, (node) => node.props?.id === 'skynet-panel-rules', 'rules tabpanel');
+  assert.equal(panel.props.role, 'tabpanel');
+  assert.equal(panel.props['aria-labelledby'], 'skynet-tab-rules');
   assert.match(textOf(tree), /Compiled and active in this running EDR build/);
   assert.match(textOf(tree), /EDR-MCP-001/);
   assert.match(textOf(tree), /MCP network tool request after untrusted content/);
@@ -1047,6 +1073,40 @@ test('top-level Telemetry and Rules tabs render strictly validated compiled-acti
   await hostileHarness.flushEffects();
   assert.match(textOf(hostileHarness.render()), /Unable to load rules/);
   assert.doesNotMatch(textOf(hostileHarness.render()), /script|ignore previous/);
+});
+
+test('tab keyboard navigation wraps, handles Home and End, and moves focus with selection', async () => {
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/rules': canonicalRules,
+  });
+  harness.render();
+  await harness.flushEffects();
+
+  const focused = [];
+  let tree = harness.render();
+  findButton(tree, 'Telemetry').props.ref({ focus() { focused.push('telemetry'); } });
+  findButton(tree, 'Rules').props.ref({ focus() { focused.push('rules'); } });
+
+  function press(label, key) {
+    tree = harness.render();
+    let prevented = false;
+    findButton(tree, label).props.onKeyDown({ key, preventDefault() { prevented = true; } });
+    assert.equal(prevented, true, `${key} must prevent native scrolling`);
+  }
+
+  press('Telemetry', 'ArrowRight');
+  assert.equal(findButton(harness.render(), 'Rules').props['aria-selected'], true);
+  press('Rules', 'Home');
+  assert.equal(findButton(harness.render(), 'Telemetry').props['aria-selected'], true);
+  press('Telemetry', 'End');
+  assert.equal(findButton(harness.render(), 'Rules').props['aria-selected'], true);
+  press('Rules', 'ArrowRight');
+  assert.equal(findButton(harness.render(), 'Telemetry').props['aria-selected'], true);
+  press('Telemetry', 'ArrowLeft');
+  assert.equal(findButton(harness.render(), 'Rules').props['aria-selected'], true);
+  assert.deepEqual(focused, ['rules', 'telemetry', 'rules', 'telemetry', 'rules']);
 });
 
 test('selected detail is the immediate sibling after its exact risk row', async () => {
