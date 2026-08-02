@@ -3,14 +3,40 @@
 use std::collections::BTreeMap;
 
 use skynet_edr_core::{
-    built_in_ai_agent_sequence_rules, correlate_sequence_rule, correlate_sequence_rules,
-    parse_canonical_event_json, CanonicalEventEnvelope, EventId, EventProvenance,
-    EventSchemaVersion, EventSource, RedactionMetadata, SequenceAttributePredicate, SequenceJoin,
-    SequenceRule, SequenceStep, Severity, SourceKind, TrustLevel,
+    built_in_ai_agent_sequence_rules, built_in_rule_metadata, correlate_sequence_rule,
+    correlate_sequence_rules, parse_canonical_event_json, CanonicalEventEnvelope, EventId,
+    EventProvenance, EventSchemaVersion, EventSource, RedactionMetadata,
+    SequenceAttributePredicate, SequenceJoin, SequenceRule, SequenceStep, Severity, SourceKind,
+    TrustLevel,
 };
 
 type TestAttributes = Vec<(&'static str, serde_json::Value)>;
 type TestStep = (&'static str, TrustLevel, TestAttributes);
+
+#[test]
+fn built_in_sequence_metadata_reports_every_source_kind_the_engine_accepts() {
+    let accepted = vec![
+        SourceKind::Process,
+        SourceKind::File,
+        SourceKind::Network,
+        SourceKind::McpTool,
+        SourceKind::Configuration,
+        SourceKind::ScheduledTask,
+        SourceKind::Messaging,
+        SourceKind::Sensor,
+    ];
+    let sequence_ids = built_in_ai_agent_sequence_rules()
+        .into_iter()
+        .map(|rule| rule.id)
+        .collect::<Vec<_>>();
+
+    for metadata in built_in_rule_metadata()
+        .into_iter()
+        .filter(|metadata| sequence_ids.contains(&metadata.id))
+    {
+        assert_eq!(metadata.source_kinds, accepted, "{}", metadata.id);
+    }
+}
 
 #[test]
 fn correlates_ordered_same_session_events_with_explainable_match() {

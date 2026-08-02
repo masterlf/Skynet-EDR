@@ -1890,7 +1890,12 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         build_opener.assert_called_once()
         self.assertEqual(
             module.router.routes,
-            [("GET", "/risks", "risks"), ("GET", "/risks/{risk_id:path}", "risk_detail"), ("GET", "/status", "status")],
+            [
+                ("GET", "/risks", "risks"),
+                ("GET", "/risks/{risk_id:path}", "risk_detail"),
+                ("GET", "/status", "status"),
+                ("GET", "/rules", "rules"),
+            ],
         )
 
     def test_dashboard_upstream_success_and_content_type_json_parsing(self):
@@ -1964,6 +1969,20 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         self.assertEqual(module._bounded_page(100, 9_007_199_254_740_991), {"limit": 100, "offset": 9_007_199_254_740_991})
         with self.assertRaises(FakeHTTPException):
             module.risks(limit=50, offset=9_007_199_254_740_992)
+
+    def test_dashboard_rules_route_is_fixed_read_only_and_allowlisted(self):
+        module = load_dashboard_api()
+        captured = []
+
+        def fake_upstream(path, query=None):
+            captured.append((path, query))
+            return {"schema_version": "skynet.rules.v1", "read_only": True, "items": []}
+
+        setattr(module, "_upstream", fake_upstream)
+        self.assertEqual(module.rules()["schema_version"], "skynet.rules.v1")
+        self.assertEqual(captured, [("/api/v1/rules", None)])
+        self.assertTrue(module._valid_upstream_path("/api/v1/rules"))
+        self.assertFalse(module._valid_upstream_path("/api/v1/rules/EDR-MCP-001"))
 
     def test_dashboard_risk_detail_encodes_opaque_id_path(self):
         module = load_dashboard_api()

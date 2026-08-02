@@ -16,6 +16,7 @@ Phase 11 adds a tiny HTML console router on top of the same Phase 10 API project
 - The HTTP listener startup preflights the configured SQLite store read-only and fails closed on missing, empty, WAL-mode, or incompatible schema without creating a DB, WAL, SHM, schema, or indexes. Active HTTP requests inspect the SQLite header before opening SQLite, then use a read-only, `query_only` connection. `/api/status`, `/api/v1/risks`, and `/api/v1/risks/<id>` are the bounded Risk Explorer paths.
 - The v0.4 local operator store intentionally prefers a verifiable no-sidecar read path over WAL reader/writer concurrency. Readers produce no `-wal`/`-shm` sidecars; short writer/read contention may return a generic unavailable response rather than weakening the read-only posture.
 - Legacy investigation endpoints such as `/api/incidents`, `/api/incidents/<id>`, and `/api/config-drift` remain compatibility visibility surfaces and may materialize stored collections or full stored incidents; they should not be treated as fully bounded Risk Explorer APIs.
+- `/api/status` includes the daemon crate version compiled into the running binary; dashboard package metadata is not used as runtime version authority.
 - Missing incidents return `404 not_found`, not a storage error.
 
 This API is an operator visibility interface, not a control plane.
@@ -28,6 +29,7 @@ This API is an operator visibility interface, not a control plane.
 | `/api/incidents` | `GET` | Compact incident summaries. |
 | `/api/incidents/<id>` | `GET` | One redacted stored incident. |
 | `/api/rules` | `GET` | Built-in rule metadata. |
+| `/api/v1/rules` | `GET` | Bounded metadata for detectors compiled and active in this running build. |
 | `/api/sensors` | `GET` | Available sensor metadata. |
 | `/api/config-drift` | `GET` | Redacted config drift findings. |
 | `/api/v1/risks?limit=<n>&offset=<n>` | `GET` | Bounded Hermes/Desktop risk list projection. |

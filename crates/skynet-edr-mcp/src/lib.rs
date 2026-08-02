@@ -7,8 +7,8 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use skynet_edr_core::{
-    safe_event_identifier, safe_incident_identifier, ArtifactKind, ArtifactProvenance, Event,
-    Incident, LocalStore, ProductInfo, StorageError, TrustLevel,
+    built_in_rule_metadata, safe_event_identifier, safe_incident_identifier, ArtifactKind,
+    ArtifactProvenance, Event, Incident, LocalStore, ProductInfo, StorageError, TrustLevel,
 };
 
 const RISK_SCHEMA_VERSION: &str = "skynet.risk.v1";
@@ -241,48 +241,22 @@ pub fn get_risk(store: &LocalStore, risk_id: &str) -> Result<Value, McpReadError
 /// List built-in detection rule metadata exposed through the read-only MCP surface.
 #[must_use]
 pub fn list_rules() -> Value {
-    json!([
-        {
-            "id": "EDR-MCP-001",
-            "name": "MCP shell plus egress",
-            "severity": "high_or_critical",
-            "source_kinds": ["configuration"],
-            "read_only": true,
-            "description": "Detects MCP entries where shell execution is paired with network egress capability."
-        },
-        {
-            "id": "EDR-CRON-001",
-            "name": "Risky unattended Hermes automation",
-            "severity": "medium_or_high",
-            "source_kinds": ["scheduled_task"],
-            "read_only": true,
-            "description": "Detects broad unattended jobs that combine sensitive access with external delivery indicators."
-        },
-        {
-            "id": "EDR-CONFIG-001",
-            "name": "Agent config drift",
-            "severity": "medium_or_high",
-            "source_kinds": ["configuration"],
-            "read_only": true,
-            "description": "Detects changes between current and baseline agent runtime configuration."
-        },
-        {
-            "id": "EDR-EXFIL-001",
-            "name": "Secret access followed by egress",
-            "severity": "critical",
-            "source_kinds": ["file", "process", "network", "messaging"],
-            "read_only": true,
-            "description": "Correlates a sensitive file read with outbound network or delivery telemetry in the same agent session."
-        },
-        {
-            "id": "EDR-MALWARE-001",
-            "name": "Malware-like content sent to AI runtime",
-            "severity": "high",
-            "source_kinds": ["mcp_tool"],
-            "read_only": true,
-            "description": "Detects known-safe malware test indicators in Hermes tool output supplied to the AI runtime while omitting raw payload content from storage."
-        }
-    ])
+    Value::Array(
+        built_in_rule_metadata()
+            .into_iter()
+            .map(|rule| {
+                json!({
+                    "id": rule.id,
+                    "name": rule.name,
+                    "severity": rule.severity,
+                    "source_kinds": rule.source_kinds,
+                    "description": rule.description,
+                    "read_only": true,
+                    "compiled_active": true,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// List read-only sensor metadata available in the current MVP.

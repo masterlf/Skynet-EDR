@@ -107,7 +107,7 @@ prove completed scope expansion and is not emitted as `agent.approval.granted`.
 
 ## Risk Explorer boundaries
 
-The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, and optional `GET /status` under Hermes' plugin API mount. It proxies to the fixed loopback Skynet-EDR listener at `127.0.0.1:8787` unless `SKYNET_EDR_API_PORT` is set to a valid numeric port. It denies redirects, maps upstream 404 risk detail misses to generic `risk_not_found`, and has no SQLite access, shell/subprocess use, caller-controlled upstream URL, or mutation route.
+The Hermes dashboard backend exposes only `GET /risks`, `GET /risks/{risk_id}`, `GET /rules`, and optional `GET /status` under Hermes' plugin API mount. It proxies to fixed allowlisted paths on the loopback Skynet-EDR listener at `127.0.0.1:8787` unless `SKYNET_EDR_API_PORT` is set to a valid numeric port. It denies redirects, maps upstream 404 risk detail misses to generic `risk_not_found`, and has no SQLite access, shell/subprocess use, caller-controlled upstream URL, or mutation route. The dashboard validates daemon version, status, risk, ingestion-health, and compiled-rule projections before rendering text. Engine availability and telemetry ingestion health remain separate indicators; the shipped mode is passive.
 
 The Desktop plugin is a read-only UI client for `/skynet-edr/risks`. It uses the backend `ctx.rest('/risks?...')` and `ctx.rest('/risks/<encoded-id>')`, polls no faster than every 10 seconds, renders text only, and does not auto-link URLs or render HTML.
 

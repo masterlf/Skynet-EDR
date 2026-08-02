@@ -381,14 +381,42 @@
 
   function validateStatus(data) {
     if (!isPlainObject(data) || data.read_only !== true) failContract();
-    if (data.product !== "Skynet-EDR" || data.binary !== "skynet-edr" || data.run_mode !== "passive" || data.server !== "skynet-edr-mcp" || data.tool_count !== 6) failContract();
+    if (data.product !== "Skynet-EDR" || data.binary !== "skynet-edr" || !["passive", "active"].includes(data.run_mode) || data.server !== "skynet-edr-mcp" || data.tool_count !== 6) failContract();
+    if (typeof data.version !== "string" || data.version.length > 64 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(data.version)) failContract();
     if (!boundedSafeInteger(data.incident_count) || !boundedSafeInteger(data.event_count)) failContract();
     if (hasKey(data, "ingestion")) validateIngestionStatus(data.ingestion);
     return data;
   }
 
+  function validateRuleText(value, max) {
+    return boundedString(value, max) && !/[<>\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(value);
+  }
+
+  function validateRules(data) {
+    if (!isPlainObject(data) || data.schema_version !== "skynet.rules.v1" || data.read_only !== true || data.compiled_active !== true || !Array.isArray(data.items) || data.items.length > 100) failContract();
+    const seen = new Set();
+    data.items.forEach(function (rule) {
+      if (!isPlainObject(rule) || Object.keys(rule).sort().join(",") !== "compiled_active,description,id,name,read_only,severity,source_kinds") failContract();
+      if (!safeIdentifier(rule.id) || seen.has(rule.id)) failContract();
+      if (!validateRuleText(rule.name, 200) || !validateRuleText(rule.description, 1000)) failContract();
+      if (!enumValue(rule.severity, SEVERITIES) || rule.read_only !== true || rule.compiled_active !== true) failContract();
+      if (!Array.isArray(rule.source_kinds) || rule.source_kinds.length < 1 || rule.source_kinds.length > SOURCE_KINDS.size) failContract();
+      const sourceKinds = new Set();
+      rule.source_kinds.forEach(function (kind) {
+        if (!enumValue(kind, SOURCE_KINDS) || sourceKinds.has(kind)) failContract();
+        sourceKinds.add(kind);
+      });
+      seen.add(rule.id);
+    });
+    return data;
+  }
+
   function statusPath() {
     return API_ROOT + "/status";
+  }
+
+  function rulesPath() {
+    return API_ROOT + "/rules";
   }
 
   function riskPagePath(offset) {
@@ -642,8 +670,13 @@
       h(CardHeader, null, h(CardTitle, { className: "text-base" }, "Current page risks")),
       h(CardContent, { className: "p-0" },
         h("ul", { "aria-label": "Current page risk list", className: "max-h-[65vh] overflow-y-auto" },
-          props.items.map(function (risk) {
-            return h(RiskRow, { key: risk.id, risk: risk, selected: props.selectedId === risk.id, buttonRef: function (node) { props.setButtonRef(risk.id, node); }, onSelect: function () { props.onSelect(risk.id); } });
+          props.items.flatMap(function (risk) {
+            const selected = props.selectedId === risk.id;
+            const row = h(RiskRow, { key: risk.id, risk: risk, selected: selected, buttonRef: function (node) { props.setButtonRef(risk.id, node); }, onSelect: function () { props.onSelect(risk.id); } });
+            if (!selected) return [row];
+            return [row, h("li", { key: risk.id + ":detail", "data-detail-for": risk.id, className: "border-b p-4" },
+              h(RiskDetail, { resource: props.detail, onClose: props.onClose })
+            )];
           })
         )
       )
@@ -805,7 +838,36 @@
     );
   }
 
+  function RulesPanel(props) {
+    const resource = props.resource;
+    if (resource.loading && resource.data === null) return h(StateCard, { title: "Loading compiled rules", description: "Checking the authenticated local plugin API." });
+    if (resource.error && resource.data === null) return h(StateCard, { role: "alert", live: "assertive", title: "Unable to load rules", description: "The daemon did not return a valid compiled rule projection." });
+    if (!resource.data) return null;
+    return h("section", { "aria-labelledby": "skynet-rules-heading", className: "grid gap-4" },
+      h("div", null,
+        h("h2", { id: "skynet-rules-heading", className: "text-2xl font-semibold tracking-tight" }, "Compiled Rules"),
+        h("p", { className: "mt-2 text-sm text-muted-foreground" }, "Compiled and active in this running EDR build. This view is read only; no per-rule runtime controls or policy claims are shown.")
+      ),
+      resource.error ? h("div", { role: "status", "aria-live": "polite", className: "rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm" }, "Stale rules: the latest refresh is unavailable. Cached validated metadata remains visible.") : null,
+      h("ul", { "aria-label": "Compiled active rules", className: "grid gap-3" }, resource.data.items.map(function (rule) {
+        return h("li", { key: rule.id }, h(Card, null,
+          h(CardHeader, null, h("div", { className: "flex flex-wrap items-start justify-between gap-2" },
+            h(CardTitle, { className: "text-base" }, rule.name),
+            h(Badge, { variant: severityVariant(rule.severity) }, labelFor(rule.severity))
+          )),
+          h(CardContent, { className: "grid gap-2 text-sm" },
+            h("p", { className: "font-mono" }, rule.id),
+            h("p", { className: "text-muted-foreground" }, rule.description),
+            h("p", null, "Source kinds: " + rule.source_kinds.map(labelFor).join(", ")),
+            h("p", { className: "text-xs text-muted-foreground" }, "Read only · compiled active")
+          )
+        ));
+      }))
+    );
+  }
+
   function RiskExplorer() {
+    const [activeTab, setActiveTab] = useState("telemetry");
     const [selectedId, setSelectedId] = useState(null);
     const [navigation, setNavigation] = useState(function () { return { offset: 0, history: [] }; });
     const [search, setSearch] = useState("");
@@ -817,6 +879,9 @@
     const statusLoader = useCallback(function () {
       return SDK.fetchJSON(statusPath()).then(validateStatus);
     }, []);
+    const rulesLoader = useCallback(function () {
+      return SDK.fetchJSON(rulesPath()).then(validateRules);
+    }, []);
     const pageLoader = useCallback(function () {
       const expectedOffset = navigation.offset;
       return SDK.fetchJSON(riskPagePath(expectedOffset)).then(function (data) { return validateRiskPage(data, expectedOffset); });
@@ -827,6 +892,7 @@
     }, [selectedId]);
 
     const health = usePollingResource(statusLoader, "status", true);
+    const rules = usePollingResource(rulesLoader, "rules", activeTab === "rules");
     const risks = usePollingResource(pageLoader, "page:" + navigation.offset, true);
     const detail = usePollingResource(detailLoader, "detail:" + displayText(selectedId, "none"), Boolean(selectedId));
 
@@ -895,6 +961,7 @@
     function refreshAll() {
       health.reload();
       risks.reload();
+      if (activeTab === "rules") rules.reload();
       if (selectedId) detail.reload();
     }
 
@@ -905,11 +972,28 @@
     const noFilterRows = risks.data && pageItems.length > 0 && visibleItems.length === 0;
     const refreshing = health.refreshing || risks.refreshing || detail.refreshing;
 
+    function selectRisk(id) {
+      if (selectedId === id) {
+        setSelectedId(null);
+        focusRiskRow(id);
+      } else {
+        setSelectedId(id);
+      }
+    }
+
+    const engineChecking = health.loading && health.data === null;
+    const engineOnline = Boolean(health.data) && !health.error;
+    const trustedHealth = health.data && !health.error ? health.data : null;
+    const mode = trustedHealth ? trustedHealth.run_mode : null;
+    const versionLabel = engineChecking ? "EDR version checking" : (trustedHealth ? "EDR " + trustedHealth.version : "EDR version unavailable");
+
     return h("section", { "aria-labelledby": "skynet-risk-heading", className: "grid gap-4" },
       h("header", { className: "flex flex-wrap items-start justify-between gap-4" },
         h("div", { className: "max-w-3xl" },
           h("div", { className: "mb-2 flex flex-wrap gap-2" },
-            h(Badge, { variant: "outline" }, "Passive · Read only"),
+            h(Badge, { variant: "outline" }, versionLabel),
+            h(Badge, { variant: "outline", className: engineChecking ? "text-muted-foreground" : (engineOnline ? "border-green-600 text-green-600" : "border-red-600 text-red-600") }, engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
+            h(Badge, { variant: "outline", className: mode === "passive" ? "border-orange-500 text-orange-500" : (mode === "active" ? "border-green-600 text-green-600" : "text-muted-foreground") }, mode ? labelFor(mode).replace(/^./, function (value) { return value.toUpperCase(); }) + " mode" : "Mode unavailable"),
             h(Badge, { variant: health.error || risks.error ? "destructive" : "secondary" }, backendHealth(health, risks))
           ),
           h("h2", { id: "skynet-risk-heading", className: "text-2xl font-semibold tracking-tight" }, "Skynet-EDR Risk Explorer"),
@@ -917,6 +1001,11 @@
         ),
         h(Button, { type: "button", variant: "outline", onClick: refreshAll, disabled: refreshing, "aria-label": "Refresh Risk Explorer" }, refreshing ? "Refreshing…" : "Refresh")
       ),
+      h("div", { role: "tablist", "aria-label": "Skynet-EDR dashboard sections", className: "flex gap-2 border-b pb-2" },
+        h(Button, { type: "button", role: "tab", "aria-selected": activeTab === "telemetry", onClick: function () { setActiveTab("telemetry"); } }, "Telemetry"),
+        h(Button, { type: "button", role: "tab", "aria-selected": activeTab === "rules", onClick: function () { setActiveTab("rules"); } }, "Rules")
+      ),
+      activeTab === "rules" ? h(RulesPanel, { resource: rules }) : h("div", { role: "tabpanel", "aria-label": "Telemetry", className: "grid gap-4" },
       health.data && health.data.ingestion ? h(IngestionHealthPanel, { ingestion: health.data.ingestion }) : null,
       risks.data ? h(Pagination, { page: risks.data.page, historyLength: navigation.history.length, onPrevious: goPrevious, onNext: goNext }) : null,
       h(FilterBar, {
@@ -934,12 +1023,8 @@
       stale ? h("div", { role: "status", "aria-live": "polite", className: "rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm" }, "Stale data: the latest refresh is unavailable. Cached validated rows remain visible.") : null,
       noServerRows ? h(StateCard, { title: "No risks recorded", description: "The current server page contains no risk projections." }) : null,
       noFilterRows ? h(StateCard, { title: "No current-page matches", description: "Risks exist on this server page, but none match the active filters." }) : null,
-      risks.data && visibleItems.length > 0 ? h("div", { className: "grid min-w-0 gap-4 xl:grid-cols-[minmax(20rem,0.85fr)_minmax(24rem,1.15fr)]" },
-        h(RiskList, { items: visibleItems, selectedId: selectedId, setButtonRef: setButtonRef, onSelect: function (id) { setSelectedId(function (current) { return current === id ? null : id; }); } }),
-        selectedId
-          ? h(RiskDetail, { resource: detail, onClose: closeSelectedDetail })
-          : h(StateCard, { title: "Select a risk", description: "Inspect its read-only context, source-aware provenance, traces and evidence timeline." })
-      ) : null
+      risks.data && visibleItems.length > 0 ? h(RiskList, { items: visibleItems, selectedId: selectedId, detail: detail, setButtonRef: setButtonRef, onSelect: selectRisk, onClose: closeSelectedDetail }) : null
+      )
     );
   }
 

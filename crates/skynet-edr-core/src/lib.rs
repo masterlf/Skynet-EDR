@@ -2115,6 +2115,21 @@ pub struct SequenceRule {
     pub steps: Vec<SequenceStep>,
 }
 
+/// Operator-safe metadata for one detector compiled into this EDR build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuiltInRuleMetadata {
+    /// Stable rule identifier used by emitted incidents.
+    pub id: String,
+    /// Operator-facing rule name from the compiled detector definition.
+    pub name: String,
+    /// Severity assigned by the detector.
+    pub severity: Severity,
+    /// Canonical source kinds accepted by the detector's event path.
+    pub source_kinds: Vec<SourceKind>,
+    /// Bounded operator-facing description of the detector semantics.
+    pub description: &'static str,
+}
+
 /// Explainable output from a sequence rule match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceMatch {
@@ -2476,6 +2491,72 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
             )],
         ),
     ]
+}
+
+/// Return metadata for every detector compiled and applied by the running build.
+///
+/// Sequence metadata is derived from the same rule objects passed to the
+/// correlation engine. The two narrow Hermes correlators are included from
+/// their canonical detector constants rather than a separate UI catalogue.
+#[must_use]
+pub fn built_in_rule_metadata() -> Vec<BuiltInRuleMetadata> {
+    let mut metadata = built_in_ai_agent_sequence_rules()
+        .into_iter()
+        .map(|rule| BuiltInRuleMetadata {
+            source_kinds: sequence_rule_source_kinds(),
+            description: sequence_rule_description(&rule.id),
+            id: rule.id,
+            name: rule.name,
+            severity: rule.severity,
+        })
+        .collect::<Vec<_>>();
+    metadata.extend([
+        BuiltInRuleMetadata {
+            id: SECRET_EGRESS_RULE_ID.to_owned(),
+            name: "Secret access followed by egress".to_owned(),
+            severity: Severity::Critical,
+            source_kinds: vec![SourceKind::File, SourceKind::Process, SourceKind::Network, SourceKind::Messaging],
+            description: "Correlates a reviewed sensitive-file access with later egress or delivery telemetry under the detector's authenticated join contract.",
+        },
+        BuiltInRuleMetadata {
+            id: MALWARE_CONTENT_RULE_ID.to_owned(),
+            name: "Malware-like content sent to AI runtime".to_owned(),
+            severity: Severity::High,
+            source_kinds: vec![SourceKind::McpTool],
+            description: "Detects allowlisted safe malware-test indicators in omitted Hermes tool output without retaining raw payload content.",
+        },
+    ]);
+    metadata
+}
+
+fn sequence_rule_source_kinds() -> Vec<SourceKind> {
+    // SequenceRule currently constrains canonical event type, trust and
+    // attributes, but not EventSource.kind. Report that exact accepted set
+    // rather than implying a source-kind restriction the engine does not make.
+    vec![
+        SourceKind::Process,
+        SourceKind::File,
+        SourceKind::Network,
+        SourceKind::McpTool,
+        SourceKind::Configuration,
+        SourceKind::ScheduledTask,
+        SourceKind::Messaging,
+        SourceKind::Sensor,
+    ]
+}
+
+fn sequence_rule_description(id: &str) -> &'static str {
+    match id {
+        "EDR-MCP-001" => "Correlates untrusted instructional content with a network-capable MCP tool request in the same trace.",
+        "EDR-CONFIG-001" => "Correlates untrusted instructional content with an unapproved agent configuration change in the same trace.",
+        "EDR-CRON-001" => "Correlates untrusted instructional content with a persistence-capable automation schedule in the same trace.",
+        "EDR-PI-001" => "Correlates untrusted instructional content with a tool request combining network and sensitive-access indicators.",
+        "EDR-MSG-001" => "Correlates untrusted instructional content with a tool request combining delivery and sensitive-access indicators.",
+        "EDR-NET-001" => "Correlates untrusted instructional content with explicit direct-IP network egress in the same trace.",
+        "EDR-SCOPE-001" => "Correlates untrusted instructional content with an approval event that expands runtime scope.",
+        "EDR-PERSIST-001" => "Correlates untrusted instructional content with an agent persistence configuration change.",
+        _ => "Compiled deterministic Skynet-EDR sequence detector.",
+    }
 }
 
 fn sequence_rule(

@@ -218,7 +218,38 @@ fn status_endpoint_returns_read_only_json() {
     assert_eq!(response.content_type, "application/json");
     assert_eq!(response.body["read_only"], true);
     assert_eq!(response.body["product"], "Skynet-EDR");
+    assert_eq!(response.body["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(response.body["incident_count"], 0);
+}
+
+#[test]
+fn bounded_rules_v1_endpoint_reports_the_compiled_active_rule_pack() {
+    let store = temp_store();
+
+    let response = handle_http_request(&store, HttpMethod::Get, "/api/v1/rules")
+        .expect("rules endpoint responds");
+
+    assert_eq!(response.status, HttpStatus::Ok);
+    assert_eq!(response.body["schema_version"], "skynet.rules.v1");
+    assert_eq!(response.body["read_only"], true);
+    assert_eq!(response.body["compiled_active"], true);
+    let rules = response.body["items"].as_array().expect("rules array");
+    assert_eq!(rules.len(), 10);
+    assert!(rules.iter().any(|rule| {
+        rule["id"] == "EDR-MCP-001"
+            && rule["name"] == "MCP network tool request after untrusted content"
+            && rule["severity"] == "high"
+            && rule["source_kinds"].is_array()
+            && rule["description"].is_string()
+            && rule["compiled_active"] == true
+            && rule["read_only"] == true
+    }));
+    assert!(rules.iter().any(|rule| rule["id"] == "EDR-EXFIL-001"));
+    assert!(rules.iter().any(|rule| rule["id"] == "EDR-MALWARE-001"));
+
+    let mutation = handle_http_request(&store, HttpMethod::Post, "/api/v1/rules")
+        .expect("rules mutation is rejected");
+    assert_eq!(mutation.status, HttpStatus::MethodNotAllowed);
 }
 
 #[test]

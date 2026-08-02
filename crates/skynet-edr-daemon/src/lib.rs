@@ -193,11 +193,20 @@ pub fn handle_http_request(
 ) -> Result<HttpApiResponse, HttpApiError> {
     let (route_path, query) = split_path_query(path);
     let response = match path {
-        "/api/status" => route_get(method, || skynet_edr_mcp::status(store)),
+        "/api/status" => route_get(method, || daemon_status(store)),
         "/api/incidents" => route_get(method, || skynet_edr_mcp::list_incidents(store)),
         "/api/rules" => route_static_get(method, skynet_edr_mcp::list_rules()),
         "/api/sensors" => route_static_get(method, skynet_edr_mcp::list_sensors()),
         "/api/config-drift" => route_get(method, || skynet_edr_mcp::get_config_drift(store)),
+        "/api/v1/rules" => route_static_get(
+            method,
+            json!({
+                "schema_version": "skynet.rules.v1",
+                "read_only": true,
+                "compiled_active": true,
+                "items": skynet_edr_mcp::list_rules(),
+            }),
+        ),
         _ if route_path == "/api/v1/risks" => route_risk_list(store, method, query),
         _ => match route_path.strip_prefix("/api/v1/risks/") {
             Some(risk_id) if !risk_id.is_empty() => route_risk_detail(store, method, risk_id),
@@ -214,6 +223,12 @@ pub fn handle_http_request(
     };
 
     Ok(response)
+}
+
+fn daemon_status(store: &LocalStore) -> Result<Value, skynet_edr_mcp::McpReadError> {
+    let mut status = skynet_edr_mcp::status(store)?;
+    status["version"] = json!(env!("CARGO_PKG_VERSION"));
+    Ok(status)
 }
 
 /// Route one local read-only HTML console request without opening a socket.
