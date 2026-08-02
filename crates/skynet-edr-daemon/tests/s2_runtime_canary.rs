@@ -84,8 +84,23 @@ fn registered_hooks_traverse_live_socket_and_risk_projection_for_all_live_rules(
     let db = root.join("skynet.sqlite");
     let config = root.join("config.toml");
     let plugin_state = root.join("plugin-state");
+    let synthetic_root = root.join("synthetic-secret-daemon");
+    let synthetic_socket = synthetic_root.join("ingest.sock");
+    let synthetic_db = synthetic_root.join("skynet.sqlite");
+    let synthetic_config = root.join("synthetic-secret-config.toml");
+    let synthetic_plugin_state = root.join("synthetic-secret-plugin-state");
+    let fault_root = root.join("fault-daemon");
+    let fault_socket = fault_root.join("ingest.sock");
+    let fault_db = fault_root.join("skynet.sqlite");
+    let fault_config = root.join("fault-config.toml");
+    let fault_plugin_state = root.join("fault-plugin-state");
     fs::create_dir_all(&plugin_state).unwrap();
+    fs::create_dir_all(&synthetic_plugin_state).unwrap();
+    fs::create_dir_all(&synthetic_root).unwrap();
+    fs::create_dir_all(&fault_plugin_state).unwrap();
+    fs::create_dir_all(&fault_root).unwrap();
     let port = free_port();
+    let synthetic_port = free_port();
     let uid = nix::unistd::Uid::effective().as_raw();
     fs::write(
         &config,
@@ -139,6 +154,106 @@ candidate_limit = 10000
     }
     assert!(socket.exists(), "live AF_UNIX socket exists");
 
+    fs::write(
+        &synthetic_config,
+        format!(
+            r#"mode = "passive"
+data_dir = "{}"
+log_dir = "{}"
+[http_api]
+enabled = true
+bind = "127.0.0.1:{}"
+read_only = true
+[sensors]
+linux_privileged = false
+[ingest]
+enabled = true
+socket = "{}"
+allow_root = {}
+allowed_uids = [{}]
+max_frame_bytes = 262144
+read_timeout_ms = 1000
+write_timeout_ms = 1000
+candidate_limit = 10000
+"#,
+            synthetic_root.display(),
+            synthetic_root.display(),
+            synthetic_port,
+            synthetic_socket.display(),
+            uid == 0,
+            if uid == 0 {
+                String::new()
+            } else {
+                uid.to_string()
+            }
+        ),
+    )
+    .unwrap();
+    let synthetic_log = fs::File::create(root.join("synthetic-secret-daemon.log")).unwrap();
+    let mut synthetic_daemon = Command::new(env!("CARGO_BIN_EXE_skynet-edr-daemon"))
+        .args(["run", "--config"])
+        .arg(&synthetic_config)
+        .stdout(Stdio::from(synthetic_log.try_clone().unwrap()))
+        .stderr(Stdio::from(synthetic_log))
+        .spawn()
+        .expect("isolated synthetic-secret daemon starts");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (!synthetic_socket.exists() || TcpStream::connect(("127.0.0.1", synthetic_port)).is_err())
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        synthetic_socket.exists(),
+        "isolated synthetic-secret socket exists"
+    );
+
+    fs::write(
+        &fault_config,
+        format!(
+            r#"mode = "passive"
+data_dir = "{}"
+log_dir = "{}"
+[http_api]
+enabled = false
+[sensors]
+linux_privileged = false
+[ingest]
+enabled = true
+socket = "{}"
+allow_root = {}
+allowed_uids = [{}]
+max_frame_bytes = 262144
+read_timeout_ms = 1000
+write_timeout_ms = 1000
+candidate_limit = 10000
+"#,
+            fault_root.display(),
+            fault_root.display(),
+            fault_socket.display(),
+            uid == 0,
+            if uid == 0 {
+                String::new()
+            } else {
+                uid.to_string()
+            }
+        ),
+    )
+    .unwrap();
+    let fault_log = fs::File::create(root.join("fault-daemon.log")).unwrap();
+    let mut fault_daemon = Command::new(env!("CARGO_BIN_EXE_skynet-edr-daemon"))
+        .args(["run", "--config"])
+        .arg(&fault_config)
+        .stdout(Stdio::from(fault_log.try_clone().unwrap()))
+        .stderr(Stdio::from(fault_log))
+        .spawn()
+        .expect("isolated fault daemon starts");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fault_socket.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(fault_socket.exists(), "isolated fault socket exists");
+
     let runner = root.join("producer_canary.py");
     fs::write(&runner, PYTHON_CANARY).unwrap();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -149,12 +264,19 @@ candidate_limit = 10000
         .arg(&socket)
         .arg(&plugin_state)
         .arg(port.to_string())
+        .arg(&synthetic_socket)
+        .arg(&synthetic_plugin_state)
+        .arg(synthetic_port.to_string())
+        .arg(&fault_socket)
+        .arg(&fault_plugin_state)
         .arg(&output_path)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .output()
         .expect("Python producer canary runs");
     if !output.status.success() {
         stop(&mut daemon);
+        stop(&mut synthetic_daemon);
+        stop(&mut fault_daemon);
         panic!(
             "producer canary failed: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -224,42 +346,52 @@ candidate_limit = 10000
     );
     assert_eq!(producer["real_hermes_runtime"], false);
     let store = LocalStore::open_read_only(&db).expect("durable store opens read-only");
+    let synthetic_store =
+        LocalStore::open_read_only(&synthetic_db).expect("synthetic-secret store opens read-only");
     assert_eq!(
-        store.count_events().unwrap(),
-        usize::try_from(producer["generated"].as_u64().unwrap()).unwrap() + 1
+        store.count_events().unwrap() + synthetic_store.count_events().unwrap(),
+        usize::try_from(producer["generated"].as_u64().unwrap()).unwrap()
     );
-    assert_eq!(
-        store.count_ingest_receipts().unwrap(),
-        store.count_events().unwrap()
-    );
-    let incidents = store.list_incidents().unwrap();
-    let expected = [
-        "EDR-EXFIL-001",
-        "EDR-MCP-001",
-        "EDR-PI-001",
-        "EDR-MSG-001",
-        "EDR-NET-001",
-        "EDR-CRON-001",
-        "EDR-MALWARE-001",
-    ];
-    for rule in expected {
-        let expected_count = if rule == "EDR-EXFIL-001" {
-            3
-        } else if rule == "EDR-MSG-001" {
-            2
-        } else {
-            1
-        };
+    for phase_store in [&store, &synthetic_store] {
         assert_eq!(
-            incidents
-                .iter()
-                .filter(|incident| incident.id.as_str().contains(rule))
-                .count(),
-            expected_count,
-            "{rule}"
+            phase_store.count_ingest_receipts().unwrap(),
+            phase_store.count_events().unwrap()
         );
     }
-    assert_eq!(incidents.len(), 10);
+    let baseline_incidents = store.list_incidents().unwrap();
+    let synthetic_incidents = synthetic_store.list_incidents().unwrap();
+    for (phase, incidents, expected) in [
+        (
+            "baseline",
+            &baseline_incidents,
+            producer["expected_baseline_by_rule"].as_object().unwrap(),
+        ),
+        (
+            "synthetic-secret",
+            &synthetic_incidents,
+            producer["expected_synthetic_by_rule"].as_object().unwrap(),
+        ),
+    ] {
+        assert_eq!(
+            incidents.len(),
+            expected
+                .values()
+                .map(|count| usize::try_from(count.as_u64().unwrap()).unwrap())
+                .sum::<usize>(),
+            "{phase} incident cardinality"
+        );
+        for (rule, count) in expected {
+            assert_eq!(
+                incidents
+                    .iter()
+                    .filter(|incident| incident.id.as_str().contains(rule))
+                    .count(),
+                usize::try_from(count.as_u64().unwrap()).unwrap(),
+                "{phase} {rule}"
+            );
+        }
+    }
+    assert_eq!(baseline_incidents.len() + synthetic_incidents.len(), 9);
 
     let fault_store = LocalStore::open(root.join("fault-correlation.sqlite"))
         .expect("isolated correlation fault store opens");
@@ -304,9 +436,11 @@ candidate_limit = 10000
         .count() as u64;
     assert!(truncations > 0, "real bounded correlation fault is durable");
 
-    let connection =
-        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
+    let connection = rusqlite::Connection::open_with_flags(
+        &fault_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     let collisions = connection
         .query_row("SELECT COUNT(*) FROM ingest_collisions", [], |row| {
             row.get::<_, i64>(0)
@@ -318,7 +452,8 @@ candidate_limit = 10000
         producer["generated"].as_u64().unwrap(),
         producer["enqueued"].as_u64().unwrap(),
         producer["terminal_acks"].as_u64().unwrap(),
-        store.count_ingest_receipts().unwrap() as u64 - 1,
+        (store.count_ingest_receipts().unwrap() + synthetic_store.count_ingest_receipts().unwrap())
+            as u64,
         producer["queue_drops"].as_u64().unwrap(),
         producer["fallback_records"].as_u64().unwrap(),
         producer["socket_failures"].as_u64().unwrap(),
@@ -348,6 +483,11 @@ candidate_limit = 10000
             "ack_status_histogram": producer["ack_status_histogram"],
             "path_accounting": producer["path_accounting"],
             "risk_visibility_samples": producer["risk_visibility_samples"],
+            "expected_baseline_by_rule": producer["expected_baseline_by_rule"],
+            "expected_synthetic_by_rule": producer["expected_synthetic_by_rule"],
+            "baseline_risk_count": producer["baseline_risk_count"],
+            "synthetic_secret_incident_count": producer["synthetic_secret_incident_count"],
+            "dashboard_risk_count": producer["dashboard_risk_count"],
             "fault_evidence": producer["fault_evidence"]
         })
     );
@@ -367,10 +507,10 @@ candidate_limit = 10000
     assert_eq!(risks["schema_version"], "skynet.risk.v1");
     assert_eq!(risks["read_only"], true);
     assert_eq!(producer["baseline_risk_count"], 7);
-    assert_eq!(producer["synthetic_secret_incident_count"], 3);
-    assert_eq!(risks["items"].as_array().unwrap().len(), 10);
-    assert_eq!(producer["dashboard_risk_count"], 10);
-    assert_eq!(producer["risk_details"].as_array().unwrap().len(), 10);
+    assert_eq!(producer["synthetic_secret_incident_count"], 2);
+    assert_eq!(risks["items"].as_array().unwrap().len(), 9);
+    assert_eq!(producer["dashboard_risk_count"], 9);
+    assert_eq!(producer["risk_details"].as_array().unwrap().len(), 9);
     for item in risks["items"].as_array().unwrap() {
         assert!(item["title"]
             .as_str()
@@ -381,15 +521,28 @@ candidate_limit = 10000
     }
 
     stop(&mut daemon);
+    stop(&mut synthetic_daemon);
+    stop(&mut fault_daemon);
     drop(store);
+    drop(synthetic_store);
     let mut scanned = Vec::new();
     for path in [
         db.clone(),
         PathBuf::from(format!("{}-wal", db.display())),
         PathBuf::from(format!("{}-shm", db.display())),
+        synthetic_db.clone(),
+        PathBuf::from(format!("{}-wal", synthetic_db.display())),
+        PathBuf::from(format!("{}-shm", synthetic_db.display())),
+        fault_db.clone(),
         root.join("daemon.log"),
+        root.join("synthetic-secret-daemon.log"),
+        root.join("fault-daemon.log"),
         plugin_state.join("skynet-edr-plugin.log"),
         plugin_state.join("events-v1.jsonl"),
+        synthetic_plugin_state.join("skynet-edr-plugin.log"),
+        synthetic_plugin_state.join("events-v1.jsonl"),
+        fault_plugin_state.join("skynet-edr-plugin.log"),
+        fault_plugin_state.join("events-v1.jsonl"),
     ] {
         if path.exists() {
             scanned.extend(fs::read(path).unwrap());
@@ -411,12 +564,19 @@ candidate_limit = 10000
 const PYTHON_CANARY: &str = r"
 import collections,copy,importlib.util,json,os,queue,sys,time,types,urllib.parse
 from pathlib import Path
-repo,socket,state,port,out=Path(sys.argv[1]),sys.argv[2],Path(sys.argv[3]),sys.argv[4],Path(sys.argv[5])
+repo,socket,state,port,synthetic_socket,synthetic_state,synthetic_port,fault_socket,fault_state,out=Path(sys.argv[1]),sys.argv[2],Path(sys.argv[3]),sys.argv[4],sys.argv[5],Path(sys.argv[6]),sys.argv[7],sys.argv[8],Path(sys.argv[9]),Path(sys.argv[10])
+os.environ.pop('HERMES_SESSION_ID',None);os.environ.pop('HERMES_SESSION',None)
 os.environ.update(SKYNET_EDR_STATE_DIR=str(state),SKYNET_EDR_INGEST_SOCKET=socket,SKYNET_EDR_API_PORT=port,SKYNET_EDR_SOCKET_TIMEOUT_MS='1000')
 def load(name,path):
  spec=importlib.util.spec_from_file_location(name,path);mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod);return mod
 plugin=load('skynet_s2_runtime_plugin',repo/'integrations/hermes/skynet-edr/__init__.py')
 manifest=json.loads((repo/'crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.json').read_text())
+baseline_cases=[case for case in manifest['cases'] if case['category']=='malicious']
+synthetic_cases=[case for case in manifest['cases'] if case['category']=='synthetic_secret']
+expected_baseline_by_rule=dict(collections.Counter(case['rule_id'] for case in baseline_cases))
+expected_synthetic_by_rule=dict(collections.Counter(case['rule_id'] for case in synthetic_cases))
+assert len(expected_baseline_by_rule)==7 and set(expected_baseline_by_rule.values())=={1},expected_baseline_by_rule
+expected_risk_count=sum(expected_baseline_by_rule.values())+sum(expected_synthetic_by_rule.values())
 class C:
  def __init__(self):self.hooks={}
  def register_hook(self,n,c):self.hooks[n]=c
@@ -458,7 +618,9 @@ for case in manifest['cases']:
    time.sleep(.01)
   visibility.append({'event_id':trigger,'rule_id':case['rule_id'],'risk_id':risk['id'],'latency_ms':(visible_at-ack_at_by_event[trigger])*1000})
 baseline_risks=fetch_risks()
-assert len(baseline_risks['items'])==7,baseline_risks
+assert len(baseline_risks['items'])==sum(expected_baseline_by_rule.values()),baseline_risks
+baseline_details=[api._upstream('/api/v1/risks/'+urllib.parse.quote(item['id'],safe=''),{}) for item in baseline_risks['items']]
+os.environ.update(SKYNET_EDR_STATE_DIR=str(synthetic_state),SKYNET_EDR_INGEST_SOCKET=synthetic_socket,SKYNET_EDR_API_PORT=synthetic_port)
 for case in manifest['cases']:
  if case['category']!='synthetic_secret':continue
  callback_input=json.dumps(case['producer_calls'],sort_keys=True)
@@ -471,23 +633,26 @@ for case in manifest['cases']:
 plugin._worker_stop.set();plugin._worker_thread.join(timeout=2)
 deadline=time.monotonic()+2
 while True:
- risks=fetch_risks()
- if len(risks['items'])==10:break
- assert time.monotonic()<deadline,risks
+ synthetic_risks=fetch_risks()
+ if len(synthetic_risks['items'])==sum(expected_synthetic_by_rule.values()):break
+ assert time.monotonic()<deadline,synthetic_risks
  time.sleep(.01)
-risk_details=[api._upstream('/api/v1/risks/'+urllib.parse.quote(item['id'],safe=''),{}) for item in risks['items']]
+synthetic_details=[api._upstream('/api/v1/risks/'+urllib.parse.quote(item['id'],safe=''),{}) for item in synthetic_risks['items']]
+risks=copy.deepcopy(baseline_risks);risks['items']+=synthetic_risks['items'];risks['page'].update(returned=expected_risk_count,total=expected_risk_count)
+risk_details=baseline_details+synthetic_details
 def stats(values):
  values=sorted(values);n=len(values);return {'sample_count':n,'p50':values[(n-1)//2],'p95':values[max(0,(95*n+99)//100-1)],'max':values[-1]}
 status_histogram=dict(collections.Counter(acks));normal_generated=generated;normal_enqueued=enqueued[0];normal_counters=dict(plugin._transport_counters);normal_backlog=plugin._event_queue.qsize()
+os.environ.update(SKYNET_EDR_STATE_DIR=str(fault_state),SKYNET_EDR_INGEST_SOCKET=fault_socket)
 plugin._ensure_worker=lambda:None;plugin._event_queue=queue.Queue(maxsize=1)
 fault_args={'event_type':'agent.session.started','source_kind':'sensor','trust_level':'sensor_observation','severity':'informational','title':'S2 fault queue probe','attributes':{'fault_probe':True}}
 orig_write(**fault_args);orig_write(**fault_args);plugin._event_queue.get_nowait()
 probe=copy.deepcopy(canonical[0]);probe_id='evt_s2_fault_collision';probe['event_id']=probe_id;probe['provenance']['source_event_id']=probe_id;probe['provenance']['span_id']=probe_id;probe['provenance']['trace_id']='s2-fault-collision';fault_line=json.dumps(probe,separators=(',',':'),sort_keys=True)
-os.environ['SKYNET_EDR_INGEST_SOCKET']=str(state/'missing.sock');socket_status=orig_send(fault_line);plugin._append_fallback(fault_line);os.environ['SKYNET_EDR_INGEST_SOCKET']=socket
+os.environ['SKYNET_EDR_INGEST_SOCKET']=str(fault_state/'missing.sock');socket_status=orig_send(fault_line);plugin._append_fallback(fault_line);os.environ['SKYNET_EDR_INGEST_SOCKET']=fault_socket
 fault_persist_ack=orig_send(fault_line);collision=json.loads(fault_line);collision['observed_at_unix_ms']+=1;collision['received_at_unix_ms']+=1;collision_ack=orig_send(json.dumps(collision,separators=(',',':'),sort_keys=True))
 fault_counters={key:plugin._transport_counters[key]-normal_counters[key] for key in normal_counters};backlog_bytes=plugin._spool_path().stat().st_size-plugin._read_checkpoint(plugin._checkpoint_path())
 fault={'queue_drops':fault_counters['queue_drops'],'socket_failures':fault_counters['socket_failures'],'fallback_records':fault_counters['fallback_records'],'backlog_bytes':backlog_bytes,'fault_persist_ack':fault_persist_ack,'collision_ack':collision_ack}
-result={'generated':normal_generated,'enqueued':normal_enqueued,'terminal_acks':len(acks),'ack_status_histogram':status_histogram,'persisted_or_duplicate':sum(x in {'persisted','duplicate'} for x in acks),'fallback_records':normal_counters['fallback_records'],'queue_drops':normal_counters['queue_drops'],'socket_failures':normal_counters['socket_failures'],'backlog':normal_backlog,'path_accounting':{'enqueue':{'numerator':normal_enqueued,'denominator':normal_generated},'terminal_ack':{'numerator':len(acks),'denominator':normal_enqueued},'durable_ack':{'numerator':sum(x in {'persisted','duplicate'} for x in acks),'denominator':len(acks)}},'fault_evidence':fault,'max_callback_ms':max(callback_ms),'callback_stats':stats(callback_ms),'ack_stats':stats(ack_ms),'ack_to_corresponding_risk_stats':stats([item['latency_ms'] for item in visibility]),'risk_visibility_samples':visibility,'dashboard_fetch_contract_stats':stats(fetch_ms),'baseline_risk_count':len(baseline_risks['items']),'synthetic_secret_incident_count':len(risks['items'])-len(baseline_risks['items']),'dashboard_risk_count':len(risks['items']),'risk_response':risks,'risk_details':risk_details,'canonical_events':canonical,'secret_input_markers':secret_input_markers,'real_hermes_runtime':False,'package_install_runtime':False}
+result={'generated':normal_generated,'enqueued':normal_enqueued,'terminal_acks':len(acks),'ack_status_histogram':status_histogram,'persisted_or_duplicate':sum(x in {'persisted','duplicate'} for x in acks),'fallback_records':normal_counters['fallback_records'],'queue_drops':normal_counters['queue_drops'],'socket_failures':normal_counters['socket_failures'],'backlog':normal_backlog,'path_accounting':{'enqueue':{'numerator':normal_enqueued,'denominator':normal_generated},'terminal_ack':{'numerator':len(acks),'denominator':normal_enqueued},'durable_ack':{'numerator':sum(x in {'persisted','duplicate'} for x in acks),'denominator':len(acks)}},'fault_evidence':fault,'max_callback_ms':max(callback_ms),'callback_stats':stats(callback_ms),'ack_stats':stats(ack_ms),'ack_to_corresponding_risk_stats':stats([item['latency_ms'] for item in visibility]),'risk_visibility_samples':visibility,'dashboard_fetch_contract_stats':stats(fetch_ms),'expected_baseline_by_rule':expected_baseline_by_rule,'expected_synthetic_by_rule':expected_synthetic_by_rule,'baseline_risk_count':len(baseline_risks['items']),'synthetic_secret_incident_count':len(synthetic_risks['items']),'dashboard_risk_count':len(risks['items']),'risk_response':risks,'risk_details':risk_details,'canonical_events':canonical,'secret_input_markers':secret_input_markers,'real_hermes_runtime':False,'package_install_runtime':False}
 assert result['max_callback_ms']<50,out
 out.write_text(json.dumps(result,sort_keys=True))
 ";

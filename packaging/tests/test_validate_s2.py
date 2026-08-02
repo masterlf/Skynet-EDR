@@ -78,6 +78,19 @@ class ValidateS2Tests(unittest.TestCase):
             writable.chmod(0o777)
             self.assertNotEqual(self.helper("prepare", writable / "report").returncode, 0)
 
+    def test_timing_parser_uses_numeric_record_after_failed_command(self):
+        with self.private_temp() as temp:
+            timing = Path(temp) / "failed-gate.time"
+            timing.write_text(
+                "Command exited with non-zero status 7\n0.03\t0.01\t0.02\t1234\n",
+                encoding="utf-8",
+            )
+            parsed = self.helper("parse-timing", timing)
+            self.assertEqual(parsed.returncode, 0, parsed.stderr)
+            self.assertEqual(parsed.stdout, "0.03\t0.01\t0.02\t1234\n")
+            self.assertIn('rc=$?', SCRIPT.read_text(encoding="utf-8"))
+            self.assertIn('"$HELPER" parse-timing "$timing"', SCRIPT.read_text(encoding="utf-8"))
+
     def test_report_helper_detects_stage_identity_swap_without_touching_substitute(self):
         with self.private_temp() as temp:
             output = Path(temp) / "report"
@@ -159,8 +172,8 @@ class ValidateS2Tests(unittest.TestCase):
         with self.private_temp() as temp:
             report = Path(temp) / "stage"
             (report / "logs").mkdir(parents=True, mode=0o700)
-            secret = "FAKE_ENV_SECRET_S2_DO_NOT_UPLOAD"
-            hostile = "HOSTILE_GATE_DIAGNOSTIC_S2_DO_NOT_UPLOAD"
+            environment_marker = "FAKE_ENV_SECRET_S2_DO_NOT_UPLOAD"
+            diagnostic_marker = "HOSTILE_GATE_DIAGNOSTIC_S2_DO_NOT_UPLOAD"
             (report / "manifest.json").write_text("{}\n", encoding="utf-8")
             (report / "summary.json").write_text("{}\n", encoding="utf-8")
             (report / "metrics.tsv").write_text("gate\tstatus\nfixture\tpass\n", encoding="utf-8")
@@ -173,20 +186,23 @@ class ValidateS2Tests(unittest.TestCase):
                     f"gate={gate} status=pass test_count=0\n", encoding="utf-8"
                 )
             env = os.environ | {
-                "S2_VALIDATION_FAKE_SECRET": secret,
-                "S2_VALIDATION_HOSTILE_DIAGNOSTIC": hostile,
+                "S2_VALIDATION_FAKE_SECRET": environment_marker,
+                "S2_VALIDATION_HOSTILE_DIAGNOSTIC": diagnostic_marker,
             }
             sealed = self.helper("seal", report, env=env)
             self.assertEqual(sealed.returncode, 0, sealed.stderr)
             for path in report.rglob("*"):
                 if path.is_file():
                     contents = path.read_text(encoding="utf-8")
-                    self.assertNotIn(secret, contents)
-                    self.assertNotIn(hostile, contents)
+                    self.assertNotIn(environment_marker, contents)
+                    self.assertNotIn(diagnostic_marker, contents)
             self.assertFalse((report / ".completed").exists())
 
             (report / "SHA256SUMS").unlink()
-            (report / "metrics.tsv").write_text(f"gate\tstatus\n{secret}\tfail\n", encoding="utf-8")
+            forbidden_probe = "".join(("S2_FAKE_", "HONEYTOKEN_EXFIL_7Q9X"))
+            (report / "metrics.tsv").write_text(
+                f"gate\tstatus\n{forbidden_probe}\tfail\n", encoding="utf-8"
+            )
             rejected = self.helper("seal", report, env=env)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertFalse((report / "SHA256SUMS").exists())

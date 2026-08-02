@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -23,6 +24,15 @@ MAX_REPORT_FILE_BYTES = 1_000_000
 
 def fail(message: str) -> NoReturn:
     raise SystemExit(message)
+
+
+def parse_timing(path: Path) -> None:
+    pattern = re.compile(r"^(\d+(?:\.\d+)?)\t(\d+(?:\.\d+)?)\t(\d+(?:\.\d+)?)\t(\d+)$")
+    for line in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()):
+        if pattern.fullmatch(line):
+            print(line)
+            return
+    fail("missing numeric gate timing record")
 
 
 def checked_parent(output: Path) -> tuple[int, str]:
@@ -363,7 +373,7 @@ def abort(output: Path, token: dict[str, object]) -> None:
 
 def main() -> None:
     if len(sys.argv) < 3:
-        fail("usage: s2-report-dir.py check|prepare|exec|seal|seal-fd|publish|publish-fd|abort|abort-fd ...")
+        fail("usage: s2-report-dir.py check|prepare|exec|parse-timing|seal|seal-fd|publish|publish-fd|abort|abort-fd ...")
     command = sys.argv[1]
     if command == "check" and len(sys.argv) == 3:
         check(Path(sys.argv[2]))
@@ -371,6 +381,8 @@ def main() -> None:
         prepare(Path(sys.argv[2]))
     elif command == "exec" and len(sys.argv) >= 4:
         exec_with_stage(Path(sys.argv[2]), sys.argv[3:])
+    elif command == "parse-timing" and len(sys.argv) == 3:
+        parse_timing(Path(sys.argv[2]))
     elif command == "seal" and len(sys.argv) == 3:
         seal(Path(sys.argv[2]))
     elif command == "seal-fd" and len(sys.argv) == 4:

@@ -64,7 +64,12 @@ run_gate() {
   rc=$?
   if [ "$rc" -eq 0 ]; then status=pass; else status=fail; OVERALL=1; fi
   test_count=$(count_tests "$log")
-  IFS=$'\t' read -r wall user sys rss < "$timing"
+  if ! timing_values=$(python3 "$HELPER" parse-timing "$timing"); then
+    timing_values=$'0\t0\t0\t0'
+    status=fail
+    OVERALL=1
+  fi
+  IFS=$'\t' read -r wall user sys rss <<< "$timing_values"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$gate" "$status" "$wall" "$user" "$sys" "$rss" "$test_count" >> "$REPORT_STAGE/metrics.tsv"
   printf 'gate=%s status=%s test_count=%s\n' "$gate" "$status" "$test_count" > "$REPORT_STAGE/logs/$gate.log"
 }
