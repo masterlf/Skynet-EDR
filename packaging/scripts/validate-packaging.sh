@@ -17,6 +17,8 @@ packaging/scripts/build-tarball.sh
 packaging/scripts/build-packages.sh
 packaging/scripts/check-release-version.py
 packaging/tests/test_check_release_version.py
+packaging/scripts/validate-s2.sh
+packaging/tests/test_validate_s2.py
 packaging/scripts/stage-hermes-plugin-payload.sh
 packaging/scripts/inspect-artifacts.sh
 packaging/scripts/smoke-install-artifacts.sh
@@ -49,7 +51,7 @@ else
 fi
 python3 -m unittest discover -s packaging/tests -p 'test_*.py'
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/validate-s2.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1

@@ -59,6 +59,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 ### Testing, packaging, and release
 
 - [Linux lab testing](LINUX_LAB_TESTING.md) documents safe manual validation with fake honeytokens and controlled sinks.
+- [M4a S2 validation](M4A_VALIDATION.md) defines the synthetic seven-rule corpus, live-socket canary, metrics, and evidence limits.
 - [Packaging plan](PACKAGING.md) documents package contents, build commands, validation gates, maintainer-script rules, signing, and rollback policy.
 - [Release process](RELEASE_PROCESS.md) turns packaging and validation into a release checklist.
 - [Security tooling options](SECURITY_TOOLING_OPTIONS.md) records the current and candidate security-tooling baseline.

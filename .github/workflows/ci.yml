@@ -63,5 +63,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test Hermes Web Dashboard behavior
         run: node --test integrations/hermes/skynet-edr/dashboard/plugin.test.mjs
+      - name: Test Hermes Desktop Risk Explorer behavior
+        run: node --test integrations/hermes/skynet-edr/desktop/plugin.test.mjs
       - name: Test dependency-free Hermes plugin
         run: python3 -m unittest discover -s integrations/hermes/tests -p 'test_*.py'
+  s2-validation:
+    name: S2 M4a validation report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+      - name: Prime locked Rust dependencies
+        run: cargo fetch --locked
+      - name: Run offline S2 validation
+        run: packaging/scripts/validate-s2.sh --output "${RUNNER_TEMP}/skynet-edr-s2-report"
+      - name: Upload S2 validation report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skynet-edr-s2-validation
+          path: ${{ runner.temp }}/skynet-edr-s2-report
+          retention-days: 14
