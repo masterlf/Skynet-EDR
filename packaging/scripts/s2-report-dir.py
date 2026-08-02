@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Race-resistant private S2 report staging, sealing, and publication."""
+"""Private S2 report staging, sealing, and publication helpers.
+
+The caller must provide an isolated parent without a malicious concurrent
+same-effective-UID writer; see docs/M4A_VALIDATION.md.
+"""
 
 from __future__ import annotations
 
