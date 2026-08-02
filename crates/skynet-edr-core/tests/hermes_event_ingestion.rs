@@ -3,8 +3,8 @@
 use std::{fs, path::PathBuf};
 
 use skynet_edr_core::{
-    ingest_hermes_events_json, ingest_hermes_events_json_with_detection, LocalStore, Severity,
-    SourceKind,
+    built_in_rule_metadata, ingest_hermes_events_json, ingest_hermes_events_json_with_detection,
+    LocalStore, Severity, SourceKind,
 };
 
 fn temp_path(name: &str) -> PathBuf {
@@ -237,6 +237,83 @@ fn detects_fake_malware_content_sent_to_ai_without_storing_payload() {
     assert!(serialized.contains("skynet_fake_malware_test_string"));
 
     fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
+fn malware_metadata_reports_every_legacy_tool_call_source_that_opens_an_incident() {
+    let db_path = temp_path("malware-source-metadata.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let trace = r#"
+    [
+      {"session_id":"sess_process","timestamp_unix_ms":1781519400000,"tool_call":{"name":"terminal","arguments":{}},"tool_output":"SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE"},
+      {"session_id":"sess_messaging","timestamp_unix_ms":1781519400001,"tool_call":{"name":"send_message","arguments":{}},"tool_output":"SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE"},
+      {"session_id":"sess_file","timestamp_unix_ms":1781519400002,"tool_call":{"name":"read_file","arguments":{}},"tool_output":"SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE"},
+      {"session_id":"sess_network","timestamp_unix_ms":1781519400003,"tool_call":{"name":"web_search","arguments":{}},"tool_output":"SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE"},
+      {"session_id":"sess_mcp","timestamp_unix_ms":1781519400004,"tool_call":{"name":"custom_tool","arguments":{}},"tool_output":"SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE"}
+    ]
+    "#;
+
+    let summary = ingest_hermes_events_json_with_detection(&store, trace).expect("trace ingests");
+    assert_eq!(summary.event_count, 5);
+    assert_eq!(summary.incident_count, 5);
+
+    let accepted_sources = vec![
+        SourceKind::Process,
+        SourceKind::Messaging,
+        SourceKind::File,
+        SourceKind::Network,
+        SourceKind::McpTool,
+    ];
+    let event_sources = store
+        .list_events()
+        .expect("events list")
+        .into_iter()
+        .map(|event| event.source.kind)
+        .collect::<Vec<_>>();
+    for source in &accepted_sources {
+        assert!(
+            event_sources.contains(source),
+            "fixture should normalize and detect source {source:?}"
+        );
+    }
+
+    let metadata = built_in_rule_metadata()
+        .into_iter()
+        .find(|rule| rule.id == "EDR-MALWARE-001")
+        .expect("malware metadata is compiled");
+    assert_eq!(metadata.source_kinds, accepted_sources);
+
+    fs::remove_file(db_path).expect("temporary db is removed");
+}
+
+#[test]
+fn exfil_metadata_distinguishes_continuous_provenance_from_the_legacy_join() {
+    let metadata = built_in_rule_metadata()
+        .into_iter()
+        .find(|rule| rule.id == "EDR-EXFIL-001")
+        .expect("exfil metadata is compiled");
+
+    assert_eq!(
+        metadata.source_kinds,
+        vec![
+            SourceKind::File,
+            SourceKind::Process,
+            SourceKind::Network,
+            SourceKind::Messaging,
+            SourceKind::McpTool,
+        ]
+    );
+    assert!(metadata
+        .description
+        .contains("reviewed Hermes provenance and trust"));
+    assert!(metadata
+        .description
+        .contains("matching trace or fallback session"));
+    assert!(metadata
+        .description
+        .contains("caller-supplied session ID equality"));
+    assert!(metadata.description.contains("60-second event-time window"));
+    assert!(!metadata.description.contains("authenticated"));
 }
 
 #[test]

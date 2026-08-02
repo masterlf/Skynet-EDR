@@ -2515,14 +2515,20 @@ pub fn built_in_rule_metadata() -> Vec<BuiltInRuleMetadata> {
             id: SECRET_EGRESS_RULE_ID.to_owned(),
             name: "Secret access followed by egress".to_owned(),
             severity: Severity::Critical,
-            source_kinds: vec![SourceKind::File, SourceKind::Process, SourceKind::Network, SourceKind::Messaging],
-            description: "Correlates a reviewed sensitive-file access with later egress or delivery telemetry under the detector's authenticated join contract.",
+            source_kinds: vec![
+                SourceKind::File,
+                SourceKind::Process,
+                SourceKind::Network,
+                SourceKind::Messaging,
+                SourceKind::McpTool,
+            ],
+            description: "Correlates sensitive-file access with later egress or delivery telemetry in a 60-second event-time window. Continuous ingestion requires reviewed Hermes provenance and trust plus a matching trace or fallback session; the legacy trace importer uses caller-supplied session ID equality.",
         },
         BuiltInRuleMetadata {
             id: MALWARE_CONTENT_RULE_ID.to_owned(),
             name: "Malware-like content sent to AI runtime".to_owned(),
             severity: Severity::High,
-            source_kinds: vec![SourceKind::McpTool],
+            source_kinds: legacy_hermes_tool_source_kinds(),
             description: "Detects allowlisted safe malware-test indicators in omitted Hermes tool output without retaining raw payload content.",
         },
     ]);
@@ -2542,6 +2548,19 @@ fn sequence_rule_source_kinds() -> Vec<SourceKind> {
         SourceKind::ScheduledTask,
         SourceKind::Messaging,
         SourceKind::Sensor,
+    ]
+}
+
+fn legacy_hermes_tool_source_kinds() -> Vec<SourceKind> {
+    // These are the source kinds `hermes_source_kind` can assign to a legacy
+    // ToolCall. The malware correlator accepts every one when normalization
+    // derives a malware indicator from the call's omitted tool output.
+    vec![
+        SourceKind::Process,
+        SourceKind::Messaging,
+        SourceKind::File,
+        SourceKind::Network,
+        SourceKind::McpTool,
     ]
 }
 

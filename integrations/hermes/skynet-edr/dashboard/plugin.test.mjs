@@ -74,11 +74,11 @@ const canonicalRules = {
   read_only: true,
   compiled_active: true,
   items: [{
-    id: 'EDR-MCP-001',
-    name: 'MCP network tool request after untrusted content',
+    id: 'EDR-MALWARE-001',
+    name: 'Malware-like content sent to AI runtime',
     severity: 'high',
-    source_kinds: ['mcp_tool'],
-    description: 'Correlates untrusted instructional content with a network-capable MCP tool request.',
+    source_kinds: ['process', 'messaging', 'file', 'network', 'mcp_tool'],
+    description: 'Detects allowlisted safe malware-test indicators in omitted Hermes tool output.',
     read_only: true,
     compiled_active: true,
   }],
@@ -1079,8 +1079,12 @@ test('top-level tabs and panels have stable complete ARIA relationships and sele
   assert.equal(panel.props.role, 'tabpanel');
   assert.equal(panel.props['aria-labelledby'], 'skynet-tab-rules');
   assert.match(textOf(tree), /Compiled and active in this running EDR build/);
-  assert.match(textOf(tree), /EDR-MCP-001/);
-  assert.match(textOf(tree), /MCP network tool request after untrusted content/);
+  assert.match(textOf(tree), /EDR-MALWARE-001/);
+  assert.match(textOf(tree), /Malware-like content sent to AI runtime/);
+  assert.match(textOf(tree), /process/);
+  assert.match(textOf(tree), /messaging/);
+  assert.match(textOf(tree), /file/);
+  assert.match(textOf(tree), /network/);
   assert.match(textOf(tree), /mcp tool/);
   assert.doesNotMatch(textOf(tree), /last validation|policy provenance|enabled/);
 
