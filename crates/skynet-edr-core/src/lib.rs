@@ -2539,9 +2539,9 @@ pub fn built_in_rule_metadata() -> Vec<BuiltInRuleMetadata> {
 /// reproduces a compiled correlator result with the same deterministic ID.
 ///
 /// Incident identifiers are stored input and are not provenance by themselves.
-/// Re-evaluating the narrow legacy and authenticated-ingestion correlators keeps
-/// read-only projections from turning an allowlisted ID prefix into a detector
-/// claim that the evidence does not support.
+/// Re-evaluating the built-in sequence, narrow legacy, and authenticated-ingestion
+/// correlators keeps read-only projections from turning an allowlisted ID prefix
+/// or event metadata into a detector claim that the evidence does not support.
 #[must_use]
 pub fn built_in_incident_rule_id(incident: &Incident) -> Option<&'static str> {
     let legacy_match = correlate_hermes_incidents(&incident.events)
@@ -2556,6 +2556,18 @@ pub fn built_in_incident_rule_id(incident: &Incident) -> Option<&'static str> {
         .iter()
         .map(storage_event_to_canonical_event)
         .collect::<Option<Vec<_>>>()?;
+    let sequence_match =
+        correlate_sequence_rules(&built_in_ai_agent_sequence_rules(), &canonical_events)
+            .ok()?
+            .into_iter()
+            .find(|sequence_match| {
+                sequence_incident_id(sequence_match) == incident.id.as_str()
+                    || continuous_sequence_incident_id(sequence_match) == incident.id.as_str()
+            });
+    if let Some(sequence_match) = sequence_match {
+        return compiled_rule_id(&sequence_match.rule_id);
+    }
+
     let authenticated_match = canonical_events.iter().any(|trigger| {
         p1_incidents_for_trigger(trigger, &canonical_events)
             .into_iter()
@@ -2564,6 +2576,22 @@ pub fn built_in_incident_rule_id(incident: &Incident) -> Option<&'static str> {
     authenticated_match
         .then(|| incident_rule_id_from_prefix(incident.id.as_str()))
         .flatten()
+}
+
+fn compiled_rule_id(rule_id: &str) -> Option<&'static str> {
+    match rule_id {
+        "EDR-MCP-001" => Some("EDR-MCP-001"),
+        "EDR-CONFIG-001" => Some("EDR-CONFIG-001"),
+        "EDR-CRON-001" => Some("EDR-CRON-001"),
+        "EDR-PI-001" => Some("EDR-PI-001"),
+        "EDR-MSG-001" => Some("EDR-MSG-001"),
+        "EDR-NET-001" => Some("EDR-NET-001"),
+        "EDR-SCOPE-001" => Some("EDR-SCOPE-001"),
+        "EDR-PERSIST-001" => Some("EDR-PERSIST-001"),
+        SECRET_EGRESS_RULE_ID => Some(SECRET_EGRESS_RULE_ID),
+        MALWARE_CONTENT_RULE_ID => Some(MALWARE_CONTENT_RULE_ID),
+        _ => None,
+    }
 }
 
 fn incident_rule_id_from_prefix(incident_id: &str) -> Option<&'static str> {

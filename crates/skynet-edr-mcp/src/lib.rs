@@ -337,9 +337,7 @@ fn event_rule_id(event: &Event) -> Option<String> {
 }
 
 fn incident_rule_id(incident: &Incident) -> Option<String> {
-    built_in_incident_rule_id(incident)
-        .map(str::to_owned)
-        .or_else(|| incident.events.iter().find_map(event_rule_id))
+    built_in_incident_rule_id(incident).map(str::to_owned)
 }
 
 fn risk_item(incident: &Incident) -> Value {

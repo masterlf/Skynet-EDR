@@ -487,7 +487,7 @@ fn risk_api_v1_projects_detail_without_hostile_attribute_leakage() {
 }
 
 #[test]
-fn risk_api_v1_projection_bounds_hostile_text_and_validates_identifiers_artifacts_and_indicators() {
+fn risk_api_v1_projection_bounds_hostile_text_and_keeps_event_rule_metadata_as_evidence() {
     let store = temp_store();
     store
         .insert_incident(&stored_incident(
@@ -513,7 +513,7 @@ fn risk_api_v1_projection_bounds_hostile_text_and_validates_identifiers_artifact
             .count()
             <= 201
     );
-    assert_eq!(detail.body["rule_id"], "EDR-MALWARE-001");
+    assert_eq!(detail.body["rule_id"], serde_json::Value::Null);
     assert_eq!(
         detail.body["trace_ids"],
         serde_json::json!(["trace.valid-01"])
@@ -522,6 +522,7 @@ fn risk_api_v1_projection_bounds_hostile_text_and_validates_identifiers_artifact
     assert_eq!(detail.body["artifact"]["display_label"], "File content");
     assert_eq!(detail.body["artifact"]["provider"], "file");
     assert_eq!(detail.body["evidence"][0]["artifact"]["kind"], "unknown");
+    assert_eq!(detail.body["evidence"][1]["rule_id"], "EDR-MALWARE-001");
     assert_eq!(
         detail.body["evidence"][0]["indicators"],
         serde_json::json!({})
