@@ -506,15 +506,8 @@
     }
   }
 
-  function severityTone(value) {
-    if (value === "critical" || value === "high") return "destructive";
-    if (value === "medium") return "warning";
-    if (value === "low") return "secondary";
-    return "outline";
-  }
-
   function statusTone(value) {
-    if (value === "open") return "destructive";
+    if (value === "open") return "outline";
     if (value === "investigating") return "warning";
     if (value === "contained" || value === "resolved") return "success";
     return "secondary";
@@ -525,6 +518,24 @@
     if (tone === "destructive") {
       result.style = Object.assign({}, result.style, { backgroundColor: "transparent" });
     }
+    return result;
+  }
+
+  function severityBadgeProps(value, props) {
+    if (value === "critical") return badgeToneProps("destructive", props);
+    const colors = {
+      high: "color-mix(in srgb, #f97316 72%, var(--midground))",
+      medium: "color-mix(in srgb, #eab308 72%, var(--midground))",
+      low: "color-mix(in srgb, #3b82f6 72%, var(--midground))",
+    };
+    const color = colors[value];
+    if (!color) return badgeToneProps("outline", props);
+    const result = Object.assign({ tone: "outline" }, props);
+    result.style = Object.assign({}, result.style, {
+      color: color,
+      borderColor: color,
+      backgroundColor: "transparent",
+    });
     return result;
   }
 
@@ -661,12 +672,12 @@
       h("button", buttonProps,
         h("span", { className: "flex flex-wrap items-start justify-between gap-2" },
           h("span", { className: "font-semibold" }, risk.title),
-          h(Badge, badgeToneProps(severityTone(risk.severity)), labelFor(risk.severity))
+          h(Badge, severityBadgeProps(risk.severity), labelFor(risk.severity))
         ),
         h("span", { className: "flex flex-wrap gap-2" },
           h(SourceBadge, { kind: risk.artifact.kind }),
           h(Badge, badgeToneProps(statusTone(risk.status)), labelFor(risk.status)),
-          h(Badge, { tone: "outline" }, "Rule " + displayText(risk.rule_id, "none"))
+          h(Badge, { tone: "outline" }, "Detection rule " + displayText(risk.rule_id, "not supplied"))
         ),
         h("span", { className: "text-xs text-muted-foreground" },
           "Sensor " + risk.sensor.sensor + " · events " + countText(risk.event_count) + " · last observed " + formatTime(risk.last_observed_at_unix_ms)
@@ -724,7 +735,7 @@
                 h("div", { className: "font-medium", style: WRAP_ANYWHERE_STYLE }, event.title),
                 h("div", { className: "mt-1 text-xs text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, formatTime(event.timestamp_unix_ms) + " · event " + event.event_id)
               ),
-              h(Badge, badgeToneProps(severityTone(event.severity)), labelFor(event.severity))
+              h(Badge, severityBadgeProps(event.severity), labelFor(event.severity))
             ),
             h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
               h(SourceBadge, { kind: event.artifact.kind }),
@@ -736,7 +747,7 @@
               })
             ),
             h("p", { className: "mt-2 text-xs text-muted-foreground", style: WRAP_ANYWHERE_STYLE },
-              "Rule " + displayText(event.rule_id, "none") + " · sensor " + event.sensor.kind + "/" + event.sensor.sensor + " · integration " + displayText(event.sensor.integration, "none")
+              (event.rule_id ? "Event rule " + event.rule_id : "Contributing event · no standalone rule") + " · sensor " + event.sensor.kind + "/" + event.sensor.sensor + " · integration " + displayText(event.sensor.integration, "none")
             )
           );
         }))
@@ -773,14 +784,18 @@
     if (!risk) return null;
     return panel(risk.title, [
       h(SourceBadge, { key: "source", kind: risk.artifact.kind }),
-      h(Badge, badgeToneProps(severityTone(risk.severity), { key: "severity" }), labelFor(risk.severity)),
+      h(Badge, severityBadgeProps(risk.severity, { key: "severity" }), labelFor(risk.severity)),
       h(Badge, badgeToneProps(statusTone(risk.status), { key: "status" }), labelFor(risk.status)),
+      h(Badge, { key: "rule", tone: "outline" }, "Detection rule " + displayText(risk.rule_id, "not supplied")),
     ], h(CardContent, { className: "grid min-w-0 gap-4", style: MIN_WIDTH_ZERO_STYLE },
       resource.error ? h("div", { role: "status", "aria-live": "polite", className: "rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm" }, "Stale detail: the latest refresh is unavailable; cached validated detail remains visible.") : null,
       h("p", { className: "text-sm text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, risk.summary),
       h("section", { "aria-label": "Passive read-only context", className: "rounded-lg border p-3", style: MIN_WIDTH_ZERO_STYLE },
         h("h4", { className: "text-sm font-semibold" }, "Passive read-only context"),
         h("p", { className: "mt-1 text-sm text-muted-foreground" }, "This Web Dashboard view displays only validated redacted API projections. It provides refresh and navigation, never containment or mutation controls."),
+        h("p", { className: "mt-1 text-sm text-muted-foreground" }, risk.rule_id
+          ? "Detection rule " + risk.rule_id + " identifies this risk. Evidence rows without an event rule are contributing telemetry, not unruled alerts."
+          : "No validated detection rule ID was supplied for this risk projection."),
         h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
           h(Badge, { tone: "outline" }, "Confidence: Not assessed"),
           h(Badge, badgeToneProps(risk.contains_sensitive_data ? "destructive" : "secondary"), risk.contains_sensitive_data ? "Sensitive data redacted" : "No sensitive flag"),
@@ -863,7 +878,7 @@
         return h("li", { key: rule.id }, h(Card, null,
           h(CardHeader, null, h("div", { className: "flex flex-wrap items-start justify-between gap-2" },
             h(CardTitle, { className: "text-base" }, rule.name),
-            h(Badge, badgeToneProps(severityTone(rule.severity)), labelFor(rule.severity))
+            h(Badge, severityBadgeProps(rule.severity), labelFor(rule.severity))
           )),
           h(CardContent, { className: "grid gap-2 text-sm" },
             h("p", { className: "font-mono" }, rule.id),

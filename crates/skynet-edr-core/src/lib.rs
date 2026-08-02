@@ -2535,6 +2535,47 @@ pub fn built_in_rule_metadata() -> Vec<BuiltInRuleMetadata> {
     metadata
 }
 
+/// Return the detector rule for an incident only when its stored evidence
+/// reproduces a compiled correlator result with the same deterministic ID.
+///
+/// Incident identifiers are stored input and are not provenance by themselves.
+/// Re-evaluating the narrow legacy and authenticated-ingestion correlators keeps
+/// read-only projections from turning an allowlisted ID prefix into a detector
+/// claim that the evidence does not support.
+#[must_use]
+pub fn built_in_incident_rule_id(incident: &Incident) -> Option<&'static str> {
+    let legacy_match = correlate_hermes_incidents(&incident.events)
+        .into_iter()
+        .any(|candidate| candidate.id == incident.id);
+    if legacy_match {
+        return incident_rule_id_from_prefix(incident.id.as_str());
+    }
+
+    let canonical_events = incident
+        .events
+        .iter()
+        .map(storage_event_to_canonical_event)
+        .collect::<Option<Vec<_>>>()?;
+    let authenticated_match = canonical_events.iter().any(|trigger| {
+        p1_incidents_for_trigger(trigger, &canonical_events)
+            .into_iter()
+            .any(|candidate| candidate.id == incident.id)
+    });
+    authenticated_match
+        .then(|| incident_rule_id_from_prefix(incident.id.as_str()))
+        .flatten()
+}
+
+fn incident_rule_id_from_prefix(incident_id: &str) -> Option<&'static str> {
+    if incident_id.starts_with("inc:EDR-EXFIL-001:") {
+        return Some(SECRET_EGRESS_RULE_ID);
+    }
+    if incident_id.starts_with("inc:EDR-MALWARE-001:") {
+        return Some(MALWARE_CONTENT_RULE_ID);
+    }
+    None
+}
+
 fn sequence_rule_source_kinds() -> Vec<SourceKind> {
     // SequenceRule currently constrains canonical event type, trust and
     // attributes, but not EventSource.kind. Report that exact accepted set

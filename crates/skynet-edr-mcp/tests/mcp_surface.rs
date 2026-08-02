@@ -298,6 +298,73 @@ fn risk_v1_list_and_detail_use_deterministic_labels_without_stored_operator_text
 }
 
 #[test]
+fn risk_v1_rejects_unverified_rule_provenance_from_incident_id_prefix() {
+    let db_path = temp_path("mcp-risk-v1-correlation-rule.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    let mut sensitive = sample_mcp_event("evt_sensitive_access", "EDR-EXFIL-001");
+    sensitive.attributes.remove("rule_id");
+    sensitive.attributes.insert(
+        "event_type".to_owned(),
+        serde_json::json!("agent.tool.requested"),
+    );
+    let mut egress = sample_mcp_event("evt_network_egress", "EDR-EXFIL-001");
+    egress.attributes.remove("rule_id");
+    egress.attributes.insert(
+        "event_type".to_owned(),
+        serde_json::json!("agent.network.egress"),
+    );
+    let incident = Incident {
+        id: IncidentId::new("inc:EDR-EXFIL-001:test-correlation"),
+        created_at_unix_ms: 1_781_440_123_000,
+        updated_at_unix_ms: 1_781_440_124_000,
+        status: IncidentStatus::Open,
+        severity: Severity::Critical,
+        title: "Potential sensitive-data exfiltration".to_owned(),
+        summary: "Correlated sensitive access followed by network egress".to_owned(),
+        source: sensitive.source.clone(),
+        events: vec![sensitive, egress],
+        redaction: no_redaction(),
+    };
+    store.insert_incident(&incident).expect("incident persists");
+
+    let list = list_risks(&store, 10, 0).expect("risk list succeeds");
+    let detail = get_risk(&store, incident.id.as_str()).expect("risk detail succeeds");
+
+    assert_eq!(list["items"][0]["rule_id"], serde_json::Value::Null);
+    assert_eq!(detail["rule_id"], serde_json::Value::Null);
+    assert_eq!(detail["title"], "Security risk detected");
+    assert_eq!(detail["evidence"][0]["rule_id"], serde_json::Value::Null);
+    assert_eq!(detail["evidence"][1]["rule_id"], serde_json::Value::Null);
+
+    cleanup_sqlite_files(&db_path);
+}
+
+#[test]
+fn risk_v1_projects_verified_incident_correlation_rule_without_event_rule_claims() {
+    let db_path = temp_path("mcp-risk-v1-verified-correlation-rule.sqlite");
+    let store = LocalStore::open(&db_path).expect("store opens");
+    run_secret_egress_attack_simulation(&store).expect("attack simulation persists telemetry");
+    let incident_id = "inc:EDR-EXFIL-001:attack_sim_secret_egress:1781519200000";
+
+    let list = list_risks(&store, 10, 0).expect("risk list succeeds");
+    let detail = get_risk(&store, incident_id).expect("risk detail succeeds");
+
+    assert_eq!(list["items"][0]["rule_id"], "EDR-EXFIL-001");
+    assert_eq!(detail["rule_id"], "EDR-EXFIL-001");
+    assert_eq!(
+        detail["title"],
+        "Sensitive access followed by outbound delivery"
+    );
+    assert!(detail["evidence"]
+        .as_array()
+        .expect("evidence array")
+        .iter()
+        .all(|event| event["rule_id"].is_null()));
+
+    cleanup_sqlite_files(&db_path);
+}
+
+#[test]
 fn risk_v1_projects_safe_event_pseudonyms_for_legacy_invalid_ids() {
     let db_path = temp_path("mcp-risk-v1-event-id-pseudonym.sqlite");
     let store = LocalStore::open(&db_path).expect("store opens");

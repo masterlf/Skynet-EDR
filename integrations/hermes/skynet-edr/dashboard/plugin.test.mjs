@@ -974,7 +974,7 @@ test('every destructive badge removes the host translucent fill for AA contrast'
   assert.doesNotMatch(source, /h\(Badge,\s*\{[^}\n]*tone:\s*[^}\n]*"destructive"/);
   const harness = createHarness({
     '/api/plugins/skynet-edr/status': canonicalStatus,
-    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items: [{ ...canonicalRisk(), severity: 'critical' }] }),
   });
   harness.render();
   await harness.flushEffects();
@@ -983,7 +983,7 @@ test('every destructive badge removes the host translucent fill for AA contrast'
   walk(harness.render(), (node) => {
     if (node.type === 'Badge' && node.props?.tone === 'destructive') destructive.push(node);
   });
-  assert.ok(destructive.length >= 2, 'fixture must render destructive severity and status badges');
+  assert.ok(destructive.length >= 1, 'fixture must render a destructive critical-severity badge');
   for (const badge of destructive) assert.equal(badge.props.style?.backgroundColor, 'transparent');
 });
 
@@ -1005,11 +1005,13 @@ test('header uses semantic host badge tones for engine and mode status', async (
   assert.equal(passive.props.tone, 'warning');
   assert.equal(passive.props.className, undefined);
   const high = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'high', 'high severity indicator');
-  assert.equal(high.props.tone, 'destructive');
+  assert.equal(high.props.tone, 'outline');
+  assert.equal(high.props.style.color, 'color-mix(in srgb, #f97316 72%, var(--midground))');
+  assert.equal(high.props.style.borderColor, 'color-mix(in srgb, #f97316 72%, var(--midground))');
   assert.equal(high.props.style.backgroundColor, 'transparent');
   const open = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'open', 'open status indicator');
-  assert.equal(open.props.tone, 'destructive');
-  assert.equal(open.props.style.backgroundColor, 'transparent');
+  assert.equal(open.props.tone, 'outline');
+  assert.equal(open.props.style, undefined);
   assert.equal(findButton(tree, 'Refresh').props.outlined, true);
   assert.equal(findButton(tree, 'Previous').props.outlined, true);
   assert.equal(findButton(tree, 'Next').props.outlined, true);
@@ -1039,6 +1041,52 @@ test('header uses semantic host badge tones for engine and mode status', async (
   assert.equal(findNode(invalidTree, (node) => textOf(node) === 'Mode unavailable', 'unavailable mode indicator').props.tone, 'outline');
   assert.equal(findNode(invalidTree, (node) => textOf(node) === 'EDR version unavailable', 'unavailable version indicator').props.tone, 'outline');
   assert.doesNotMatch(textOf(invalidTree), /script|bad/);
+});
+
+test('severity badges use the requested critical red, high orange, medium yellow and low blue palette', async () => {
+  const items = ['critical', 'high', 'medium', 'low'].map((severity, index) => ({
+    ...canonicalRisk(`risk-${severity}`),
+    severity,
+    last_observed_at_unix_ms: index + 2,
+  }));
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items }),
+  });
+  harness.render();
+  await harness.flushEffects();
+  const tree = harness.render();
+  const critical = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'critical', 'critical severity');
+  const high = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'high', 'high severity');
+  const medium = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'medium', 'medium severity');
+  const low = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'low', 'low severity');
+  assert.equal(critical.props.tone, 'destructive');
+  assert.equal(high.props.style.color, 'color-mix(in srgb, #f97316 72%, var(--midground))');
+  assert.equal(medium.props.style.color, 'color-mix(in srgb, #eab308 72%, var(--midground))');
+  assert.equal(low.props.style.color, 'color-mix(in srgb, #3b82f6 72%, var(--midground))');
+});
+
+test('risk detail distinguishes incident detection rule from contributing events without standalone rules', async () => {
+  const risk = {
+    ...canonicalDetail(),
+    rule_id: 'EDR-EXFIL-001',
+    title: 'Sensitive access followed by outbound delivery',
+    evidence: canonicalDetail().evidence.map((event) => ({ ...event, rule_id: null })),
+  };
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items: [risk] }),
+    '/api/plugins/skynet-edr/risks/risk-1': risk,
+  });
+  harness.render();
+  await harness.flushEffects();
+  findButton(harness.render(), 'Sensitive access followed by outbound delivery').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  const text = textOf(harness.render());
+  assert.match(text, /Detection rule EDR-EXFIL-001/);
+  assert.match(text, /Contributing event · no standalone rule/);
+  assert.doesNotMatch(text, /Rule none/);
 });
 
 test('a failed latest status poll marks the engine offline while telemetry data stays separate', async () => {
