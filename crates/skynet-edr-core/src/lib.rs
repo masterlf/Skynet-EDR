@@ -2115,6 +2115,21 @@ pub struct SequenceRule {
     pub steps: Vec<SequenceStep>,
 }
 
+/// Operator-safe metadata for one detector compiled into this EDR build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuiltInRuleMetadata {
+    /// Stable rule identifier used by emitted incidents.
+    pub id: String,
+    /// Operator-facing rule name from the compiled detector definition.
+    pub name: String,
+    /// Severity assigned by the detector.
+    pub severity: Severity,
+    /// Canonical source kinds accepted by the detector's event path.
+    pub source_kinds: Vec<SourceKind>,
+    /// Bounded operator-facing description of the detector semantics.
+    pub description: &'static str,
+}
+
 /// Explainable output from a sequence rule match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceMatch {
@@ -2476,6 +2491,160 @@ pub fn built_in_ai_agent_sequence_rules() -> Vec<SequenceRule> {
             )],
         ),
     ]
+}
+
+/// Return metadata for every detector compiled and applied by the running build.
+///
+/// Sequence metadata is derived from the same rule objects passed to the
+/// correlation engine. The two narrow Hermes correlators are included from
+/// their canonical detector constants rather than a separate UI catalogue.
+#[must_use]
+pub fn built_in_rule_metadata() -> Vec<BuiltInRuleMetadata> {
+    let mut metadata = built_in_ai_agent_sequence_rules()
+        .into_iter()
+        .map(|rule| BuiltInRuleMetadata {
+            source_kinds: sequence_rule_source_kinds(),
+            description: sequence_rule_description(&rule.id),
+            id: rule.id,
+            name: rule.name,
+            severity: rule.severity,
+        })
+        .collect::<Vec<_>>();
+    metadata.extend([
+        BuiltInRuleMetadata {
+            id: SECRET_EGRESS_RULE_ID.to_owned(),
+            name: "Secret access followed by egress".to_owned(),
+            severity: Severity::Critical,
+            source_kinds: vec![
+                SourceKind::File,
+                SourceKind::Process,
+                SourceKind::Network,
+                SourceKind::Messaging,
+                SourceKind::McpTool,
+            ],
+            description: "Correlates sensitive-file access with later egress or delivery telemetry in a 60-second event-time window. Continuous ingestion requires reviewed Hermes provenance and trust plus a matching trace or fallback session; the legacy trace importer uses caller-supplied session ID equality.",
+        },
+        BuiltInRuleMetadata {
+            id: MALWARE_CONTENT_RULE_ID.to_owned(),
+            name: "Malware-like content sent to AI runtime".to_owned(),
+            severity: Severity::High,
+            source_kinds: legacy_hermes_tool_source_kinds(),
+            description: "Detects allowlisted safe malware-test indicators in omitted Hermes tool output without retaining raw payload content.",
+        },
+    ]);
+    metadata
+}
+
+/// Return the detector rule for an incident only when its stored evidence
+/// reproduces a compiled correlator result with the same deterministic ID.
+///
+/// Incident identifiers are stored input and are not provenance by themselves.
+/// Re-evaluating the built-in sequence, narrow legacy, and authenticated-ingestion
+/// correlators keeps read-only projections from turning an allowlisted ID prefix
+/// or event metadata into a detector claim that the evidence does not support.
+#[must_use]
+pub fn built_in_incident_rule_id(incident: &Incident) -> Option<&'static str> {
+    let legacy_match = correlate_hermes_incidents(&incident.events)
+        .into_iter()
+        .any(|candidate| candidate.id == incident.id);
+    if legacy_match {
+        return incident_rule_id_from_prefix(incident.id.as_str());
+    }
+
+    let canonical_events = incident
+        .events
+        .iter()
+        .map(storage_event_to_canonical_event)
+        .collect::<Option<Vec<_>>>()?;
+    let sequence_match =
+        correlate_sequence_rules(&built_in_ai_agent_sequence_rules(), &canonical_events)
+            .ok()?
+            .into_iter()
+            .find(|sequence_match| {
+                sequence_incident_id(sequence_match) == incident.id.as_str()
+                    || continuous_sequence_incident_id(sequence_match) == incident.id.as_str()
+            });
+    if let Some(sequence_match) = sequence_match {
+        return compiled_rule_id(&sequence_match.rule_id);
+    }
+
+    let authenticated_match = canonical_events.iter().any(|trigger| {
+        p1_incidents_for_trigger(trigger, &canonical_events)
+            .into_iter()
+            .any(|candidate| candidate.id == incident.id)
+    });
+    authenticated_match
+        .then(|| incident_rule_id_from_prefix(incident.id.as_str()))
+        .flatten()
+}
+
+fn compiled_rule_id(rule_id: &str) -> Option<&'static str> {
+    match rule_id {
+        "EDR-MCP-001" => Some("EDR-MCP-001"),
+        "EDR-CONFIG-001" => Some("EDR-CONFIG-001"),
+        "EDR-CRON-001" => Some("EDR-CRON-001"),
+        "EDR-PI-001" => Some("EDR-PI-001"),
+        "EDR-MSG-001" => Some("EDR-MSG-001"),
+        "EDR-NET-001" => Some("EDR-NET-001"),
+        "EDR-SCOPE-001" => Some("EDR-SCOPE-001"),
+        "EDR-PERSIST-001" => Some("EDR-PERSIST-001"),
+        SECRET_EGRESS_RULE_ID => Some(SECRET_EGRESS_RULE_ID),
+        MALWARE_CONTENT_RULE_ID => Some(MALWARE_CONTENT_RULE_ID),
+        _ => None,
+    }
+}
+
+fn incident_rule_id_from_prefix(incident_id: &str) -> Option<&'static str> {
+    if incident_id.starts_with("inc:EDR-EXFIL-001:") {
+        return Some(SECRET_EGRESS_RULE_ID);
+    }
+    if incident_id.starts_with("inc:EDR-MALWARE-001:") {
+        return Some(MALWARE_CONTENT_RULE_ID);
+    }
+    None
+}
+
+fn sequence_rule_source_kinds() -> Vec<SourceKind> {
+    // SequenceRule currently constrains canonical event type, trust and
+    // attributes, but not EventSource.kind. Report that exact accepted set
+    // rather than implying a source-kind restriction the engine does not make.
+    vec![
+        SourceKind::Process,
+        SourceKind::File,
+        SourceKind::Network,
+        SourceKind::McpTool,
+        SourceKind::Configuration,
+        SourceKind::ScheduledTask,
+        SourceKind::Messaging,
+        SourceKind::Sensor,
+    ]
+}
+
+fn legacy_hermes_tool_source_kinds() -> Vec<SourceKind> {
+    // These are the source kinds `hermes_source_kind` can assign to a legacy
+    // ToolCall. The malware correlator accepts every one when normalization
+    // derives a malware indicator from the call's omitted tool output.
+    vec![
+        SourceKind::Process,
+        SourceKind::Messaging,
+        SourceKind::File,
+        SourceKind::Network,
+        SourceKind::McpTool,
+    ]
+}
+
+fn sequence_rule_description(id: &str) -> &'static str {
+    match id {
+        "EDR-MCP-001" => "Correlates untrusted instructional content with a network-capable MCP tool request in the same trace.",
+        "EDR-CONFIG-001" => "Correlates untrusted instructional content with an unapproved agent configuration change in the same trace.",
+        "EDR-CRON-001" => "Correlates untrusted instructional content with a persistence-capable automation schedule in the same trace.",
+        "EDR-PI-001" => "Correlates untrusted instructional content with a tool request combining network and sensitive-access indicators.",
+        "EDR-MSG-001" => "Correlates untrusted instructional content with a tool request combining delivery and sensitive-access indicators.",
+        "EDR-NET-001" => "Correlates untrusted instructional content with explicit direct-IP network egress in the same trace.",
+        "EDR-SCOPE-001" => "Correlates untrusted instructional content with an approval event that expands runtime scope.",
+        "EDR-PERSIST-001" => "Correlates untrusted instructional content with an agent persistence configuration change.",
+        _ => "Compiled deterministic Skynet-EDR sequence detector.",
+    }
 }
 
 fn sequence_rule(

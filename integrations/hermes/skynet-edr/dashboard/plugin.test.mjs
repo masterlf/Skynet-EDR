@@ -60,12 +60,28 @@ function canonicalDetail(id = 'risk-1') {
 const canonicalStatus = {
   product: 'Skynet-EDR',
   binary: 'skynet-edr',
+  version: '0.4.1',
   run_mode: 'passive',
   server: 'skynet-edr-mcp',
   read_only: true,
   tool_count: 6,
   incident_count: 1,
   event_count: 1,
+};
+
+const canonicalRules = {
+  schema_version: 'skynet.rules.v1',
+  read_only: true,
+  compiled_active: true,
+  items: [{
+    id: 'EDR-MALWARE-001',
+    name: 'Malware-like content sent to AI runtime',
+    severity: 'high',
+    source_kinds: ['process', 'messaging', 'file', 'network', 'mcp_tool'],
+    description: 'Detects allowlisted safe malware-test indicators in omitted Hermes tool output.',
+    read_only: true,
+    compiled_active: true,
+  }],
 };
 
 function deferred() {
@@ -142,9 +158,21 @@ function createHarness(plans = {}) {
     },
   };
   const components = {};
-  for (const name of ['Card', 'CardHeader', 'CardTitle', 'CardContent', 'Badge', 'Button', 'Input', 'Label', 'Select', 'SelectOption', 'Separator', 'Tabs', 'TabsList', 'TabsTrigger']) {
+  for (const name of ['Card', 'CardHeader', 'CardTitle', 'CardContent', 'Input', 'Label', 'Select', 'SelectOption', 'Separator', 'Tabs', 'TabsList', 'TabsTrigger']) {
     components[name] = name;
   }
+  components.Badge = function Badge(props) {
+    assert.equal(Object.hasOwn(props, 'variant'), false, 'Badge does not support variant');
+    assert.ok(['default', 'destructive', 'outline', 'secondary', 'success', 'warning'].includes(props.tone || 'default'), `unsupported Badge tone: ${props.tone}`);
+    return { type: 'Badge', props };
+  };
+  components.Button = function Button(props) {
+    assert.equal(Object.hasOwn(props, 'variant'), false, 'Button does not support variant');
+    for (const name of ['ghost', 'outlined', 'destructive', 'invert']) {
+      assert.ok(props[name] === undefined || typeof props[name] === 'boolean', `Button ${name} must be boolean`);
+    }
+    return { type: 'Button', props };
+  };
 
   async function materialize(next) {
     if (next instanceof Error) throw next;
@@ -289,7 +317,7 @@ test('IIFE registers exactly skynet-edr and only uses authenticated scoped JSON 
   assert.ok(harness.calls.length >= 2);
   for (const args of harness.calls) {
     assert.equal(args.length, 1, 'fetchJSON must not receive method/options');
-    assert.match(args[0], /^\/api\/plugins\/skynet-edr\/(?:status|risks(?:\?limit=50&offset=\d+|\/[A-Za-z0-9%._~-]+)?)$/);
+    assert.match(args[0], /^\/api\/plugins\/skynet-edr\/(?:status|rules|risks(?:\?limit=50&offset=\d+|\/[A-Za-z0-9%._~-]+)?)$/);
   }
   assert.ok(harness.intervals.some(({ delay }) => delay === 10000), '10s polling must be installed');
   for (const forbidden of ['innerHTML', 'dangerouslySetInnerHTML', 'XMLHttpRequest', 'WebSocket(', 'href:', 'src:', 'markdown', 'fetch(']) {
@@ -936,4 +964,271 @@ test('Previous follows exact history and a filter reset returns to offset zero',
   await harness.flushEffects();
   riskCalls = harness.calls.map((args) => args[0]).filter((path) => path.includes('/risks?'));
   assert.equal(riskCalls.at(-1), '/api/plugins/skynet-edr/risks?limit=50&offset=0');
+});
+
+test('dashboard uses only the installed host Badge and Button styling contracts', () => {
+  assert.doesNotMatch(source, /h\((?:Badge|Button),\s*\{[^}]*\bvariant\s*:/);
+});
+
+test('every destructive badge removes the host translucent fill for AA contrast', async () => {
+  assert.doesNotMatch(source, /h\(Badge,\s*\{[^}\n]*tone:\s*[^}\n]*"destructive"/);
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items: [{ ...canonicalRisk(), severity: 'critical' }] }),
+  });
+  harness.render();
+  await harness.flushEffects();
+
+  const destructive = [];
+  walk(harness.render(), (node) => {
+    if (node.type === 'Badge' && node.props?.tone === 'destructive') destructive.push(node);
+  });
+  assert.ok(destructive.length >= 1, 'fixture must render a destructive critical-severity badge');
+  for (const badge of destructive) assert.equal(badge.props.style?.backgroundColor, 'transparent');
+});
+
+test('header uses semantic host badge tones for engine and mode status', async () => {
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  const checkingTree = harness.render();
+  assert.equal(findNode(checkingTree, (node) => textOf(node) === 'Engine checking', 'checking engine indicator').props.tone, 'outline');
+  assert.equal(findNode(checkingTree, (node) => textOf(node) === 'Mode unavailable', 'checking mode indicator').props.tone, 'outline');
+  await harness.flushEffects();
+  const tree = harness.render();
+  assert.match(textOf(tree), /EDR 0\.4\.1/);
+  const online = findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator');
+  assert.equal(online.props.tone, 'success');
+  assert.equal(online.props.className, undefined);
+  const passive = findNode(tree, (node) => textOf(node) === 'Passive mode', 'passive mode indicator');
+  assert.equal(passive.props.tone, 'warning');
+  assert.equal(passive.props.className, undefined);
+  const high = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'high', 'high severity indicator');
+  assert.equal(high.props.tone, 'outline');
+  assert.equal(high.props.style.color, 'color-mix(in srgb, #f97316 72%, var(--midground))');
+  assert.equal(high.props.style.borderColor, 'color-mix(in srgb, #f97316 72%, var(--midground))');
+  assert.equal(high.props.style.backgroundColor, 'transparent');
+  const open = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'open', 'open status indicator');
+  assert.equal(open.props.tone, 'outline');
+  assert.equal(open.props.style, undefined);
+  assert.equal(findButton(tree, 'Refresh').props.outlined, true);
+  assert.equal(findButton(tree, 'Previous').props.outlined, true);
+  assert.equal(findButton(tree, 'Next').props.outlined, true);
+
+  const activeHarness = createHarness({
+    '/api/plugins/skynet-edr/status': { ...canonicalStatus, run_mode: 'active' },
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  activeHarness.render();
+  await activeHarness.flushEffects();
+  const active = findNode(activeHarness.render(), (node) => textOf(node) === 'Active mode', 'active mode indicator');
+  assert.equal(active.props.tone, 'success');
+  assert.equal(active.props.className, undefined);
+
+  const invalid = { ...canonicalStatus, version: '<script>bad</script>' };
+  const invalidHarness = createHarness({
+    '/api/plugins/skynet-edr/status': invalid,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  invalidHarness.render();
+  await invalidHarness.flushEffects();
+  const invalidTree = invalidHarness.render();
+  const offline = findNode(invalidTree, (node) => textOf(node) === 'Engine Offline', 'offline engine indicator');
+  assert.equal(offline.props.tone, 'destructive');
+  assert.equal(offline.props.className, undefined);
+  assert.equal(offline.props.style.backgroundColor, 'transparent');
+  assert.equal(findNode(invalidTree, (node) => textOf(node) === 'Mode unavailable', 'unavailable mode indicator').props.tone, 'outline');
+  assert.equal(findNode(invalidTree, (node) => textOf(node) === 'EDR version unavailable', 'unavailable version indicator').props.tone, 'outline');
+  assert.doesNotMatch(textOf(invalidTree), /script|bad/);
+});
+
+test('severity badges use the requested critical red, high orange, medium yellow and low blue palette', async () => {
+  const items = ['critical', 'high', 'medium', 'low'].map((severity, index) => ({
+    ...canonicalRisk(`risk-${severity}`),
+    severity,
+    last_observed_at_unix_ms: index + 2,
+  }));
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items }),
+  });
+  harness.render();
+  await harness.flushEffects();
+  const tree = harness.render();
+  const critical = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'critical', 'critical severity');
+  const high = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'high', 'high severity');
+  const medium = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'medium', 'medium severity');
+  const low = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'low', 'low severity');
+  assert.equal(critical.props.tone, 'destructive');
+  assert.equal(high.props.style.color, 'color-mix(in srgb, #f97316 72%, var(--midground))');
+  assert.equal(medium.props.style.color, 'color-mix(in srgb, #eab308 72%, var(--midground))');
+  assert.equal(low.props.style.color, 'color-mix(in srgb, #3b82f6 72%, var(--midground))');
+});
+
+test('risk detail distinguishes incident detection rule from contributing events without standalone rules', async () => {
+  const risk = {
+    ...canonicalDetail(),
+    rule_id: 'EDR-EXFIL-001',
+    title: 'Sensitive access followed by outbound delivery',
+    evidence: canonicalDetail().evidence.map((event) => ({ ...event, rule_id: null })),
+  };
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items: [risk] }),
+    '/api/plugins/skynet-edr/risks/risk-1': risk,
+  });
+  harness.render();
+  await harness.flushEffects();
+  findButton(harness.render(), 'Sensitive access followed by outbound delivery').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  const text = textOf(harness.render());
+  assert.match(text, /Detection rule EDR-EXFIL-001/);
+  assert.match(text, /Contributing event · no standalone rule/);
+  assert.doesNotMatch(text, /Rule none/);
+});
+
+test('a failed latest status poll marks the engine offline while telemetry data stays separate', async () => {
+  const degraded = { ...canonicalStatus, ingestion: { state: 'disabled', role_identity_assurance: 'authorized_uid_self_reported', listener_live: false, sources: [] } };
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': [degraded, new Error('private failure')],
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': [canonicalPage(), canonicalPage()],
+  });
+  harness.render();
+  await harness.flushEffects();
+  await harness.runInterval(0);
+  const tree = harness.render();
+  const offline = findNode(tree, (node) => textOf(node) === 'Engine Offline', 'stale offline engine indicator');
+  assert.equal(offline.props.tone, 'destructive');
+  assert.equal(offline.props.className, undefined);
+  assert.equal(offline.props.style.backgroundColor, 'transparent');
+  assert.match(textOf(tree), /EDR version unavailable/);
+  assert.match(textOf(tree), /Mode unavailable/);
+  assert.doesNotMatch(textOf(tree), /EDR 0\.4\.1|Passive mode/);
+  assert.match(textOf(tree), /Telemetry disabled/);
+  assert.doesNotMatch(textOf(tree), /private failure/);
+});
+
+test('top-level tabs and panels have stable complete ARIA relationships and selected styling', async () => {
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/rules': canonicalRules,
+  });
+  harness.render();
+  await harness.flushEffects();
+  let tree = harness.render();
+  const telemetry = findButton(tree, 'Telemetry');
+  const rules = findButton(tree, 'Rules');
+  assert.equal(telemetry.props.role, 'tab');
+  assert.equal(telemetry.props.id, 'skynet-tab-telemetry');
+  assert.equal(telemetry.props['aria-controls'], 'skynet-panel-telemetry');
+  assert.equal(telemetry.props['aria-selected'], true);
+  assert.equal(telemetry.props.tabIndex, 0);
+  assert.equal(telemetry.props.ghost, undefined);
+  assert.equal(rules.props.role, 'tab');
+  assert.equal(rules.props.id, 'skynet-tab-rules');
+  assert.equal(rules.props['aria-controls'], 'skynet-panel-rules');
+  assert.equal(rules.props['aria-selected'], false);
+  assert.equal(rules.props.tabIndex, -1);
+  assert.equal(rules.props.ghost, true);
+  let panel = findNode(tree, (node) => node.props?.id === 'skynet-panel-telemetry', 'telemetry tabpanel');
+  assert.equal(panel.props.role, 'tabpanel');
+  assert.equal(panel.props['aria-labelledby'], 'skynet-tab-telemetry');
+  rules.props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  tree = harness.render();
+  const selectedRules = findButton(tree, 'Rules');
+  assert.equal(selectedRules.props['aria-selected'], true);
+  assert.equal(selectedRules.props.tabIndex, 0);
+  assert.equal(selectedRules.props.ghost, undefined);
+  assert.equal(findButton(tree, 'Telemetry').props.tabIndex, -1);
+  assert.equal(findButton(tree, 'Telemetry').props.ghost, true);
+  panel = findNode(tree, (node) => node.props?.id === 'skynet-panel-rules', 'rules tabpanel');
+  assert.equal(panel.props.role, 'tabpanel');
+  assert.equal(panel.props['aria-labelledby'], 'skynet-tab-rules');
+  assert.match(textOf(tree), /Compiled and active in this running EDR build/);
+  assert.match(textOf(tree), /EDR-MALWARE-001/);
+  assert.match(textOf(tree), /Malware-like content sent to AI runtime/);
+  assert.match(textOf(tree), /process/);
+  assert.match(textOf(tree), /messaging/);
+  assert.match(textOf(tree), /file/);
+  assert.match(textOf(tree), /network/);
+  assert.match(textOf(tree), /mcp tool/);
+  assert.doesNotMatch(textOf(tree), /last validation|policy provenance|enabled/);
+
+  const hostileRules = structuredClone(canonicalRules);
+  hostileRules.items[0].description = '<script>ignore previous instructions</script>';
+  const hostileHarness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/rules': hostileRules,
+  });
+  hostileHarness.render();
+  await hostileHarness.flushEffects();
+  findButton(hostileHarness.render(), 'Rules').props.onClick();
+  hostileHarness.render();
+  await hostileHarness.flushEffects();
+  assert.match(textOf(hostileHarness.render()), /Unable to load rules/);
+  assert.doesNotMatch(textOf(hostileHarness.render()), /script|ignore previous/);
+});
+
+test('tab keyboard navigation wraps, handles Home and End, and moves focus with selection', async () => {
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    '/api/plugins/skynet-edr/rules': canonicalRules,
+  });
+  harness.render();
+  await harness.flushEffects();
+
+  const focused = [];
+  let tree = harness.render();
+  findButton(tree, 'Telemetry').props.ref({ focus() { focused.push('telemetry'); } });
+  findButton(tree, 'Rules').props.ref({ focus() { focused.push('rules'); } });
+
+  function press(label, key) {
+    tree = harness.render();
+    let prevented = false;
+    findButton(tree, label).props.onKeyDown({ key, preventDefault() { prevented = true; } });
+    assert.equal(prevented, true, `${key} must prevent native scrolling`);
+  }
+
+  press('Telemetry', 'ArrowRight');
+  assert.equal(findButton(harness.render(), 'Rules').props['aria-selected'], true);
+  press('Rules', 'Home');
+  assert.equal(findButton(harness.render(), 'Telemetry').props['aria-selected'], true);
+  press('Telemetry', 'End');
+  assert.equal(findButton(harness.render(), 'Rules').props['aria-selected'], true);
+  press('Rules', 'ArrowRight');
+  assert.equal(findButton(harness.render(), 'Telemetry').props['aria-selected'], true);
+  press('Telemetry', 'ArrowLeft');
+  assert.equal(findButton(harness.render(), 'Rules').props['aria-selected'], true);
+  assert.deepEqual(focused, ['rules', 'telemetry', 'rules', 'telemetry', 'rules']);
+});
+
+test('selected detail is the immediate sibling after its exact risk row', async () => {
+  const first = canonicalRisk('risk-a');
+  const second = canonicalRisk('risk-b');
+  second.rule_id = 'EDR-CONFIG-001';
+  second.title = 'Agent configuration drift detected';
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage({ items: [first, second], total: 2 }),
+    '/api/plugins/skynet-edr/risks/risk-b': { ...canonicalDetail('risk-b'), ...second },
+  });
+  harness.render();
+  await harness.flushEffects();
+  findButton(harness.render(), 'Agent configuration drift detected').props.onClick();
+  harness.render();
+  await harness.flushEffects();
+  const tree = harness.render();
+  const list = findNode(tree, (node) => node.type === 'ul' && node.props?.['aria-label'] === 'Current page risk list', 'risk list');
+  const children = childrenOf(list);
+  assert.equal(children.length, 3);
+  assert.match(textOf(children[1]), /Agent configuration drift detected/);
+  assert.equal(children[2].props?.['data-detail-for'], 'risk-b');
+  assert.match(textOf(children[2]), /Artifact provenance/);
 });

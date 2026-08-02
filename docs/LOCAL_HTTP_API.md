@@ -16,6 +16,7 @@ Phase 11 adds a tiny HTML console router on top of the same Phase 10 API project
 - The HTTP listener startup preflights the configured SQLite store read-only and fails closed on missing, empty, WAL-mode, or incompatible schema without creating a DB, WAL, SHM, schema, or indexes. Active HTTP requests inspect the SQLite header before opening SQLite, then use a read-only, `query_only` connection. `/api/status`, `/api/v1/risks`, and `/api/v1/risks/<id>` are the bounded Risk Explorer paths.
 - The v0.4 local operator store intentionally prefers a verifiable no-sidecar read path over WAL reader/writer concurrency. Readers produce no `-wal`/`-shm` sidecars; short writer/read contention may return a generic unavailable response rather than weakening the read-only posture.
 - Legacy investigation endpoints such as `/api/incidents`, `/api/incidents/<id>`, and `/api/config-drift` remain compatibility visibility surfaces and may materialize stored collections or full stored incidents; they should not be treated as fully bounded Risk Explorer APIs.
+- `/api/status` includes the daemon crate version compiled into the running binary; dashboard package metadata is not used as runtime version authority.
 - Missing incidents return `404 not_found`, not a storage error.
 
 This API is an operator visibility interface, not a control plane.
@@ -28,6 +29,7 @@ This API is an operator visibility interface, not a control plane.
 | `/api/incidents` | `GET` | Compact incident summaries. |
 | `/api/incidents/<id>` | `GET` | One redacted stored incident. |
 | `/api/rules` | `GET` | Built-in rule metadata. |
+| `/api/v1/rules` | `GET` | Bounded metadata for detectors compiled and active in this running build. |
 | `/api/sensors` | `GET` | Available sensor metadata. |
 | `/api/config-drift` | `GET` | Redacted config drift findings. |
 | `/api/v1/risks?limit=<n>&offset=<n>` | `GET` | Bounded Hermes/Desktop risk list projection. |
@@ -43,7 +45,7 @@ The large offset ceiling intentionally matches JavaScript `Number.MAX_SAFE_INTEG
 
 Risk list pagination is bounded in SQLite using `updated_at_unix_ms DESC, id ASC` order before risk projection. The API still caps `limit` at 100 and `offset` at `9007199254740991`.
 
-Risk detail evidence is an allowlisted projection: event id, timestamp, severity, event type, deterministic event label derived from canonical event type, sensor, explicit typed artifact metadata or conservative unknown artifact fallback, trust level, rule id, redaction count, and known boolean/enum triage indicators. Risk titles are deterministic labels derived from allowlisted rule IDs, and risk summaries are generated from trusted scalar metadata only. Artifact labels are recomputed from fixed `ArtifactKind` constants; stored `display_label` is not trusted. Provider, locator hash, trust level, event type, rule id, sensor, integration, and trace IDs are validated before exposure. It does not expose arbitrary attributes, raw details, stored incident titles/summaries, stored event titles, message/email bodies, prompt text, command text, raw URLs, repository locators, local paths, credentials, or hostile content.
+Risk detail evidence is an allowlisted projection: event id, timestamp, severity, event type, deterministic event label derived from canonical event type, sensor, explicit typed artifact metadata or conservative unknown artifact fallback, trust level, rule id, redaction count, and known boolean/enum triage indicators. Risk titles are deterministic labels derived from allowlisted rule IDs, and risk summaries are generated from trusted scalar metadata only. Incident-level rule IDs are projected only when stored evidence reproduces a compiled built-in sequence, EXFIL, or malware correlator result with the same deterministic incident ID. Incident ID prefixes and event-level `rule_id` metadata are not incident detector provenance; event rule IDs remain evidence-row metadata only. Artifact labels are recomputed from fixed `ArtifactKind` constants; stored `display_label` is not trusted. Provider, locator hash, trust level, event type, rule id, sensor, integration, and trace IDs are validated before exposure. It does not expose arbitrary attributes, raw details, stored incident titles/summaries, stored event titles, message/email bodies, prompt text, command text, raw URLs, repository locators, local paths, credentials, or hostile content.
 
 ## Console routes
 

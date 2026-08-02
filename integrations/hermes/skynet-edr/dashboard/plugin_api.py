@@ -52,7 +52,7 @@ def _bounded_page(limit: int, offset: int) -> dict[str, int]:
 
 
 def _valid_upstream_path(path: str) -> bool:
-    if path in {"/api/status", "/api/v1/risks"}:
+    if path in {"/api/status", "/api/v1/risks", "/api/v1/rules"}:
         return True
     prefix = "/api/v1/risks/"
     if not path.startswith(prefix):
@@ -123,3 +123,8 @@ def risk_detail(risk_id: str) -> Any:
 @router.get("/status")
 def status() -> Any:
     return _upstream("/api/status")
+
+
+@router.get("/rules")
+def rules() -> Any:
+    return _upstream("/api/v1/rules")
