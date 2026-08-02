@@ -506,15 +506,17 @@
     }
   }
 
-  function severityVariant(value) {
+  function severityTone(value) {
     if (value === "critical" || value === "high") return "destructive";
-    if (value === "medium") return "default";
-    return "secondary";
+    if (value === "medium") return "warning";
+    if (value === "low") return "secondary";
+    return "outline";
   }
 
-  function statusVariant(value) {
-    if (value === "open" || value === "investigating") return "destructive";
-    if (value === "contained") return "default";
+  function statusTone(value) {
+    if (value === "open") return "destructive";
+    if (value === "investigating") return "warning";
+    if (value === "contained" || value === "resolved") return "success";
     return "secondary";
   }
 
@@ -580,7 +582,7 @@
 
   function SourceBadge(props) {
     const presentation = sourcePresentation(props.kind);
-    return h(Badge, { variant: "outline", title: ARTIFACT_LABELS[props.kind] || ARTIFACT_LABELS.unknown },
+    return h(Badge, { tone: "outline", title: ARTIFACT_LABELS[props.kind] || ARTIFACT_LABELS.unknown },
       presentation.glyph + " " + presentation.label
     );
   }
@@ -631,8 +633,8 @@
         range + " · returned " + countText(page.returned)
       ),
       h("div", { className: "flex gap-2" },
-        h(Button, { type: "button", variant: "outline", onClick: props.onPrevious, disabled: props.historyLength < 1 && page.offset <= 0, "aria-label": "Previous page" }, "Previous"),
-        h(Button, { type: "button", variant: "outline", onClick: props.onNext, disabled: page.has_more !== true || page.offset >= MAX_OFFSET, "aria-label": "Next page" }, "Next")
+        h(Button, { type: "button", outlined: true, onClick: props.onPrevious, disabled: props.historyLength < 1 && page.offset <= 0, "aria-label": "Previous page" }, "Previous"),
+        h(Button, { type: "button", outlined: true, onClick: props.onNext, disabled: page.has_more !== true || page.offset >= MAX_OFFSET, "aria-label": "Next page" }, "Next")
       )
     );
   }
@@ -651,12 +653,12 @@
       h("button", buttonProps,
         h("span", { className: "flex flex-wrap items-start justify-between gap-2" },
           h("span", { className: "font-semibold" }, risk.title),
-          h(Badge, { variant: severityVariant(risk.severity) }, labelFor(risk.severity))
+          h(Badge, { tone: severityTone(risk.severity) }, labelFor(risk.severity))
         ),
         h("span", { className: "flex flex-wrap gap-2" },
           h(SourceBadge, { kind: risk.artifact.kind }),
-          h(Badge, { variant: statusVariant(risk.status) }, labelFor(risk.status)),
-          h(Badge, { variant: "outline" }, "Rule " + displayText(risk.rule_id, "none"))
+          h(Badge, { tone: statusTone(risk.status) }, labelFor(risk.status)),
+          h(Badge, { tone: "outline" }, "Rule " + displayText(risk.rule_id, "none"))
         ),
         h("span", { className: "text-xs text-muted-foreground" },
           "Sensor " + risk.sensor.sensor + " · events " + countText(risk.event_count) + " · last observed " + formatTime(risk.last_observed_at_unix_ms)
@@ -714,15 +716,15 @@
                 h("div", { className: "font-medium", style: WRAP_ANYWHERE_STYLE }, event.title),
                 h("div", { className: "mt-1 text-xs text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, formatTime(event.timestamp_unix_ms) + " · event " + event.event_id)
               ),
-              h(Badge, { variant: severityVariant(event.severity) }, labelFor(event.severity))
+              h(Badge, { tone: severityTone(event.severity) }, labelFor(event.severity))
             ),
             h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
               h(SourceBadge, { kind: event.artifact.kind }),
-              h(Badge, { variant: "outline" }, "Type " + displayText(event.event_type)),
-              h(Badge, { variant: "outline" }, "Trust " + labelFor(event.trust_level)),
-              h(Badge, { variant: event.redaction.contains_sensitive_data ? "destructive" : "secondary" }, "Redactions " + countText(event.redaction.redacted_count)),
+              h(Badge, { tone: "outline" }, "Type " + displayText(event.event_type)),
+              h(Badge, { tone: "outline" }, "Trust " + labelFor(event.trust_level)),
+              h(Badge, { tone: event.redaction.contains_sensitive_data ? "destructive" : "secondary" }, "Redactions " + countText(event.redaction.redacted_count)),
               (badges.length ? badges : ["No allowlisted indicators"]).map(function (label) {
-                return h(Badge, { key: label, variant: "secondary" }, label);
+                return h(Badge, { key: label, tone: "secondary" }, label);
               })
             ),
             h("p", { className: "mt-2 text-xs text-muted-foreground", style: WRAP_ANYWHERE_STYLE },
@@ -742,7 +744,7 @@
             h(CardTitle, { id: "skynet-risk-detail-heading", className: "text-lg" }, title),
             h("div", { className: "flex flex-wrap gap-2" },
               badges,
-              h(Button, { type: "button", variant: "outline", onClick: props.onClose, "aria-label": "Close selected risk detail" }, "Close detail")
+              h(Button, { type: "button", outlined: true, onClick: props.onClose, "aria-label": "Close selected risk detail" }, "Close detail")
             )
           )
         ),
@@ -763,8 +765,8 @@
     if (!risk) return null;
     return panel(risk.title, [
       h(SourceBadge, { key: "source", kind: risk.artifact.kind }),
-      h(Badge, { key: "severity", variant: severityVariant(risk.severity) }, labelFor(risk.severity)),
-      h(Badge, { key: "status", variant: statusVariant(risk.status) }, labelFor(risk.status)),
+      h(Badge, { key: "severity", tone: severityTone(risk.severity) }, labelFor(risk.severity)),
+      h(Badge, { key: "status", tone: statusTone(risk.status) }, labelFor(risk.status)),
     ], h(CardContent, { className: "grid min-w-0 gap-4", style: MIN_WIDTH_ZERO_STYLE },
       resource.error ? h("div", { role: "status", "aria-live": "polite", className: "rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm" }, "Stale detail: the latest refresh is unavailable; cached validated detail remains visible.") : null,
       h("p", { className: "text-sm text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, risk.summary),
@@ -772,9 +774,9 @@
         h("h4", { className: "text-sm font-semibold" }, "Passive read-only context"),
         h("p", { className: "mt-1 text-sm text-muted-foreground" }, "This Web Dashboard view displays only validated redacted API projections. It provides refresh and navigation, never containment or mutation controls."),
         h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
-          h(Badge, { variant: "outline" }, "Confidence: Not assessed"),
-          h(Badge, { variant: risk.contains_sensitive_data ? "destructive" : "secondary" }, risk.contains_sensitive_data ? "Sensitive data redacted" : "No sensitive flag"),
-          h(Badge, { variant: "secondary" }, "Events " + countText(risk.event_count))
+          h(Badge, { tone: "outline" }, "Confidence: Not assessed"),
+          h(Badge, { tone: risk.contains_sensitive_data ? "destructive" : "secondary" }, risk.contains_sensitive_data ? "Sensitive data redacted" : "No sensitive flag"),
+          h(Badge, { tone: "secondary" }, "Events " + countText(risk.event_count))
         )
       ),
       h("div", { className: "grid min-w-0 gap-3 xl:grid-cols-2", style: MIN_WIDTH_ZERO_STYLE },
@@ -795,7 +797,7 @@
       h("section", { "aria-labelledby": "skynet-traces-heading", style: MIN_WIDTH_ZERO_STYLE },
         h("h4", { id: "skynet-traces-heading", className: "mb-2 text-sm font-semibold" }, "Trace IDs"),
         risk.trace_ids.length
-          ? h("div", { className: "flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE }, risk.trace_ids.map(function (trace) { return h(Badge, { key: trace, variant: "outline", style: WRAP_ANYWHERE_STYLE }, trace); }))
+          ? h("div", { className: "flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE }, risk.trace_ids.map(function (trace) { return h(Badge, { key: trace, tone: "outline", style: WRAP_ANYWHERE_STYLE }, trace); }))
           : h("p", { className: "text-sm text-muted-foreground" }, "No trace IDs in this bounded projection.")
       ),
       h(Separator, null),
@@ -853,7 +855,7 @@
         return h("li", { key: rule.id }, h(Card, null,
           h(CardHeader, null, h("div", { className: "flex flex-wrap items-start justify-between gap-2" },
             h(CardTitle, { className: "text-base" }, rule.name),
-            h(Badge, { variant: severityVariant(rule.severity) }, labelFor(rule.severity))
+            h(Badge, { tone: severityTone(rule.severity) }, labelFor(rule.severity))
           )),
           h(CardContent, { className: "grid gap-2 text-sm" },
             h("p", { className: "font-mono" }, rule.id),
@@ -1017,21 +1019,21 @@
       h("header", { className: "flex flex-wrap items-start justify-between gap-4" },
         h("div", { className: "max-w-3xl" },
           h("div", { className: "mb-2 flex flex-wrap gap-2" },
-            h(Badge, { variant: "outline" }, versionLabel),
-            h(Badge, { variant: engineChecking ? "outline" : (engineOnline ? "default" : "destructive"), className: engineChecking ? "text-muted-foreground" : undefined }, engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
-            h(Badge, { variant: mode === "active" ? "default" : (mode === "passive" ? "secondary" : "outline"), className: mode ? undefined : "text-muted-foreground" }, mode ? labelFor(mode).replace(/^./, function (value) { return value.toUpperCase(); }) + " mode" : "Mode unavailable"),
-            h(Badge, { variant: health.error || risks.error ? "destructive" : "secondary" }, backendHealth(health, risks))
+            h(Badge, { tone: "outline" }, versionLabel),
+            h(Badge, { tone: engineChecking ? "outline" : (engineOnline ? "success" : "destructive"), className: engineChecking ? "text-muted-foreground" : undefined }, engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
+            h(Badge, { tone: mode === "active" ? "success" : (mode === "passive" ? "warning" : "outline"), className: mode ? undefined : "text-muted-foreground" }, mode ? labelFor(mode).replace(/^./, function (value) { return value.toUpperCase(); }) + " mode" : "Mode unavailable"),
+            h(Badge, { tone: health.error || risks.error ? "destructive" : (health.data && risks.data ? "success" : "outline") }, backendHealth(health, risks))
           ),
           h("h2", { id: "skynet-risk-heading", className: "text-2xl font-semibold tracking-tight" }, "Skynet-EDR Risk Explorer"),
           h("p", { className: "mt-2 text-sm text-muted-foreground" }, "Redacted skynet.risk.v1 projections from the local Skynet-EDR service. Search and filters apply to the current server page. Raw prompts, commands, destinations, paths and arbitrary attributes are never rendered.")
         ),
-        h(Button, { type: "button", variant: "outline", onClick: refreshAll, disabled: refreshing, "aria-label": "Refresh Risk Explorer" }, refreshing ? "Refreshing…" : "Refresh")
+        h(Button, { type: "button", outlined: true, onClick: refreshAll, disabled: refreshing, "aria-label": "Refresh Risk Explorer" }, refreshing ? "Refreshing…" : "Refresh")
       ),
       h("div", { role: "tablist", "aria-label": "Skynet-EDR dashboard sections", className: "flex gap-2 border-b pb-2" },
         h(Button, {
           type: "button", id: "skynet-tab-telemetry", role: "tab", "aria-controls": "skynet-panel-telemetry",
           "aria-selected": activeTab === "telemetry", tabIndex: activeTab === "telemetry" ? 0 : -1,
-          variant: activeTab === "telemetry" ? "default" : "ghost",
+          ghost: activeTab === "telemetry" ? undefined : true,
           ref: function (node) { setTabRef("telemetry", node); },
           onClick: function () { setActiveTab("telemetry"); },
           onKeyDown: function (event) { onTabKeyDown(event, "telemetry"); },
@@ -1039,7 +1041,7 @@
         h(Button, {
           type: "button", id: "skynet-tab-rules", role: "tab", "aria-controls": "skynet-panel-rules",
           "aria-selected": activeTab === "rules", tabIndex: activeTab === "rules" ? 0 : -1,
-          variant: activeTab === "rules" ? "default" : "ghost",
+          ghost: activeTab === "rules" ? undefined : true,
           ref: function (node) { setTabRef("rules", node); },
           onClick: function () { setActiveTab("rules"); },
           onKeyDown: function (event) { onTabKeyDown(event, "rules"); },

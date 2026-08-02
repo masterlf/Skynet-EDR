@@ -158,9 +158,21 @@ function createHarness(plans = {}) {
     },
   };
   const components = {};
-  for (const name of ['Card', 'CardHeader', 'CardTitle', 'CardContent', 'Badge', 'Button', 'Input', 'Label', 'Select', 'SelectOption', 'Separator', 'Tabs', 'TabsList', 'TabsTrigger']) {
+  for (const name of ['Card', 'CardHeader', 'CardTitle', 'CardContent', 'Input', 'Label', 'Select', 'SelectOption', 'Separator', 'Tabs', 'TabsList', 'TabsTrigger']) {
     components[name] = name;
   }
+  components.Badge = function Badge(props) {
+    assert.equal(Object.hasOwn(props, 'variant'), false, 'Badge does not support variant');
+    assert.ok(['default', 'destructive', 'outline', 'secondary', 'success', 'warning'].includes(props.tone || 'default'), `unsupported Badge tone: ${props.tone}`);
+    return { type: 'Badge', props };
+  };
+  components.Button = function Button(props) {
+    assert.equal(Object.hasOwn(props, 'variant'), false, 'Button does not support variant');
+    for (const name of ['ghost', 'outlined', 'destructive', 'invert']) {
+      assert.ok(props[name] === undefined || typeof props[name] === 'boolean', `Button ${name} must be boolean`);
+    }
+    return { type: 'Button', props };
+  };
 
   async function materialize(next) {
     if (next instanceof Error) throw next;
@@ -954,21 +966,32 @@ test('Previous follows exact history and a filter reset returns to offset zero',
   assert.equal(riskCalls.at(-1), '/api/plugins/skynet-edr/risks?limit=50&offset=0');
 });
 
-test('header uses host theme semantic badge variants for engine and mode status', async () => {
+test('dashboard uses only the installed host Badge and Button styling contracts', () => {
+  assert.doesNotMatch(source, /h\((?:Badge|Button),\s*\{[^}]*\bvariant\s*:/);
+});
+
+test('header uses semantic host badge tones for engine and mode status', async () => {
   const harness = createHarness({
     '/api/plugins/skynet-edr/status': canonicalStatus,
     '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
   });
-  harness.render();
+  const checkingTree = harness.render();
+  assert.equal(findNode(checkingTree, (node) => textOf(node) === 'Engine checking', 'checking engine indicator').props.tone, 'outline');
+  assert.equal(findNode(checkingTree, (node) => textOf(node) === 'Mode unavailable', 'checking mode indicator').props.tone, 'outline');
   await harness.flushEffects();
   const tree = harness.render();
   assert.match(textOf(tree), /EDR 0\.4\.1/);
   const online = findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator');
-  assert.equal(online.props.variant, 'default');
+  assert.equal(online.props.tone, 'success');
   assert.equal(online.props.className, undefined);
   const passive = findNode(tree, (node) => textOf(node) === 'Passive mode', 'passive mode indicator');
-  assert.equal(passive.props.variant, 'secondary');
+  assert.equal(passive.props.tone, 'warning');
   assert.equal(passive.props.className, undefined);
+  assert.equal(findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'high', 'high severity indicator').props.tone, 'destructive');
+  assert.equal(findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'open', 'open status indicator').props.tone, 'destructive');
+  assert.equal(findButton(tree, 'Refresh').props.outlined, true);
+  assert.equal(findButton(tree, 'Previous').props.outlined, true);
+  assert.equal(findButton(tree, 'Next').props.outlined, true);
 
   const activeHarness = createHarness({
     '/api/plugins/skynet-edr/status': { ...canonicalStatus, run_mode: 'active' },
@@ -977,7 +1000,7 @@ test('header uses host theme semantic badge variants for engine and mode status'
   activeHarness.render();
   await activeHarness.flushEffects();
   const active = findNode(activeHarness.render(), (node) => textOf(node) === 'Active mode', 'active mode indicator');
-  assert.equal(active.props.variant, 'default');
+  assert.equal(active.props.tone, 'success');
   assert.equal(active.props.className, undefined);
 
   const invalid = { ...canonicalStatus, version: '<script>bad</script>' };
@@ -989,8 +1012,10 @@ test('header uses host theme semantic badge variants for engine and mode status'
   await invalidHarness.flushEffects();
   const invalidTree = invalidHarness.render();
   const offline = findNode(invalidTree, (node) => textOf(node) === 'Engine Offline', 'offline engine indicator');
-  assert.equal(offline.props.variant, 'destructive');
+  assert.equal(offline.props.tone, 'destructive');
   assert.equal(offline.props.className, undefined);
+  assert.equal(findNode(invalidTree, (node) => textOf(node) === 'Mode unavailable', 'unavailable mode indicator').props.tone, 'outline');
+  assert.equal(findNode(invalidTree, (node) => textOf(node) === 'EDR version unavailable', 'unavailable version indicator').props.tone, 'outline');
   assert.doesNotMatch(textOf(invalidTree), /script|bad/);
 });
 
@@ -1005,7 +1030,7 @@ test('a failed latest status poll marks the engine offline while telemetry data 
   await harness.runInterval(0);
   const tree = harness.render();
   const offline = findNode(tree, (node) => textOf(node) === 'Engine Offline', 'stale offline engine indicator');
-  assert.equal(offline.props.variant, 'destructive');
+  assert.equal(offline.props.tone, 'destructive');
   assert.equal(offline.props.className, undefined);
   assert.match(textOf(tree), /EDR version unavailable/);
   assert.match(textOf(tree), /Mode unavailable/);
@@ -1030,13 +1055,13 @@ test('top-level tabs and panels have stable complete ARIA relationships and sele
   assert.equal(telemetry.props['aria-controls'], 'skynet-panel-telemetry');
   assert.equal(telemetry.props['aria-selected'], true);
   assert.equal(telemetry.props.tabIndex, 0);
-  assert.equal(telemetry.props.variant, 'default');
+  assert.equal(telemetry.props.ghost, undefined);
   assert.equal(rules.props.role, 'tab');
   assert.equal(rules.props.id, 'skynet-tab-rules');
   assert.equal(rules.props['aria-controls'], 'skynet-panel-rules');
   assert.equal(rules.props['aria-selected'], false);
   assert.equal(rules.props.tabIndex, -1);
-  assert.equal(rules.props.variant, 'ghost');
+  assert.equal(rules.props.ghost, true);
   let panel = findNode(tree, (node) => node.props?.id === 'skynet-panel-telemetry', 'telemetry tabpanel');
   assert.equal(panel.props.role, 'tabpanel');
   assert.equal(panel.props['aria-labelledby'], 'skynet-tab-telemetry');
@@ -1047,9 +1072,9 @@ test('top-level tabs and panels have stable complete ARIA relationships and sele
   const selectedRules = findButton(tree, 'Rules');
   assert.equal(selectedRules.props['aria-selected'], true);
   assert.equal(selectedRules.props.tabIndex, 0);
-  assert.equal(selectedRules.props.variant, 'default');
+  assert.equal(selectedRules.props.ghost, undefined);
   assert.equal(findButton(tree, 'Telemetry').props.tabIndex, -1);
-  assert.equal(findButton(tree, 'Telemetry').props.variant, 'ghost');
+  assert.equal(findButton(tree, 'Telemetry').props.ghost, true);
   panel = findNode(tree, (node) => node.props?.id === 'skynet-panel-rules', 'rules tabpanel');
   assert.equal(panel.props.role, 'tabpanel');
   assert.equal(panel.props['aria-labelledby'], 'skynet-tab-rules');
