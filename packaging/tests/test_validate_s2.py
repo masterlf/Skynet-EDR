@@ -94,6 +94,67 @@ class ValidateS2Tests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched")
             self.assertFalse(output.exists())
 
+    def run_retained_fd_race(self, swap_after_first_write):
+        with self.private_temp() as temp:
+            root = Path(temp)
+            output = root / "report"
+            probe = root / "probe.py"
+            probe.write_text(
+                "import json, os, pathlib, subprocess, sys\n"
+                "root=pathlib.Path(sys.argv[1]); helper=sys.argv[2]\n"
+                "token=json.loads(os.environ['S2_REPORT_TOKEN'])\n"
+                "stage=pathlib.Path(token['stage']); retained=pathlib.Path(os.environ['S2_REPORT_STAGE'])\n"
+                "if sys.argv[3]=='mid': (retained/'before').write_text('original')\n"
+                "stage.rename(root/'detached'); substitute=root/'substitute'; substitute.mkdir(mode=0o700); (substitute/'sentinel').write_text('untouched'); stage.symlink_to(substitute, target_is_directory=True)\n"
+                "(retained/'after').write_text('original')\n"
+                "result=subprocess.run(['python3',helper,'publish-fd',str(root/'report'),os.environ['S2_REPORT_TOKEN']],text=True,capture_output=True)\n"
+                "assert result.returncode != 0\n"
+                "assert (substitute/'sentinel').read_text() == 'untouched'\n"
+                "assert sorted(p.name for p in substitute.iterdir()) == ['sentinel']\n",
+                encoding="utf-8",
+            )
+            phase = "mid" if swap_after_first_write else "before"
+            result = self.helper("exec", output, "python3", probe, root, REPORT_HELPER, phase)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_retained_stage_descriptor_blocks_swap_before_first_write(self):
+        self.run_retained_fd_race(False)
+
+    def test_retained_stage_descriptor_blocks_swap_mid_run(self):
+        self.run_retained_fd_race(True)
+
+    def run_retained_parent_race(self, swap_after_first_write):
+        with self.private_temp() as temp:
+            base = Path(temp)
+            parent = base / "parent"
+            parent.mkdir(mode=0o700)
+            output = parent / "report"
+            probe = base / "parent_probe.py"
+            probe.write_text(
+                "import json, os, pathlib, subprocess, sys\n"
+                "parent=pathlib.Path(sys.argv[1]); helper=sys.argv[2]\n"
+                "retained=pathlib.Path(os.environ['S2_REPORT_STAGE'])\n"
+                "if sys.argv[3]=='mid': (retained/'before').write_text('original')\n"
+                "parent.rename(parent.with_name('detached-parent')); parent.mkdir(mode=0o700); (parent/'sentinel').write_text('untouched')\n"
+                "(retained/'after').write_text('original')\n"
+                "result=subprocess.run(['python3',helper,'publish-fd',str(parent/'report'),os.environ['S2_REPORT_TOKEN']],text=True,capture_output=True)\n"
+                "assert result.returncode != 0 or (parent.with_name('detached-parent')/'report').is_dir()\n"
+                "assert sorted(p.name for p in parent.iterdir()) == ['sentinel']\n",
+                encoding="utf-8",
+            )
+            phase = "mid" if swap_after_first_write else "before"
+            result = self.helper("exec", output, "python3", probe, parent, REPORT_HELPER, phase)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((parent / "sentinel").read_text(encoding="utf-8"), "untouched")
+            self.assertFalse(output.exists())
+
+    def test_retained_descriptors_do_not_touch_swapped_ancestor_before_first_write(self):
+        self.run_retained_parent_race(False)
+
+    def test_retained_descriptors_do_not_touch_swapped_ancestor_mid_run(self):
+        self.run_retained_parent_race(True)
+
     def test_report_seal_fails_closed_on_environment_secret_and_hostile_diagnostic(self):
         with self.private_temp() as temp:
             report = Path(temp) / "stage"

@@ -2,33 +2,35 @@
 set -u
 umask 077
 
-usage() { echo "usage: $0 --output ABSOLUTE_PATH" >&2; exit 2; }
-[ "$#" -eq 2 ] && [ "$1" = "--output" ] || usage
-OUTPUT=$2
-
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 cd "$REPO" || exit 2
 HELPER="$REPO/packaging/scripts/s2-report-dir.py"
-if ! python3 "$HELPER" check "$OUTPUT"; then
-  echo "unsafe output path: $OUTPUT" >&2
-  exit 2
+usage() { echo "usage: $0 --output ABSOLUTE_PATH" >&2; exit 2; }
+if [ "$#" -eq 2 ] && [ "$1" = "--output" ]; then
+  OUTPUT=$2
+  if ! python3 "$HELPER" check "$OUTPUT"; then
+    echo "unsafe output path: $OUTPUT" >&2
+    exit 2
+  fi
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "tracked tree must be clean before S2 validation" >&2
+    exit 2
+  fi
+  exec python3 "$HELPER" exec "$OUTPUT" "$0" --internal "$OUTPUT"
 fi
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-  echo "tracked tree must be clean before S2 validation" >&2
-  exit 2
-fi
-REPORT_TOKEN=$(python3 "$HELPER" prepare "$OUTPUT") || {
-  echo "unsafe output path: $OUTPUT" >&2
-  exit 2
-}
-REPORT_STAGE=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["stage"])' "$REPORT_TOKEN") || exit 2
+[ "$#" -eq 2 ] && [ "$1" = "--internal" ] || usage
+OUTPUT=$2
+: "${S2_REPORT_TOKEN:?missing retained report token}"
+: "${S2_REPORT_STAGE:?missing retained report stage descriptor}"
+REPORT_TOKEN=$S2_REPORT_TOKEN
+REPORT_STAGE=$S2_REPORT_STAGE
 mkdir -m 700 -- "$REPORT_STAGE/logs" || exit 2
 TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/skynet-edr-s2.XXXXXX") || exit 2
 PUBLISHED=0
 cleanup() {
   rm -rf -- "$TMPROOT"
   if [ "$PUBLISHED" -eq 0 ]; then
-    python3 "$HELPER" abort "$OUTPUT" "$REPORT_TOKEN" >/dev/null 2>&1 || true
+    python3 "$HELPER" abort-fd "$OUTPUT" "$REPORT_TOKEN" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -103,7 +105,7 @@ if [ "$OVERALL" -ne 0 ]; then
   echo "S2 validation failed; raw diagnostics deleted and no report published" >&2
   exit 1
 fi
-python3 "$HELPER" seal "$REPORT_STAGE" || exit 1
-python3 "$HELPER" publish "$OUTPUT" "$REPORT_TOKEN" || exit 1
+python3 "$HELPER" seal-fd "$OUTPUT" "$REPORT_TOKEN" || exit 1
+python3 "$HELPER" publish-fd "$OUTPUT" "$REPORT_TOKEN" || exit 1
 PUBLISHED=1
 echo "S2 validation passed; sanitized report: $OUTPUT"

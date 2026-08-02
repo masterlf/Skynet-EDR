@@ -10,7 +10,7 @@ use std::{
 };
 
 use serde_json::Value;
-use skynet_edr_core::LocalStore;
+use skynet_edr_core::{built_in_ai_agent_sequence_rules, parse_canonical_event_json, LocalStore};
 
 #[derive(Debug)]
 struct CanaryAccounting {
@@ -164,12 +164,14 @@ candidate_limit = 10000
     let producer: Value = serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
     let projection_runner = root.join("desktop_projection_canary.mjs");
     fs::write(&projection_runner, DESKTOP_PROJECTION_CANARY).unwrap();
+    let projection_started = Instant::now();
     let projection = Command::new("node")
         .arg(&projection_runner)
         .arg(&repository)
         .arg(&output_path)
         .output()
         .expect("shipped Desktop projection validator runs");
+    let desktop_projection_contract_ms = projection_started.elapsed().as_secs_f64() * 1_000.0;
     assert!(
         projection.status.success(),
         "Desktop projection rejected live Risk response: {}",
@@ -186,11 +188,45 @@ candidate_limit = 10000
     assert_eq!(producer["fallback_records"], 0);
     assert_eq!(producer["queue_drops"], 0);
     assert_eq!(producer["socket_failures"], 0);
+    assert_eq!(
+        producer["ack_status_histogram"]["persisted"],
+        producer["terminal_acks"]
+    );
+    assert!(producer["ack_to_corresponding_risk_stats"]["sample_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 7));
+    assert_eq!(
+        producer["risk_visibility_samples"]
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
+    assert!(producer["fault_evidence"]["queue_drops"].as_u64().unwrap() > 0);
+    assert!(
+        producer["fault_evidence"]["socket_failures"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        producer["fault_evidence"]["fallback_records"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(producer["fault_evidence"]["collision_ack"], "collision");
+    assert!(
+        producer["fault_evidence"]["backlog_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     assert_eq!(producer["real_hermes_runtime"], false);
     let store = LocalStore::open_read_only(&db).expect("durable store opens read-only");
     assert_eq!(
         store.count_events().unwrap(),
-        usize::try_from(producer["generated"].as_u64().unwrap()).unwrap()
+        usize::try_from(producer["generated"].as_u64().unwrap()).unwrap() + 1
     );
     assert_eq!(
         store.count_ingest_receipts().unwrap(),
@@ -225,6 +261,49 @@ candidate_limit = 10000
     }
     assert_eq!(incidents.len(), 10);
 
+    let fault_store = LocalStore::open(root.join("fault-correlation.sqlite"))
+        .expect("isolated correlation fault store opens");
+    let corpus: Value = serde_json::from_slice(
+        &fs::read(
+            repository.join("crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mcp_events = corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["case_id"] == "malicious_mcp")
+        .unwrap()["events"]
+        .as_array()
+        .unwrap();
+    let rules = built_in_ai_agent_sequence_rules();
+    for (index, source) in [0_usize, 0, 1].into_iter().enumerate() {
+        let mut event = mcp_events[source].clone();
+        let event_id = format!("evt_s2_truncation_{index}");
+        event["event_id"] = Value::String(event_id.clone());
+        event["provenance"]["source_event_id"] = Value::String(event_id.clone());
+        event["provenance"]["span_id"] = Value::String(event_id);
+        event["provenance"]["trace_id"] = Value::String("s2-fault-truncation".into());
+        let parsed = parse_canonical_event_json(&event.to_string()).unwrap();
+        fault_store
+            .commit_continuous_event("uid:4242", &parsed, &rules, 1)
+            .unwrap();
+    }
+    let truncations = fault_store
+        .list_incidents()
+        .unwrap()
+        .iter()
+        .filter(|incident| {
+            incident
+                .id
+                .as_str()
+                .contains("continuous-correlation-degraded")
+        })
+        .count() as u64;
+    assert!(truncations > 0, "real bounded correlation fault is durable");
+
     let connection =
         rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
@@ -234,20 +313,12 @@ candidate_limit = 10000
         })
         .unwrap()
         .cast_unsigned();
-    let truncations = incidents
-        .iter()
-        .filter(|incident| {
-            incident
-                .id
-                .as_str()
-                .contains("continuous-correlation-degraded")
-        })
-        .count() as u64;
+    assert!(collisions > 0, "real AF_UNIX collision evidence is durable");
     let accounting = CanaryAccounting::from_observed(
         producer["generated"].as_u64().unwrap(),
         producer["enqueued"].as_u64().unwrap(),
         producer["terminal_acks"].as_u64().unwrap(),
-        store.count_ingest_receipts().unwrap() as u64,
+        store.count_ingest_receipts().unwrap() as u64 - 1,
         producer["queue_drops"].as_u64().unwrap(),
         producer["fallback_records"].as_u64().unwrap(),
         producer["socket_failures"].as_u64().unwrap(),
@@ -271,7 +342,13 @@ candidate_limit = 10000
             "truncations": accounting.truncations,
             "callback_ms": producer["callback_stats"],
             "event_to_ack_ms": producer["ack_stats"],
-            "ack_to_api_visible_ms": producer["ack_to_api_stats"]
+            "ack_to_corresponding_risk_ms": producer["ack_to_corresponding_risk_stats"],
+            "dashboard_fetch_contract_ms": producer["dashboard_fetch_contract_stats"],
+            "desktop_projection_contract_ms": desktop_projection_contract_ms,
+            "ack_status_histogram": producer["ack_status_histogram"],
+            "path_accounting": producer["path_accounting"],
+            "risk_visibility_samples": producer["risk_visibility_samples"],
+            "fault_evidence": producer["fault_evidence"]
         })
     );
 
@@ -331,17 +408,8 @@ candidate_limit = 10000
     let _ = fs::remove_dir_all(root);
 }
 
-#[test]
-fn observed_accounting_preserves_nonzero_fault_evidence() {
-    let accounting = CanaryAccounting::from_observed(9, 8, 7, 6, 1, 2, 3, 4, 5, 6);
-    assert_eq!(accounting.collisions, 4);
-    assert_eq!(accounting.truncations, 5);
-    assert_eq!(accounting.drops, 1);
-    assert_eq!(accounting.backlog, 6);
-}
-
 const PYTHON_CANARY: &str = r"
-import collections,importlib.util,json,os,sys,time,types,urllib.parse
+import collections,copy,importlib.util,json,os,queue,sys,time,types,urllib.parse
 from pathlib import Path
 repo,socket,state,port,out=Path(sys.argv[1]),sys.argv[2],Path(sys.argv[3]),sys.argv[4],Path(sys.argv[5])
 os.environ.update(SKYNET_EDR_STATE_DIR=str(state),SKYNET_EDR_INGEST_SOCKET=socket,SKYNET_EDR_API_PORT=port,SKYNET_EDR_SOCKET_TIMEOUT_MS='1000')
@@ -352,21 +420,6 @@ manifest=json.loads((repo/'crates/skynet-edr-core/tests/fixtures/detections/v1/m
 class C:
  def __init__(self):self.hooks={}
  def register_hook(self,n,c):self.hooks[n]=c
-ctx=C();acks=[];ack_ms=[];ack_at=[];canonical=[];generated=0;callback_ms=[];secret_input_markers=0
-orig_send=plugin._send_frame;orig_write=plugin._write_event
-def observed_send(line):
- started=time.monotonic();status=orig_send(line);ack_ms.append((time.monotonic()-started)*1000);ack_at.append(time.monotonic());acks.append(status);canonical.append(json.loads(line));return status
-def observed_write(**kwargs):
- global generated
- generated+=1
- return orig_write(**kwargs)
-plugin._send_frame=observed_send;plugin._write_event=observed_write;plugin.register(ctx)
-for case in manifest['cases']:
- if case['category'] not in {'malicious','near_miss'}:continue
- plugin._session_trace_id='s2-runtime-'+case['case_id']
- for call in case['producer_calls']:
-  started=time.monotonic();ctx.hooks[call['hook']](*call['args'],**call['kwargs']);callback_ms.append((time.monotonic()-started)*1000)
- plugin._event_queue.join()
 class Router:
  def get(self,path):return lambda f:f
 fast=types.ModuleType('fastapi');fast.APIRouter=Router;fast.Query=lambda default,**kw:default
@@ -374,7 +427,37 @@ class HTTPException(Exception):
  def __init__(self,status_code,detail):self.status_code=status_code;self.detail=detail
 fast.HTTPException=HTTPException;sys.modules['fastapi']=fast
 api=load('skynet_s2_dashboard_api',repo/'integrations/hermes/skynet-edr/dashboard/plugin_api.py')
-baseline_risks=api._upstream('/api/v1/risks',{'limit':50,'offset':0})
+ctx=C();acks=[];ack_ms=[];ack_at_by_event={};canonical=[];generated=0;enqueued=[0];callback_ms=[];secret_input_markers=0;visibility=[];fetch_ms=[]
+orig_send=plugin._send_frame;orig_write=plugin._write_event
+def observed_send(line):
+ event=json.loads(line);started=time.monotonic();status=orig_send(line);finished=time.monotonic();ack_ms.append((finished-started)*1000);ack_at_by_event[event['event_id']]=finished;acks.append(status);canonical.append(event);return status
+def observed_write(**kwargs):
+ global generated
+ generated+=1
+ return orig_write(**kwargs)
+class ObservedQueue:
+ def __init__(self,inner):self.inner=inner
+ def put_nowait(self,item):self.inner.put_nowait(item);enqueued[0]+=1
+ def __getattr__(self,name):return getattr(self.inner,name)
+plugin._event_queue=ObservedQueue(plugin._event_queue);plugin._send_frame=observed_send;plugin._write_event=observed_write;plugin.register(ctx)
+def fetch_risks():
+ started=time.monotonic();value=api._upstream('/api/v1/risks',{'limit':50,'offset':0});fetch_ms.append((time.monotonic()-started)*1000);return value
+for case in manifest['cases']:
+ if case['category'] not in {'malicious','near_miss'}:continue
+ plugin._session_trace_id='s2-runtime-'+case['case_id']
+ start=len(canonical)
+ for call in case['producer_calls']:
+  started=time.monotonic();ctx.hooks[call['hook']](*call['args'],**call['kwargs']);callback_ms.append((time.monotonic()-started)*1000)
+ plugin._event_queue.join()
+ if case['category']=='malicious':
+  trigger=canonical[-1]['event_id'];deadline=time.monotonic()+2
+  while True:
+   visible_at=time.monotonic();page=fetch_risks();risk=next((item for item in page['items'] if case['rule_id'] in item['id']),None)
+   if risk is not None:break
+   assert time.monotonic()<deadline,(case['case_id'],page)
+   time.sleep(.01)
+  visibility.append({'event_id':trigger,'rule_id':case['rule_id'],'risk_id':risk['id'],'latency_ms':(visible_at-ack_at_by_event[trigger])*1000})
+baseline_risks=fetch_risks()
 assert len(baseline_risks['items'])==7,baseline_risks
 for case in manifest['cases']:
  if case['category']!='synthetic_secret':continue
@@ -388,16 +471,23 @@ for case in manifest['cases']:
 plugin._worker_stop.set();plugin._worker_thread.join(timeout=2)
 deadline=time.monotonic()+2
 while True:
- risks=api._upstream('/api/v1/risks',{'limit':50,'offset':0})
+ risks=fetch_risks()
  if len(risks['items'])==10:break
  assert time.monotonic()<deadline,risks
  time.sleep(.01)
-ack_to_api_ms=(time.monotonic()-ack_at[-1])*1000
 risk_details=[api._upstream('/api/v1/risks/'+urllib.parse.quote(item['id'],safe=''),{}) for item in risks['items']]
 def stats(values):
  values=sorted(values);n=len(values);return {'sample_count':n,'p50':values[(n-1)//2],'p95':values[max(0,(95*n+99)//100-1)],'max':values[-1]}
-status_histogram=dict(collections.Counter(acks));drops=plugin._transport_counters['queue_drops']
-result={'generated':generated,'enqueued':generated-drops,'terminal_acks':len(acks),'ack_status_histogram':status_histogram,'persisted_or_duplicate':sum(x in {'persisted','duplicate'} for x in acks),'fallback_records':plugin._transport_counters['fallback_records'],'queue_drops':drops,'socket_failures':plugin._transport_counters['socket_failures'],'backlog':plugin._event_queue.qsize(),'max_callback_ms':max(callback_ms),'callback_stats':stats(callback_ms),'ack_stats':stats(ack_ms),'ack_to_api_stats':stats([ack_to_api_ms]),'baseline_risk_count':len(baseline_risks['items']),'synthetic_secret_incident_count':len(risks['items'])-len(baseline_risks['items']),'dashboard_risk_count':len(risks['items']),'risk_response':risks,'risk_details':risk_details,'canonical_events':canonical,'secret_input_markers':secret_input_markers,'real_hermes_runtime':False,'package_install_runtime':False}
+status_histogram=dict(collections.Counter(acks));normal_generated=generated;normal_enqueued=enqueued[0];normal_counters=dict(plugin._transport_counters);normal_backlog=plugin._event_queue.qsize()
+plugin._ensure_worker=lambda:None;plugin._event_queue=queue.Queue(maxsize=1)
+fault_args={'event_type':'agent.session.started','source_kind':'sensor','trust_level':'sensor_observation','severity':'informational','title':'S2 fault queue probe','attributes':{'fault_probe':True}}
+orig_write(**fault_args);orig_write(**fault_args);plugin._event_queue.get_nowait()
+probe=copy.deepcopy(canonical[0]);probe_id='evt_s2_fault_collision';probe['event_id']=probe_id;probe['provenance']['source_event_id']=probe_id;probe['provenance']['span_id']=probe_id;probe['provenance']['trace_id']='s2-fault-collision';fault_line=json.dumps(probe,separators=(',',':'),sort_keys=True)
+os.environ['SKYNET_EDR_INGEST_SOCKET']=str(state/'missing.sock');socket_status=orig_send(fault_line);plugin._append_fallback(fault_line);os.environ['SKYNET_EDR_INGEST_SOCKET']=socket
+fault_persist_ack=orig_send(fault_line);collision=json.loads(fault_line);collision['observed_at_unix_ms']+=1;collision['received_at_unix_ms']+=1;collision_ack=orig_send(json.dumps(collision,separators=(',',':'),sort_keys=True))
+fault_counters={key:plugin._transport_counters[key]-normal_counters[key] for key in normal_counters};backlog_bytes=plugin._spool_path().stat().st_size-plugin._read_checkpoint(plugin._checkpoint_path())
+fault={'queue_drops':fault_counters['queue_drops'],'socket_failures':fault_counters['socket_failures'],'fallback_records':fault_counters['fallback_records'],'backlog_bytes':backlog_bytes,'fault_persist_ack':fault_persist_ack,'collision_ack':collision_ack}
+result={'generated':normal_generated,'enqueued':normal_enqueued,'terminal_acks':len(acks),'ack_status_histogram':status_histogram,'persisted_or_duplicate':sum(x in {'persisted','duplicate'} for x in acks),'fallback_records':normal_counters['fallback_records'],'queue_drops':normal_counters['queue_drops'],'socket_failures':normal_counters['socket_failures'],'backlog':normal_backlog,'path_accounting':{'enqueue':{'numerator':normal_enqueued,'denominator':normal_generated},'terminal_ack':{'numerator':len(acks),'denominator':normal_enqueued},'durable_ack':{'numerator':sum(x in {'persisted','duplicate'} for x in acks),'denominator':len(acks)}},'fault_evidence':fault,'max_callback_ms':max(callback_ms),'callback_stats':stats(callback_ms),'ack_stats':stats(ack_ms),'ack_to_corresponding_risk_stats':stats([item['latency_ms'] for item in visibility]),'risk_visibility_samples':visibility,'dashboard_fetch_contract_stats':stats(fetch_ms),'baseline_risk_count':len(baseline_risks['items']),'synthetic_secret_incident_count':len(risks['items'])-len(baseline_risks['items']),'dashboard_risk_count':len(risks['items']),'risk_response':risks,'risk_details':risk_details,'canonical_events':canonical,'secret_input_markers':secret_input_markers,'real_hermes_runtime':False,'package_install_runtime':False}
 assert result['max_callback_ms']<50,out
 out.write_text(json.dumps(result,sort_keys=True))
 ";

@@ -28,6 +28,7 @@ const MAX_STRING_BYTES: usize = 64 * 1024;
 const MAX_CASES: usize = 128;
 const MAX_CASE_EVENTS: usize = 64;
 const MAX_CASE_CALLS: usize = 64;
+const MAX_FORBIDDEN_MARKERS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,23 +79,30 @@ fn load_manifest() -> Manifest {
 }
 
 fn parse_manifest_bytes(bytes: &[u8]) -> Result<Manifest, String> {
-    if bytes.len() > MAX_MANIFEST_BYTES {
-        return Err("manifest byte ceiling exceeded".into());
-    }
-    JsonBounds::new(bytes).validate()?;
+    pre_scan_manifest_bytes(bytes)?;
     let manifest: Manifest = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-    if manifest.cases.len() > MAX_CASES
-        || manifest.cases.iter().any(|case| {
-            case.events.len() > MAX_CASE_EVENTS || case.producer_calls.len() > MAX_CASE_CALLS
-        })
-    {
-        return Err("manifest collection ceiling exceeded".into());
-    }
     let mut case_ids = BTreeSet::new();
     if manifest.cases.iter().any(|case| !case_ids.insert(&case.id)) {
         return Err("duplicate case_id".into());
     }
     Ok(manifest)
+}
+
+fn pre_scan_manifest_bytes(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err("manifest byte ceiling exceeded".into());
+    }
+    JsonBounds::new(bytes).validate()
+}
+
+fn semantic_array_limit(key: &str) -> Option<(&'static str, usize)> {
+    match key {
+        "cases" => Some(("cases", MAX_CASES)),
+        "events" => Some(("events", MAX_CASE_EVENTS)),
+        "producer_calls" => Some(("producer_calls", MAX_CASE_CALLS)),
+        "forbidden_markers" => Some(("forbidden_markers", MAX_FORBIDDEN_MARKERS)),
+        _ => None,
+    }
 }
 
 struct JsonBounds<'a> {
@@ -113,7 +121,7 @@ impl<'a> JsonBounds<'a> {
     }
 
     fn validate(mut self) -> Result<(), String> {
-        self.value(0)?;
+        self.value(0, None)?;
         self.whitespace();
         if self.offset != self.input.len() {
             return Err("trailing JSON data".into());
@@ -121,7 +129,11 @@ impl<'a> JsonBounds<'a> {
         Ok(())
     }
 
-    fn value(&mut self, depth: usize) -> Result<(), String> {
+    fn value(
+        &mut self,
+        depth: usize,
+        semantic_limit: Option<(&'static str, usize)>,
+    ) -> Result<(), String> {
         if depth > MAX_JSON_DEPTH {
             return Err("JSON depth ceiling exceeded".into());
         }
@@ -132,7 +144,7 @@ impl<'a> JsonBounds<'a> {
         self.whitespace();
         match self.input.get(self.offset).copied() {
             Some(b'{') => self.object(depth + 1),
-            Some(b'[') => self.array(depth + 1),
+            Some(b'[') => self.array(depth + 1, semantic_limit),
             Some(b'"') => self.string().map(|_| ()),
             Some(_) => self.scalar(),
             None => Err("unexpected end of JSON".into()),
@@ -148,6 +160,7 @@ impl<'a> JsonBounds<'a> {
                 return Ok(());
             }
             let key = self.string()?;
+            let semantic_limit = semantic_array_limit(&key);
             if !keys.insert(key) {
                 return Err("duplicate JSON object key".into());
             }
@@ -155,7 +168,7 @@ impl<'a> JsonBounds<'a> {
             if !self.consume(b':') {
                 return Err("missing object colon".into());
             }
-            self.value(depth)?;
+            self.value(depth, semantic_limit)?;
             self.whitespace();
             if self.consume(b'}') {
                 return Ok(());
@@ -166,14 +179,25 @@ impl<'a> JsonBounds<'a> {
         }
     }
 
-    fn array(&mut self, depth: usize) -> Result<(), String> {
+    fn array(
+        &mut self,
+        depth: usize,
+        semantic_limit: Option<(&'static str, usize)>,
+    ) -> Result<(), String> {
         self.offset += 1;
+        let mut items = 0;
         loop {
             self.whitespace();
             if self.consume(b']') {
                 return Ok(());
             }
-            self.value(depth)?;
+            items += 1;
+            if let Some((label, limit)) = semantic_limit {
+                if items > limit {
+                    return Err(format!("{label} collection ceiling exceeded"));
+                }
+            }
+            self.value(depth, None)?;
             self.whitespace();
             if self.consume(b']') {
                 return Ok(());
@@ -453,6 +477,84 @@ fn manifest_parser_rejects_duplicate_keys_at_every_object_scope() {
     for sample in samples {
         assert!(parse_manifest_bytes(sample.as_bytes()).is_err(), "{sample}");
     }
+}
+
+fn bounded_case(events: usize, calls: usize, markers: usize) -> String {
+    format!(
+        r#"{{"case_id":"a","rule_id":null,"category":"hostile","expected_match":false,"expected_severity":null,"expected_incident_count":0,"forbidden_markers":[{}],"events":[{}],"producer_calls":[{}]}}"#,
+        std::iter::repeat_n(r#""x""#, markers)
+            .collect::<Vec<_>>()
+            .join(","),
+        std::iter::repeat_n("null", events)
+            .collect::<Vec<_>>()
+            .join(","),
+        std::iter::repeat_n("null", calls)
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn bounded_manifest(cases: &[String]) -> String {
+    format!(
+        r#"{{"schema_version":"x","corpus_notice":"x","live_rules":{{}},"cases":[{}]}}"#,
+        cases.join(",")
+    )
+}
+
+#[test]
+fn lexical_pre_scan_enforces_semantic_array_boundaries_before_deserialization() {
+    for (events, calls, markers) in [
+        (MAX_CASE_EVENTS, 0, 0),
+        (0, MAX_CASE_CALLS, 0),
+        (0, 0, MAX_FORBIDDEN_MARKERS),
+    ] {
+        let exact = bounded_manifest(&[bounded_case(events, calls, markers)]);
+        assert!(pre_scan_manifest_bytes(exact.as_bytes()).is_ok());
+    }
+    for (events, calls, markers, expected) in [
+        (MAX_CASE_EVENTS + 1, 0, 0, "events"),
+        (0, MAX_CASE_CALLS + 1, 0, "producer_calls"),
+        (0, 0, MAX_FORBIDDEN_MARKERS + 1, "forbidden_markers"),
+    ] {
+        let over = bounded_manifest(&[bounded_case(events, calls, markers)]);
+        let error = pre_scan_manifest_bytes(over.as_bytes()).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+    let exact_case_values = (0..MAX_CASES)
+        .map(|index| bounded_case(0, 0, 0).replacen("\"a\"", &format!("\"{index}\""), 1))
+        .collect::<Vec<_>>();
+    let exact_cases = bounded_manifest(&exact_case_values);
+    assert!(pre_scan_manifest_bytes(exact_cases.as_bytes()).is_ok());
+    let over_case_values = (0..=MAX_CASES)
+        .map(|index| bounded_case(0, 0, 0).replacen("\"a\"", &format!("\"{index}\""), 1))
+        .collect::<Vec<_>>();
+    let over_cases = bounded_manifest(&over_case_values);
+    assert!(pre_scan_manifest_bytes(over_cases.as_bytes())
+        .unwrap_err()
+        .contains("cases"));
+}
+
+#[test]
+fn lexical_pre_scan_enforces_generic_boundaries_and_duplicate_keys() {
+    assert!(pre_scan_manifest_bytes(&vec![b' '; MAX_MANIFEST_BYTES + 1]).is_err());
+    let exact_nodes = format!(
+        "[{}]",
+        std::iter::repeat_n("null", MAX_JSON_NODES - 1)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    assert!(pre_scan_manifest_bytes(exact_nodes.as_bytes()).is_ok());
+    let over_nodes = format!("[{exact_nodes},null]");
+    assert!(pre_scan_manifest_bytes(over_nodes.as_bytes()).is_err());
+    let exact_string = format!(r#""{}""#, "x".repeat(MAX_STRING_BYTES - 2));
+    assert!(pre_scan_manifest_bytes(exact_string.as_bytes()).is_ok());
+    let over_string = format!(r#""{}""#, "x".repeat(MAX_STRING_BYTES - 1));
+    assert!(pre_scan_manifest_bytes(over_string.as_bytes()).is_err());
+    let exact_depth = "[".repeat(MAX_JSON_DEPTH + 1) + &"]".repeat(MAX_JSON_DEPTH + 1);
+    assert!(pre_scan_manifest_bytes(exact_depth.as_bytes()).is_ok());
+    let over_depth = "[".repeat(MAX_JSON_DEPTH + 2) + &"]".repeat(MAX_JSON_DEPTH + 2);
+    assert!(pre_scan_manifest_bytes(over_depth.as_bytes()).is_err());
+    assert!(pre_scan_manifest_bytes(br#"{"a":1,"a":2}"#).is_err());
 }
 
 #[test]
