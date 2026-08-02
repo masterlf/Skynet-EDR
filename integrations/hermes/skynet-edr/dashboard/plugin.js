@@ -520,6 +520,14 @@
     return "secondary";
   }
 
+  function badgeToneProps(tone, props) {
+    const result = Object.assign({ tone: tone }, props);
+    if (tone === "destructive") {
+      result.style = Object.assign({}, result.style, { backgroundColor: "transparent" });
+    }
+    return result;
+  }
+
   function matchesFilter(value, selected) {
     return selected === "all" || displayText(value).toLowerCase() === selected;
   }
@@ -653,11 +661,11 @@
       h("button", buttonProps,
         h("span", { className: "flex flex-wrap items-start justify-between gap-2" },
           h("span", { className: "font-semibold" }, risk.title),
-          h(Badge, { tone: severityTone(risk.severity) }, labelFor(risk.severity))
+          h(Badge, badgeToneProps(severityTone(risk.severity)), labelFor(risk.severity))
         ),
         h("span", { className: "flex flex-wrap gap-2" },
           h(SourceBadge, { kind: risk.artifact.kind }),
-          h(Badge, { tone: statusTone(risk.status) }, labelFor(risk.status)),
+          h(Badge, badgeToneProps(statusTone(risk.status)), labelFor(risk.status)),
           h(Badge, { tone: "outline" }, "Rule " + displayText(risk.rule_id, "none"))
         ),
         h("span", { className: "text-xs text-muted-foreground" },
@@ -716,13 +724,13 @@
                 h("div", { className: "font-medium", style: WRAP_ANYWHERE_STYLE }, event.title),
                 h("div", { className: "mt-1 text-xs text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, formatTime(event.timestamp_unix_ms) + " · event " + event.event_id)
               ),
-              h(Badge, { tone: severityTone(event.severity) }, labelFor(event.severity))
+              h(Badge, badgeToneProps(severityTone(event.severity)), labelFor(event.severity))
             ),
             h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
               h(SourceBadge, { kind: event.artifact.kind }),
               h(Badge, { tone: "outline" }, "Type " + displayText(event.event_type)),
               h(Badge, { tone: "outline" }, "Trust " + labelFor(event.trust_level)),
-              h(Badge, { tone: event.redaction.contains_sensitive_data ? "destructive" : "secondary" }, "Redactions " + countText(event.redaction.redacted_count)),
+              h(Badge, badgeToneProps(event.redaction.contains_sensitive_data ? "destructive" : "secondary"), "Redactions " + countText(event.redaction.redacted_count)),
               (badges.length ? badges : ["No allowlisted indicators"]).map(function (label) {
                 return h(Badge, { key: label, tone: "secondary" }, label);
               })
@@ -765,8 +773,8 @@
     if (!risk) return null;
     return panel(risk.title, [
       h(SourceBadge, { key: "source", kind: risk.artifact.kind }),
-      h(Badge, { key: "severity", tone: severityTone(risk.severity) }, labelFor(risk.severity)),
-      h(Badge, { key: "status", tone: statusTone(risk.status) }, labelFor(risk.status)),
+      h(Badge, badgeToneProps(severityTone(risk.severity), { key: "severity" }), labelFor(risk.severity)),
+      h(Badge, badgeToneProps(statusTone(risk.status), { key: "status" }), labelFor(risk.status)),
     ], h(CardContent, { className: "grid min-w-0 gap-4", style: MIN_WIDTH_ZERO_STYLE },
       resource.error ? h("div", { role: "status", "aria-live": "polite", className: "rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm" }, "Stale detail: the latest refresh is unavailable; cached validated detail remains visible.") : null,
       h("p", { className: "text-sm text-muted-foreground", style: WRAP_ANYWHERE_STYLE }, risk.summary),
@@ -775,7 +783,7 @@
         h("p", { className: "mt-1 text-sm text-muted-foreground" }, "This Web Dashboard view displays only validated redacted API projections. It provides refresh and navigation, never containment or mutation controls."),
         h("div", { className: "mt-2 flex min-w-0 flex-wrap gap-2", style: MIN_WIDTH_ZERO_STYLE },
           h(Badge, { tone: "outline" }, "Confidence: Not assessed"),
-          h(Badge, { tone: risk.contains_sensitive_data ? "destructive" : "secondary" }, risk.contains_sensitive_data ? "Sensitive data redacted" : "No sensitive flag"),
+          h(Badge, badgeToneProps(risk.contains_sensitive_data ? "destructive" : "secondary"), risk.contains_sensitive_data ? "Sensitive data redacted" : "No sensitive flag"),
           h(Badge, { tone: "secondary" }, "Events " + countText(risk.event_count))
         )
       ),
@@ -855,7 +863,7 @@
         return h("li", { key: rule.id }, h(Card, null,
           h(CardHeader, null, h("div", { className: "flex flex-wrap items-start justify-between gap-2" },
             h(CardTitle, { className: "text-base" }, rule.name),
-            h(Badge, { tone: severityTone(rule.severity) }, labelFor(rule.severity))
+            h(Badge, badgeToneProps(severityTone(rule.severity)), labelFor(rule.severity))
           )),
           h(CardContent, { className: "grid gap-2 text-sm" },
             h("p", { className: "font-mono" }, rule.id),
@@ -1020,9 +1028,9 @@
         h("div", { className: "max-w-3xl" },
           h("div", { className: "mb-2 flex flex-wrap gap-2" },
             h(Badge, { tone: "outline" }, versionLabel),
-            h(Badge, { tone: engineChecking ? "outline" : (engineOnline ? "success" : "destructive"), className: engineChecking ? "text-muted-foreground" : undefined }, engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
+            h(Badge, badgeToneProps(engineChecking ? "outline" : (engineOnline ? "success" : "destructive"), { className: engineChecking ? "text-muted-foreground" : undefined }), engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
             h(Badge, { tone: mode === "active" ? "success" : (mode === "passive" ? "warning" : "outline"), className: mode ? undefined : "text-muted-foreground" }, mode ? labelFor(mode).replace(/^./, function (value) { return value.toUpperCase(); }) + " mode" : "Mode unavailable"),
-            h(Badge, { tone: health.error || risks.error ? "destructive" : (health.data && risks.data ? "success" : "outline") }, backendHealth(health, risks))
+            h(Badge, badgeToneProps(health.error || risks.error ? "destructive" : (health.data && risks.data ? "success" : "outline")), backendHealth(health, risks))
           ),
           h("h2", { id: "skynet-risk-heading", className: "text-2xl font-semibold tracking-tight" }, "Skynet-EDR Risk Explorer"),
           h("p", { className: "mt-2 text-sm text-muted-foreground" }, "Redacted skynet.risk.v1 projections from the local Skynet-EDR service. Search and filters apply to the current server page. Raw prompts, commands, destinations, paths and arbitrary attributes are never rendered.")

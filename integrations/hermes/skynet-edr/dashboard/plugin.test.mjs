@@ -970,6 +970,23 @@ test('dashboard uses only the installed host Badge and Button styling contracts'
   assert.doesNotMatch(source, /h\((?:Badge|Button),\s*\{[^}]*\bvariant\s*:/);
 });
 
+test('every destructive badge removes the host translucent fill for AA contrast', async () => {
+  assert.doesNotMatch(source, /h\(Badge,\s*\{[^}\n]*tone:\s*[^}\n]*"destructive"/);
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': canonicalStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  harness.render();
+  await harness.flushEffects();
+
+  const destructive = [];
+  walk(harness.render(), (node) => {
+    if (node.type === 'Badge' && node.props?.tone === 'destructive') destructive.push(node);
+  });
+  assert.ok(destructive.length >= 2, 'fixture must render destructive severity and status badges');
+  for (const badge of destructive) assert.equal(badge.props.style?.backgroundColor, 'transparent');
+});
+
 test('header uses semantic host badge tones for engine and mode status', async () => {
   const harness = createHarness({
     '/api/plugins/skynet-edr/status': canonicalStatus,
@@ -987,8 +1004,12 @@ test('header uses semantic host badge tones for engine and mode status', async (
   const passive = findNode(tree, (node) => textOf(node) === 'Passive mode', 'passive mode indicator');
   assert.equal(passive.props.tone, 'warning');
   assert.equal(passive.props.className, undefined);
-  assert.equal(findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'high', 'high severity indicator').props.tone, 'destructive');
-  assert.equal(findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'open', 'open status indicator').props.tone, 'destructive');
+  const high = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'high', 'high severity indicator');
+  assert.equal(high.props.tone, 'destructive');
+  assert.equal(high.props.style.backgroundColor, 'transparent');
+  const open = findNode(tree, (node) => node.type === 'Badge' && textOf(node) === 'open', 'open status indicator');
+  assert.equal(open.props.tone, 'destructive');
+  assert.equal(open.props.style.backgroundColor, 'transparent');
   assert.equal(findButton(tree, 'Refresh').props.outlined, true);
   assert.equal(findButton(tree, 'Previous').props.outlined, true);
   assert.equal(findButton(tree, 'Next').props.outlined, true);
@@ -1014,6 +1035,7 @@ test('header uses semantic host badge tones for engine and mode status', async (
   const offline = findNode(invalidTree, (node) => textOf(node) === 'Engine Offline', 'offline engine indicator');
   assert.equal(offline.props.tone, 'destructive');
   assert.equal(offline.props.className, undefined);
+  assert.equal(offline.props.style.backgroundColor, 'transparent');
   assert.equal(findNode(invalidTree, (node) => textOf(node) === 'Mode unavailable', 'unavailable mode indicator').props.tone, 'outline');
   assert.equal(findNode(invalidTree, (node) => textOf(node) === 'EDR version unavailable', 'unavailable version indicator').props.tone, 'outline');
   assert.doesNotMatch(textOf(invalidTree), /script|bad/);
@@ -1032,6 +1054,7 @@ test('a failed latest status poll marks the engine offline while telemetry data 
   const offline = findNode(tree, (node) => textOf(node) === 'Engine Offline', 'stale offline engine indicator');
   assert.equal(offline.props.tone, 'destructive');
   assert.equal(offline.props.className, undefined);
+  assert.equal(offline.props.style.backgroundColor, 'transparent');
   assert.match(textOf(tree), /EDR version unavailable/);
   assert.match(textOf(tree), /Mode unavailable/);
   assert.doesNotMatch(textOf(tree), /EDR 0\.4\.1|Passive mode/);

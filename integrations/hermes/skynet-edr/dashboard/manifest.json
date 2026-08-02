@@ -10,6 +10,6 @@
     "hidden": false
   },
   "entry": "plugin.js",
-  "integrity": "sha384-Po4RrF90Tj57iDnupAUlzEWEohZHSBBzgehFpR6BDBPOpNI/5ELCPTNjCLCWzbg0",
+  "integrity": "sha384-RLI3DwLh6cl4f+u2ZlBvLigp++U3NwylIOzDL3x2e997AcYMtbbERARnq9bR2Lke",
   "api": "plugin_api.py"
 }
