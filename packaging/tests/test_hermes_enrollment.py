@@ -460,6 +460,117 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertFalse((self.home / "plugins").exists())
         self.assertFalse((self.home / "desktop-plugins").exists())
 
+    def test_failed_prepare_preserves_parent_created_in_check_mkdir_race(self):
+        for parent_name in ("plugins", "desktop-plugins"):
+            with self.subTest(parent=parent_name):
+                self.setUp()
+                module = load_module()
+                adapter = Path(self.make_adapter(fail_action="prepare"))
+                original_mkdir = module.os.mkdir
+                raced = False
+
+                def create_before_transaction_mkdir(path, mode=0o777, *, dir_fd=None):
+                    nonlocal raced
+                    if path == parent_name and dir_fd is not None and not raced:
+                        original_mkdir(path, mode=0o700, dir_fd=dir_fd)
+                        raced = True
+                    return original_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+                output = io.StringIO()
+                with (mock.patch.object(module.os, "mkdir", side_effect=create_before_transaction_mkdir),
+                      mock.patch.object(module.sys, "stdout", output)):
+                    result = module.apply(self.request, self.source, self.state, self.obs_path, adapter)
+
+                self.assertNotEqual(result, 0)
+                self.assertTrue(raced)
+                self.assertTrue((self.home / parent_name).is_dir())
+
+    def test_failed_prepare_preserves_preexisting_plugin_parents(self):
+        parents = [self.home / name for name in ("plugins", "desktop-plugins")]
+        for parent in parents:
+            parent.mkdir(mode=0o700)
+
+        result, _ = self.run_cli("apply", "--adapter", self.make_adapter(fail_action="prepare"))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(all(parent.is_dir() for parent in parents))
+
+    def test_created_parent_inode_mismatch_fails_closed_without_removal(self):
+        module = load_module()
+        parent = self.home / "plugins"
+        parent.mkdir(mode=0o700)
+        pinned_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.addCleanup(os.close, pinned_fd)
+        original = os.fstat(pinned_fd)
+        parent.rmdir()
+        parent.mkdir(mode=0o700)
+
+        with self.assertRaises(module.EnrollmentError) as error:
+            module.remove_empty_user_directory(
+                self.home, "plugins", os.getuid(), (original.st_dev, original.st_ino)
+            )
+
+        self.assertEqual(error.exception.state, "ROLLBACK_REQUIRED")
+        self.assertTrue(parent.is_dir())
+
+    def test_created_parent_replaced_before_open_is_not_booked_or_chowned(self):
+        module = load_module()
+        parent = self.home / "plugins"
+        original_open = module.os.open
+        replacement_identity = None
+        displaced_fd = None
+
+        def replace_before_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal displaced_fd, replacement_identity
+            if path == "plugins" and dir_fd is not None and replacement_identity is None:
+                displaced_fd = original_open(
+                    path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd
+                )
+                os.rmdir(path, dir_fd=dir_fd)
+                os.mkdir(path, mode=0o700, dir_fd=dir_fd)
+                replacement = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+                replacement_identity = replacement.st_dev, replacement.st_ino
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        with mock.patch.object(module.os, "open", side_effect=replace_before_open):
+            with self.assertRaises(module.EnrollmentError) as error:
+                with module.opened_user_directory(
+                    self.home, "plugins", os.getuid(), os.getgid(), create=True
+                ):
+                    self.fail("replacement must not be yielded as transaction-created")
+
+        self.assertEqual(error.exception.category, "invalid_target")
+        self.assertEqual((parent.stat().st_dev, parent.stat().st_ino), replacement_identity)
+        assert displaced_fd is not None
+        os.close(displaced_fd)
+
+    def test_created_nonempty_parent_fails_closed_without_removal(self):
+        module = load_module()
+        parent = self.home / "plugins"
+        parent.mkdir(mode=0o700)
+        identity = parent.stat().st_dev, parent.stat().st_ino
+        marker = parent / "target-owned"
+        marker.write_text("preserve", encoding="utf-8")
+
+        with self.assertRaises(module.EnrollmentError) as error:
+            module.remove_empty_user_directory(self.home, "plugins", os.getuid(), identity)
+
+        self.assertEqual(error.exception.state, "ROLLBACK_REQUIRED")
+        self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
+    def test_created_parent_mode_drift_fails_closed_without_removal(self):
+        module = load_module()
+        parent = self.home / "plugins"
+        parent.mkdir(mode=0o700)
+        identity = parent.stat().st_dev, parent.stat().st_ino
+        parent.chmod(0o750)
+
+        with self.assertRaises(module.EnrollmentError) as error:
+            module.remove_empty_user_directory(self.home, "plugins", os.getuid(), identity)
+
+        self.assertEqual(error.exception.state, "ROLLBACK_REQUIRED")
+        self.assertTrue(parent.is_dir())
+
     def test_failed_initial_prepare_preserves_preexisting_state_and_observation(self):
         self.state.mkdir()
         evidence = self.state / "evidence.log"

@@ -437,19 +437,29 @@ def restore_optional_regular(path: Path, previous: tuple[bool, bytes]) -> None:
             pass
 
 
-def remove_empty_user_directory(home: Path, name: str, uid: int) -> None:
+def remove_empty_user_directory(home: Path, name: str, uid: int,
+                                expected_identity: tuple[int, int]) -> None:
+    """Remove only the still-bound directory created by this transaction.
+
+    The target UID is a documented cooperative boundary: the final relative
+    stat is immediately followed by rmdir, without claiming same-UID exclusion.
+    """
     home_fd = -1
     child_fd = -1
     try:
         home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
         info = os.fstat(child_fd)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:
+        named_info = os.stat(name, dir_fd=home_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or (info.st_dev, info.st_ino) != expected_identity
+                or not stat.S_ISDIR(named_info.st_mode) or named_info.st_uid != uid
+                or stat.S_IMODE(named_info.st_mode) != 0o700
+                or (named_info.st_dev, named_info.st_ino) != expected_identity):
             raise EnrollmentError("rollback", "ROLLBACK_REQUIRED")
         os.rmdir(name, dir_fd=home_fd)
         os.fsync(home_fd)
-    except FileNotFoundError:
-        return
     except OSError as exc:
         raise EnrollmentError("rollback", "ROLLBACK_REQUIRED") from exc
     finally:
@@ -495,6 +505,8 @@ def opened_user_directory(home: Path, name: str, uid: int, gid: int, *, create: 
     """Pin a target-owned directory without following target-controlled links."""
     home_fd = -1
     child_fd = -1
+    created = False
+    created_identity: tuple[int, int] | None = None
     try:
         try:
             home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -507,21 +519,32 @@ def opened_user_directory(home: Path, name: str, uid: int, gid: int, *, create: 
             child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
         except FileNotFoundError:
             if not create:
-                yield None
+                yield None, None
                 return
             try:
                 os.mkdir(name, mode=0o700, dir_fd=home_fd)
+                created = True
+                created_info = os.stat(name, dir_fd=home_fd, follow_symlinks=False)
+                created_identity = created_info.st_dev, created_info.st_ino
             except FileExistsError:
                 pass
             child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
-            os.fchown(child_fd, uid, gid)
+            if created:
+                opened_identity = os.fstat(child_fd)
+                named_identity = os.stat(name, dir_fd=home_fd, follow_symlinks=False)
+                if ((opened_identity.st_dev, opened_identity.st_ino) != created_identity
+                        or (named_identity.st_dev, named_identity.st_ino) != created_identity):
+                    raise EnrollmentError("invalid_target")
+                os.fchown(child_fd, uid, gid)
         except OSError as exc:
             raise EnrollmentError("invalid_target") from exc
         child_info = os.fstat(child_fd)
         if (not stat.S_ISDIR(child_info.st_mode) or child_info.st_uid != uid
                 or child_info.st_mode & 0o022):
             raise EnrollmentError("invalid_target")
-        yield Path(f"/proc/self/fd/{child_fd}")
+        if created and (child_info.st_dev, child_info.st_ino) != created_identity:
+            raise EnrollmentError("invalid_target")
+        yield Path(f"/proc/self/fd/{child_fd}"), created_identity
     finally:
         if child_fd >= 0:
             os.close(child_fd)
@@ -724,17 +747,17 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
     require_same_filesystem(home, state_root)
     state_root_created = not exists_nofollow(state_root)
     state_parent_created = not exists_nofollow(state_root.parent)
-    plugins_created = not exists_nofollow(home / "plugins")
-    desktop_parent_created = not exists_nofollow(home / "desktop-plugins")
     previous_observation = snapshot_optional_regular(observations)
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = enrollment_lock(state_root)
     lock_created = not exists_nofollow(lock_path)
     lock_parent_created = not exists_nofollow(lock_path.parent)
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (opened_user_directory(home, "plugins", uid, gid, create=True) as opened,
-          opened_user_directory(home, "desktop-plugins", uid, gid, create=True) as desktop_parent,
+    with (opened_user_directory(home, "plugins", uid, gid, create=True) as plugin_directory,
+          opened_user_directory(home, "desktop-plugins", uid, gid, create=True) as desktop_directory,
           lock_path.open("a+b") as lock):
+        opened, plugins_created = plugin_directory
+        desktop_parent, desktop_parent_created = desktop_directory
         assert opened is not None and desktop_parent is not None
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -825,10 +848,12 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
                         remove_created_directory(state_root.parent)
                     if lock_parent_created and lock_path.parent not in {state_root, state_root.parent}:
                         remove_created_directory(lock_path.parent)
-                    if plugins_created:
-                        remove_empty_user_directory(home, "plugins", uid)
-                    if desktop_parent_created:
-                        remove_empty_user_directory(home, "desktop-plugins", uid)
+                    if plugins_created is not None:
+                        remove_empty_user_directory(home, "plugins", uid, plugins_created)
+                    if desktop_parent_created is not None:
+                        remove_empty_user_directory(
+                            home, "desktop-plugins", uid, desktop_parent_created
+                        )
             except (EnrollmentError, OSError):
                 return emit("ROLLBACK_REQUIRED", "rollback")
             if stage.exists():
@@ -844,9 +869,11 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = enrollment_lock(state_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (opened_user_directory(home, "plugins", uid, gid, create=False) as plugins_parent,
-          opened_user_directory(home, "desktop-plugins", uid, gid, create=False) as desktop_parent,
+    with (opened_user_directory(home, "plugins", uid, gid, create=False) as plugin_directory,
+          opened_user_directory(home, "desktop-plugins", uid, gid, create=False) as desktop_directory,
           lock_path.open("a+b") as lock):
+        plugins_parent, _ = plugin_directory
+        desktop_parent, _ = desktop_directory
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         if plugins_parent is None and not (state_root / "enrollment.json").exists():
             return emit("ABSENT", "unenrolled", noop=True, success=True)
