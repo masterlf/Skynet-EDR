@@ -152,10 +152,12 @@ now delegates to the machine-readable `skynet-edr-hermes-enroll` transaction.
 See [Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md) for its exact request,
 manifest, observation, adapter, rollback, and clean-host gate contracts.
 
-The repository currently ships the transaction and deterministic boundary
-fixtures, but not a privileged live-host adapter. Therefore no live deployment
-may yet claim autonomous `ENROLLED`; the current operational verdict is
-`S3_IMPLEMENTATION_BLOCK`. Do not recreate the removed copy/enable/manual-restart
+The repository ships the transaction, deterministic boundary fixtures, and the
+root-owned adapter at `/usr/libexec/skynet-edr/hermes-enrollment-adapter.py`.
+The adapter's exact Hermes 0.19.0 CLI/read-back and booted-systemd contract has
+not yet passed the disposable clean-host gate. Therefore no live deployment may
+yet claim autonomous `ENROLLED`; the current operational verdict is
+`S3_ADAPTER_BLOCK`. Do not recreate the removed copy/enable/manual-restart
 sequence as a parallel success path.
 
 The plugin worker sends to `/run/skynet-edr-ingest/ingest.sock`. During daemon
@@ -372,7 +374,7 @@ sudo systemctl disable --now skynet-edr.service || true
 sudo pacman -R skynet-edr
 ```
 
-Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default. Destructive purge must be explicit.
+Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default. Destructive purge must be explicit. Package-manager and tarball removal fail closed while a Hermes adapter transaction snapshot is active; upgrades remain allowed. Run bounded `unenroll` first rather than orphaning group, daemon, or user-unit state.
 
 ## Troubleshooting
 

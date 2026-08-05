@@ -138,8 +138,13 @@ fi
 if [ -f "$ROOT/skynet-edr-hermes-enroll.py" ]; then
   install_file "$ROOT/skynet-edr-hermes-enroll.py" "$PREFIX/bin/skynet-edr-hermes-enroll" 0755 root:root
 fi
+if [ -f "$ROOT/skynet-edr-hermes-enrollment-adapter.py" ]; then
+  install -d -m 0755 -o root -g root /usr/libexec/skynet-edr
+  install_file "$ROOT/skynet-edr-hermes-enrollment-adapter.py" /usr/libexec/skynet-edr/hermes-enrollment-adapter.py 0755 root:root
+fi
 
 install -d -m 0750 -o skynet-edr -g skynet-edr /var/lib/skynet-edr /var/log/skynet-edr /var/cache/skynet-edr /run/skynet-edr
+install -d -m 0700 -o root -g root /var/lib/skynet-edr-hermes-enrollment
 
 if [ "$INSTALL_SYSTEMD" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true

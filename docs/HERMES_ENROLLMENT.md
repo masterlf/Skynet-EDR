@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository ships a bounded enrollment transaction and deterministic fixture adapter contract. It does **not** yet ship a privileged live-host adapter, and therefore no real host may currently be reported as autonomously `ENROLLED`. The later clean-host gate below is mandatory before changing that claim.
+The repository ships a bounded enrollment transaction, deterministic fixture contract, and a package-owned privileged adapter at `/usr/libexec/skynet-edr/hermes-enrollment-adapter.py`. The adapter is reviewable production code, but its exact Hermes 0.19.0 CLI/read-back and booted-systemd behavior has not yet passed the disposable clean-host gate. Therefore no real host may currently be reported as autonomously `ENROLLED`; the later gate remains mandatory before changing that claim.
 
 The only compatibility cell exercised by the transaction tests is Ubuntu 24.04, `x86_64`/`amd64`, systemd, Hermes `0.19.0`, Skynet-EDR plugin `0.4.1`. Every other distro, architecture, init system, Hermes version, dashboard-only runtime, and global-role setup is unsupported or unproven and fails closed.
 
@@ -14,8 +14,8 @@ The only compatibility cell exercised by the transaction tests is Ubuntu 24.04, 
 - `--source`: exact trusted package payload directory. Non-fixture requests are
   pinned to `/usr/share/skynet-edr/hermes-plugin/skynet-edr`; `fixture: true` is
   test-only and must never be accepted by a future live adapter;
-- `--state-root`: production is pinned to `/var/lib/skynet-edr/hermes-enrollment`; caller-selected roots are rejected by the shipped entry point;
-- `--observations`: production is pinned inside that private root. The transaction, not the target process, atomically writes the bounded adapter result as `0600`;
+- `--state-root`: production is pinned to root-owned mode-`0700` `/var/lib/skynet-edr-hermes-enrollment`, outside daemon-writable `/var/lib/skynet-edr`; caller-selected roots are rejected by the shipped entry point;
+- `--observations`: production accepts only the pinned base path, then derives metadata and observations under `targets/<sha256(uid,profile)>` inside that private root. The transaction, not the target process, atomically writes each isolated bounded adapter result as `0600`;
 - `--adapter`: mutations are pinned to the root-owned, non-writable package adapter path. Arbitrary adapters are accepted only by the in-process deterministic test harness.
 
 The production payload identity comes from the root-owned package manifest at
@@ -38,12 +38,16 @@ Output is one bounded JSON object with fixed `schema`, `state`, `category`, and 
 
 ## Adapter contract
 
-The adapter is a security boundary, not arbitrary plugin output. It receives one action argument: `enable`, `disable`, `restart`, or `hook`. It receives a minimal environment containing exact `HOME`, `HERMES_HOME`, `HERMES_PROFILE`, generation, target UID, action, and random nonce. Target actions run as the requested non-root identity; restart remains privileged and bounded. The adapter returns one bounded JSON observation on stdout; stdout/stderr are never forwarded, and the parent writes trusted metadata plus the result privately. It must use typed parsers for daemon config, exact per-unit role drop-ins, exact reviewed units, socket DAC and numeric UID authorization. It must never set a global role or silently broaden units/groups/config.
+The adapter is a security boundary, not arbitrary plugin output. It receives one action argument: privileged `prepare`, `rollback`, or `restart`, or target-identity `enable`, `disable`, or `hook`. It receives a minimal environment containing exact `HOME`, `HERMES_HOME`, `HERMES_PROFILE`, generation, target UID, action, and random nonce. Target actions run as the requested non-root identity; host preparation, rollback, and restart remain privileged and bounded. The adapter returns one bounded JSON observation on stdout; stdout/stderr are never forwarded, and the parent writes trusted metadata plus the result privately.
 
-The repository fixture adapter is mocked at service/config boundaries and is not permission to mutate a live system.
+`prepare` accepts no path overrides. It edits only `/etc/skynet-edr/config.toml`, the exact `skynet-edr-ingest` group, and `/etc/systemd/user/hermes-gateway.service.d/50-skynet-edr.conf`. The TOML parser rejects duplicate/missing/mistyped owned keys, nonstandard socket/group values, root authorization, and roles other than `gateway`; the serializer changes only `enabled`, `socket_group`, `allowed_uids`, `allow_root`, and `required_reported_roles`. The adapter snapshots exact prior config/drop-in bytes, ownership, modes, and prior group membership in private root-owned state before mutation. `rollback` restores that snapshot and removes only membership it added. Child output is capped at 64 KiB, duplicate-key JSON is rejected, and raw Hermes/systemctl/API diagnostics are discarded.
+
+The only reviewed producer unit is `hermes-gateway.service`; dashboard, template, caller-selected, and multiple-unit requests fail closed. The adapter uses fixed `/usr/bin/hermes` and `/usr/bin/systemctl` paths, CLI enable/disable plus JSON list read-back, targeted daemon and user-unit restarts, fixed loopback daemon status, and a fixed no-tool enrollment session to require a newer committed real-hook timestamp. Those exact external contracts remain unproven until the clean-host gate passes.
+
+The fixture tests mock service/config boundaries and are not permission to mutate a live system.
 
 ## Mandatory clean-host promotion gate
 
 Before any support claim changes from unproven to supported, a separate reviewed task must ship and exercise the live adapter in a disposable booted Ubuntu 24.04 amd64/systemd host with Hermes 0.19.0. The gate must prove package manifest ownership, temporary target user/profile/custom `HERMES_HOME`, exact daemon TOML edits, socket group plus `SO_PEERCRED` UID allowlist, exact unit drop-ins, approved restart and rollback, post-restart v2 producer health, real correlated hook receipt, fake-secret byte scans, concurrent applies, fault injection at copy/fsync/rename/enable/config/drop-in/restart/hook stages, package partial-upgrade/removal, and repeatable unenroll while preserving fallback/checkpoint/log/database evidence. No live operator host or profile may be used.
 
-Until that gate passes, the literal operational verdict is `S3_IMPLEMENTATION_BLOCK`.
+Until that gate passes, the literal operational verdict is `S3_ADAPTER_BLOCK`.

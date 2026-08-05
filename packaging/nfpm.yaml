@@ -89,6 +89,12 @@ contents:
       mode: 0755
       owner: root
       group: root
+  - src: ./packaging/scripts/skynet-edr-hermes-enrollment-adapter.py
+    dst: /usr/libexec/skynet-edr/hermes-enrollment-adapter.py
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
   - src: ./docs/INSTALL.md
     dst: /usr/share/doc/skynet-edr/INSTALL.md
   - src: ./docs/PACKAGING.md
@@ -101,6 +107,12 @@ contents:
       mode: 0750
       owner: skynet-edr
       group: skynet-edr
+  - dst: /var/lib/skynet-edr-hermes-enrollment
+    type: dir
+    file_info:
+      mode: 0700
+      owner: root
+      group: root
   - dst: /var/log/skynet-edr
     type: dir
     file_info:
@@ -141,4 +153,5 @@ archlinux:
 
 scripts:
   postinstall: ./packaging/scripts/package-postinstall.sh
+  preremove: ./packaging/scripts/package-preremove.sh
   postremove: ./packaging/scripts/package-postremove.sh

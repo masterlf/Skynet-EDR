@@ -133,12 +133,13 @@ class HermesEnrollmentTests(unittest.TestCase):
         _, _, _, actual = module.validate_request(request, self.source)
         self.assertEqual(actual, self.manifest)
 
-    def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile"):
+    def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile", fail_action=None):
         home = self.home if home is None else home
         adapter = self.base / "adapter.py"
         adapter.write_text(
             "#!/usr/bin/env python3\n"
             "import json, os, sys\n"
+            f"if sys.argv[1] == {fail_action!r}: raise SystemExit(9)\n"
             "assert os.environ['HERMES_HOME']==" + repr(str(home)) + "\n"
             "assert os.environ['HERMES_PROFILE']==" + repr(profile) + "\n"
             "o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False,"
@@ -234,8 +235,25 @@ class HermesEnrollmentTests(unittest.TestCase):
         result, output = self.run_cli("apply", "--adapter", self.make_adapter())
         self.assertEqual(result.returncode, 0, (result.stderr, output))
 
+    def test_runtime_state_and_nonce_are_isolated_by_uid_and_profile(self):
+        module = load_module()
+        first = module.scoped_runtime_state(self.state, 1001, "work")
+        second = module.scoped_runtime_state(self.state, 1001, "personal")
+        third = module.scoped_runtime_state(self.state, 1002, "work")
+        self.assertEqual(len({first, second, third}), 3)
+        self.assertEqual(module.enrollment_lock(first), module.enrollment_lock(second))
+
+    def test_metadata_identity_mismatch_fails_closed(self):
+        result, _ = self.run_cli("apply", "--adapter", self.make_adapter())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.request["profile"] = "other-profile"
+        self._write_inputs()
+        result, output = self.run_cli("verify")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output["state"], "DRIFTED")
+
     @unittest.skipUnless(os.geteuid() == 0, "requires root to prove credential drop")
-    def test_target_actions_and_installed_generation_use_requested_nonroot_uid(self):
+    def test_target_cli_actions_drop_identity_but_privileged_actions_remain_root(self):
         target = pwd.getpwnam("nobody")
         accessible = Path(tempfile.mkdtemp(prefix="skynet-hermes-target-", dir="/var/tmp"))
         self.addCleanup(shutil.rmtree, accessible, True)
@@ -253,8 +271,12 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.obs["producer"]["uid"] = target.pw_uid
         self._write_inputs()
         adapter = accessible / "adapter.py"
+        action_log = accessible / "adapter-actions.jsonl"
+        action_log.touch(mode=0o666)
+        action_log.chmod(0o666)
         adapter.write_text(
             "import json,os,sys\n"
+            f"open({str(action_log)!r},'a').write(json.dumps([sys.argv[1],os.geteuid()])+'\\n')\n"
             "healthy=sys.argv[1] in {'restart','hook'}\n"
             "print(json.dumps({'plugin_enabled':sys.argv[1]!='disable','loaded_generation':os.environ['SKYNET_EDR_GENERATION'],"
             "'process_fresh':healthy,'daemon':{'healthy':healthy,'listener':True,'transport':'available','backlog':0,'degraded':False},"
@@ -270,13 +292,27 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertTrue(all(path.stat().st_uid == target.pw_uid for path in installed.rglob("*") if path.is_file()))
         self.assertEqual((target_home / "desktop-plugins" / "skynet-edr" / "plugin.js").stat().st_uid, target.pw_uid)
         observation = json.loads(self.obs_path.read_text(encoding="utf-8"))
-        self.assertEqual(observation["adapter_euid"], target.pw_uid)
+        self.assertEqual(observation["adapter_euid"], 0)
+        actions = {action: euid for action, euid in map(json.loads, action_log.read_text(encoding="utf-8").splitlines())}
+        self.assertEqual(actions["enable"], target.pw_uid)
+        self.assertEqual(actions["restart"], 0)
+        self.assertEqual(actions["hook"], 0)
 
     def test_enable_zero_without_readback_fails_closed_and_rolls_back(self):
         result, output = self.run_cli("apply", "--adapter", self.make_adapter(enabled=False))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(output["state"], {"DRIFTED", "ROLLBACK_REQUIRED"})
         self.assertFalse((self.home / "plugins" / "skynet-edr").exists())
+
+    def test_each_adapter_mutation_failure_restores_bytes_and_metadata(self):
+        for action in ("prepare", "enable", "restart", "hook"):
+            with self.subTest(action=action):
+                self.setUp()
+                result, output = self.run_cli("apply", "--adapter", self.make_adapter(fail_action=action))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(output["state"], {"DRIFTED", "ROLLBACK_REQUIRED"})
+                self.assertFalse((self.home / "plugins" / "skynet-edr").exists())
+                self.assertFalse((self.state / "enrollment.json").exists())
 
     def test_synthetic_canary_is_not_real_hook_proof(self):
         result, _ = self.run_cli("apply", "--adapter", self.make_adapter())
@@ -388,7 +424,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         result, output = self.run_cli("apply", "--adapter", str(adapter))
         combined = result.stdout + result.stderr
         self.assertNotIn(marker, combined)
-        self.assertEqual(output["category"], "rollback")
+        self.assertEqual(output["category"], "adapter_failure")
 
     def test_all_package_formats_and_tarball_require_python_runtime(self):
         nfpm = (ROOT / "packaging" / "nfpm.yaml").read_text(encoding="utf-8")

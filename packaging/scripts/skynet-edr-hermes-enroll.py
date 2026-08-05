@@ -39,12 +39,12 @@ SUPPORTED_HOST = {"id": "ubuntu", "version": "24.04", "arch": "x86_64", "init": 
 SUPPORTED_HERMES = {"0.19.0"}
 SYSTEM_SOURCE = Path("/usr/share/skynet-edr/hermes-plugin/skynet-edr")
 SYSTEM_MANIFEST = SYSTEM_SOURCE.parent / "manifest.json"
-SYSTEM_STATE_ROOT = Path("/var/lib/skynet-edr/hermes-enrollment")
+SYSTEM_STATE_ROOT = Path("/var/lib/skynet-edr-hermes-enrollment")
 SYSTEM_OBSERVATIONS = SYSTEM_STATE_ROOT / "observations.json"
 SYSTEM_ADAPTER = Path("/usr/libexec/skynet-edr/hermes-enrollment-adapter.py")
 MAX_PAYLOAD_FILE = 8 * 1024 * 1024
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
-SAFE_UNIT = re.compile(r"^hermes-[A-Za-z0-9_.@-]+\.service$")
+REVIEWED_UNITS = ["hermes-gateway.service"]
 
 
 class EnrollmentError(Exception):
@@ -130,7 +130,7 @@ def validate_request(request: dict[str, Any], source: Path) -> tuple[int, Path, 
     if request.get("required_role") != "gateway":
         raise EnrollmentError("authorization")
     units = request.get("units")
-    if not isinstance(units, list) or not units or any(not isinstance(unit, str) or not SAFE_UNIT.fullmatch(unit) for unit in units):
+    if units != REVIEWED_UNITS:
         raise EnrollmentError("invalid_input")
     source = checked_absolute(str(source), "payload_identity")
     check_existing_path(source, uid, writable_leaf=False)
@@ -212,7 +212,7 @@ def validate_tree(root: Path, manifest: dict[str, Any], *, installed_owner: int 
         raise EnrollmentError("payload_identity")
 
 
-def installed_state(home: Path, state_root: Path, manifest: dict[str, Any], uid: int) -> tuple[bool, str, dict[str, Any]]:
+def installed_state(home: Path, state_root: Path, manifest: dict[str, Any], uid: int, profile: str) -> tuple[bool, str, dict[str, Any]]:
     target = home / "plugins" / "skynet-edr"
     metadata = state_root / "enrollment.json"
     if not target.exists() and not metadata.exists():
@@ -225,7 +225,8 @@ def installed_state(home: Path, state_root: Path, manifest: dict[str, Any], uid:
     except EnrollmentError:
         return False, "DRIFTED", {}
     generation = canonical_generation(manifest)
-    if enrolled.get("generation") != generation:
+    if (enrolled.get("generation") != generation or enrolled.get("uid") != uid
+            or enrolled.get("profile") != profile):
         return False, "DRIFTED", {}
     return True, generation, enrolled
 
@@ -235,7 +236,7 @@ def observe(path: Path) -> dict[str, Any]:
 
 
 def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict[str, Any], observations: Path) -> tuple[str, str]:
-    installed, detail, enrolled = installed_state(home, state_root, manifest, request["uid"])
+    installed, detail, enrolled = installed_state(home, state_root, manifest, request["uid"], request["profile"])
     if not installed:
         return detail, "enrollment_state"
     obs = observe(observations)
@@ -247,7 +248,7 @@ def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict
         or obs.get("transaction_nonce") != enrolled.get("verified_nonce")
         or obs.get("observed_generation") != generation
         or obs.get("target_uid") != request["uid"]
-        or obs.get("effective_uid") != request["uid"]
+        or obs.get("effective_uid") != 0
         or not isinstance(observed_at, int)
         or observed_at > now
         or now - observed_at > 30_000_000_000
@@ -307,7 +308,7 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
         os.setgid(target_gid)
         os.setuid(target_uid)
 
-    target_action = action in {"enable", "disable", "hook"}
+    target_action = action in {"enable", "disable"}
     try:
         info = os.lstat(adapter)
         if (adapter.is_symlink() or not stat.S_ISREG(info.st_mode) or not os.access(adapter, os.X_OK)
@@ -416,6 +417,17 @@ def write_metadata(state_root: Path, generation: str, uid: int, profile: str, ve
             pass
 
 
+def scoped_runtime_state(state_root: Path, uid: int, profile: str) -> Path:
+    identity = f"{uid}\0{profile}".encode("utf-8")
+    return state_root / "targets" / hashlib.sha256(identity).hexdigest()
+
+
+def enrollment_lock(state_root: Path) -> Path:
+    if state_root.parent.name == "targets":
+        return state_root.parent.parent / "enrollment.lock"
+    return state_root / "enrollment.lock"
+
+
 def restore_metadata(state_root: Path, previous: bytes | None) -> None:
     metadata = state_root / "enrollment.json"
     if previous is None:
@@ -504,7 +516,8 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
     uid, home, profile, manifest = validate_request(request, source)
     gid = pwd.getpwuid(uid).pw_gid
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock_path = state_root / "enrollment.lock"
+    lock_path = enrollment_lock(state_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock_path.open("a+b") as lock:
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -527,7 +540,10 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         if prior.exists():
             shutil.rmtree(prior)
         committed = False
+        host_prepared = False
         try:
+            run_adapter(adapter, "prepare", adapter_env(home, profile, observations, generation, uid), observations)
+            host_prepared = True
             copy_generation(source, stage, manifest, uid, gid)
             if target.exists():
                 if target.is_symlink() or not target.is_dir():
@@ -551,45 +567,57 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
             if final_state != "ENROLLED":
                 raise EnrollmentError(final_category, final_state)
             return emit(final_state, final_category)
-        except EnrollmentError as exc:
-            if committed:
-                try:
+        except (EnrollmentError, OSError) as exc:
+            failure_state = exc.state if isinstance(exc, EnrollmentError) else "DRIFTED"
+            failure_category = exc.category if isinstance(exc, EnrollmentError) else "internal_failure"
+            try:
+                if committed:
                     run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, uid), observations)
                     if desktop_target is not None and desktop_prior is not None:
                         rollback_desktop(desktop_target, desktop_prior)
                     rollback_target(target, prior, state_root, previous_metadata)
-                except (EnrollmentError, OSError):
-                    return emit("ROLLBACK_REQUIRED", "rollback")
+                if host_prepared:
+                    run_adapter(adapter, "rollback", adapter_env(home, profile, observations, generation, uid), observations)
+            except (EnrollmentError, OSError):
+                return emit("ROLLBACK_REQUIRED", "rollback")
             if stage.exists():
                 shutil.rmtree(stage, ignore_errors=True)
-            return emit(exc.state, exc.category)
+            return emit(failure_state, failure_category)
 
 
 def unenroll(request: dict[str, Any], source: Path, state_root: Path, observations: Path, adapter: Path) -> int:
     _, home, profile, manifest = validate_request(request, source)
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (state_root / "enrollment.lock").open("a+b") as lock:
+    lock_path = enrollment_lock(state_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with lock_path.open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         target = home / "plugins" / "skynet-edr"
         if not target.exists() and not (state_root / "enrollment.json").exists():
             return emit("ABSENT", "unenrolled", noop=True, success=True)
         generation = canonical_generation(manifest)
+        if target.is_symlink() or not target.is_dir():
+            return emit("DRIFTED", "invalid_target")
+        try:
+            validate_tree(target, manifest, installed_owner=request["uid"])
+        except EnrollmentError:
+            return emit("DRIFTED", "invalid_target")
+        desktop = home / "desktop-plugins" / "skynet-edr"
+        if desktop.exists():
+            expected = manifest["desktop/plugin.js"]
+            plugin = desktop / "plugin.js"
+            if (desktop.is_symlink() or not desktop.is_dir() or {entry.name for entry in desktop.iterdir()} != {"plugin.js"}
+                    or plugin.is_symlink() or not plugin.is_file() or plugin.stat().st_nlink != 1
+                    or plugin.stat().st_uid != request["uid"]
+                    or plugin.stat().st_size != expected["size"]
+                    or hashlib.sha256(plugin.read_bytes()).hexdigest() != expected["sha256"]):
+                return emit("DRIFTED", "invalid_target")
         try:
             disabled = run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, request["uid"]), observations)
             if disabled.get("plugin_enabled") is not False:
                 raise EnrollmentError("enablement")
-            if target.is_symlink() or not target.is_dir():
-                raise EnrollmentError("invalid_target")
-            desktop = home / "desktop-plugins" / "skynet-edr"
+            run_adapter(adapter, "rollback", adapter_env(home, profile, observations, generation, request["uid"]), observations)
             if desktop.exists():
-                expected = manifest["desktop/plugin.js"]
-                plugin = desktop / "plugin.js"
-                if (desktop.is_symlink() or not desktop.is_dir() or {entry.name for entry in desktop.iterdir()} != {"plugin.js"}
-                        or plugin.is_symlink() or not plugin.is_file() or plugin.stat().st_nlink != 1
-                        or plugin.stat().st_uid != request["uid"]
-                        or plugin.stat().st_size != expected["size"]
-                        or hashlib.sha256(plugin.read_bytes()).hexdigest() != expected["sha256"]):
-                    raise EnrollmentError("invalid_target")
                 shutil.rmtree(desktop)
                 fsync_dir(desktop.parent)
             shutil.rmtree(target)
@@ -629,14 +657,18 @@ def main(*, test_mode: bool = False) -> int:
                 trusted_paths = trusted_paths and args.adapter == SYSTEM_ADAPTER
             if not trusted_paths:
                 raise EnrollmentError("untrusted_runtime")
-        _, home, _, manifest = validate_request(request, args.source)
+            if request.get("uid") == 0:
+                raise EnrollmentError("root_denied")
+        _, home, profile, manifest = validate_request(request, args.source)
+        runtime_state = args.state_root if test_mode else scoped_runtime_state(args.state_root, request["uid"], profile)
+        runtime_observations = args.observations if test_mode else runtime_state / "observations.json"
         if args.verb in {"apply", "unenroll"}:
             if args.adapter is None or not args.adapter.is_absolute():
                 raise EnrollmentError("invalid_input")
             if args.verb == "apply":
-                return apply(request, args.source, args.state_root, args.observations, args.adapter)
-            return unenroll(request, args.source, args.state_root, args.observations, args.adapter)
-        state, category = assess(request, home, args.state_root, manifest, args.observations)
+                return apply(request, args.source, runtime_state, runtime_observations, args.adapter)
+            return unenroll(request, args.source, runtime_state, runtime_observations, args.adapter)
+        state, category = assess(request, home, runtime_state, manifest, runtime_observations)
         return emit(state, category)
     except EnrollmentError as exc:
         return emit(exc.state, exc.category)

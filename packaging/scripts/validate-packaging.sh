@@ -27,7 +27,9 @@ packaging/scripts/package-postinstall.sh
 packaging/scripts/package-postremove.sh
 packaging/scripts/skynet-edr-install-hermes-plugin.sh
 packaging/scripts/skynet-edr-hermes-enroll.py
+packaging/scripts/skynet-edr-hermes-enrollment-adapter.py
 packaging/tests/test_hermes_enrollment.py
+packaging/tests/test_hermes_enrollment_adapter.py
 packaging/scripts/vm-smoke.sh
 integrations/hermes/skynet-edr/plugin.yaml
 integrations/hermes/skynet-edr/__init__.py
@@ -53,7 +55,7 @@ else
 fi
 python3 -m unittest discover -s packaging/tests -p 'test_*.py'
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/validate-s2.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/skynet-edr-hermes-enroll.py packaging/scripts/vm-smoke.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/validate-s2.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/skynet-edr-hermes-enroll.py packaging/scripts/skynet-edr-hermes-enrollment-adapter.py packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1

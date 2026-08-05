@@ -36,6 +36,13 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+for snapshot in /var/lib/skynet-edr-hermes-enrollment/adapter/*/snapshot.json; do
+  if [ -f "$snapshot" ]; then
+    echo "Skynet-EDR Hermes enrollment is active; run skynet-edr-hermes-enroll unenroll before uninstalling." >&2
+    exit 1
+  fi
+done
+
 if command -v systemctl >/dev/null 2>&1; then
   systemctl disable --now skynet-edr.service 2>/dev/null || true
 fi
@@ -44,6 +51,8 @@ rm -f "$PREFIX/bin/skynet-edr"
 rm -f "$PREFIX/bin/skynet-edr-daemon"
 rm -f "$PREFIX/bin/skynet-edr-install-hermes-plugin"
 rm -f "$PREFIX/bin/skynet-edr-hermes-enroll"
+rm -f /usr/libexec/skynet-edr/hermes-enrollment-adapter.py
+rmdir /usr/libexec/skynet-edr 2>/dev/null || true
 rm -f /usr/lib/systemd/system/skynet-edr.service
 rm -f /usr/lib/sysusers.d/skynet-edr.conf
 rm -f /usr/lib/tmpfiles.d/skynet-edr.conf
@@ -53,10 +62,10 @@ rm -rf /usr/share/skynet-edr/hermes-plugin
 rmdir /usr/share/doc/skynet-edr /usr/share/skynet-edr 2>/dev/null || true
 
 if [ "$PURGE" -eq 1 ]; then
-  rm -rf /etc/skynet-edr /var/lib/skynet-edr /var/log/skynet-edr /var/cache/skynet-edr /run/skynet-edr
+  rm -rf /etc/skynet-edr /var/lib/skynet-edr /var/lib/skynet-edr-hermes-enrollment /var/log/skynet-edr /var/cache/skynet-edr /run/skynet-edr
   echo "Purged Skynet-EDR config, state, logs, cache, and runtime directories."
 else
-  echo "Preserved /etc/skynet-edr, /var/lib/skynet-edr, /var/log/skynet-edr, and user/group."
+  echo "Preserved /etc/skynet-edr, /var/lib/skynet-edr, /var/lib/skynet-edr-hermes-enrollment, /var/log/skynet-edr, and user/group."
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

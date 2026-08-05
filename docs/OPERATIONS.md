@@ -43,8 +43,9 @@ The doctor command intentionally does not require `rules.d` or `agents.d` direct
 
 ## Continuous ingestion operations
 
-Hermes enrollment automation remains blocked for live hosts until the explicit
-clean-host adapter gate passes. See [Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md);
+The package includes the bounded Hermes enrollment adapter, but live enrollment
+remains blocked until its explicit clean-host gate passes. See
+[Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md);
 do not treat copied plugin bytes, a transport canary, or a zero-exit enable
 command as enrollment proof.
 
