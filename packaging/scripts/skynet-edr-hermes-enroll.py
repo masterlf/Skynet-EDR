@@ -16,11 +16,13 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,10 @@ ALLOWED_FILES = (
 SUPPORTED_HOST = {"id": "ubuntu", "version": "24.04", "arch": "x86_64", "init": "systemd"}
 SUPPORTED_HERMES = {"0.19.0"}
 SYSTEM_SOURCE = Path("/usr/share/skynet-edr/hermes-plugin/skynet-edr")
+SYSTEM_MANIFEST = SYSTEM_SOURCE.parent / "manifest.json"
+SYSTEM_STATE_ROOT = Path("/var/lib/skynet-edr/hermes-enrollment")
+SYSTEM_OBSERVATIONS = SYSTEM_STATE_ROOT / "observations.json"
+SYSTEM_ADAPTER = Path("/usr/libexec/skynet-edr/hermes-enrollment-adapter.py")
 MAX_PAYLOAD_FILE = 8 * 1024 * 1024
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 SAFE_UNIT = re.compile(r"^hermes-[A-Za-z0-9_.@-]+\.service$")
@@ -128,18 +134,33 @@ def validate_request(request: dict[str, Any], source: Path) -> tuple[int, Path, 
         raise EnrollmentError("invalid_input")
     source = checked_absolute(str(source), "payload_identity")
     check_existing_path(source, uid, writable_leaf=False)
-    manifest = request.get("manifest")
+    if request.get("fixture") is True:
+        manifest = request.get("manifest")
+        expected_generation = request.get("manifest_sha256")
+    else:
+        if source != SYSTEM_SOURCE:
+            raise EnrollmentError("payload_identity")
+        try:
+            manifest_info = os.lstat(SYSTEM_MANIFEST)
+        except OSError as exc:
+            raise EnrollmentError("payload_identity") from exc
+        if (not stat.S_ISREG(manifest_info.st_mode) or manifest_info.st_nlink != 1 or manifest_info.st_uid != 0
+                or manifest_info.st_mode & 0o022):
+            raise EnrollmentError("payload_identity")
+        package_manifest = load_json(SYSTEM_MANIFEST, "payload_identity")
+        if package_manifest.get("schema") != 1 or package_manifest.get("payload_version") != "0.4.1":
+            raise EnrollmentError("payload_identity")
+        manifest = package_manifest.get("files")
+        expected_generation = package_manifest.get("generation")
     if not isinstance(manifest, dict) or set(manifest) != set(ALLOWED_FILES):
         raise EnrollmentError("payload_identity")
-    if request.get("manifest_sha256") != canonical_generation(manifest):
-        raise EnrollmentError("payload_identity")
-    if request.get("fixture") is not True and source != SYSTEM_SOURCE:
+    if expected_generation != canonical_generation(manifest):
         raise EnrollmentError("payload_identity")
     validate_tree(source, manifest)
     return uid, home, profile, manifest
 
 
-def validate_tree(root: Path, manifest: dict[str, Any]) -> None:
+def validate_tree(root: Path, manifest: dict[str, Any], *, installed_owner: int | None = None) -> None:
     try:
         actual = {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file() or path.is_symlink()}
     except OSError as exc:
@@ -178,7 +199,8 @@ def validate_tree(root: Path, manifest: dict[str, Any]) -> None:
             raise EnrollmentError("payload_identity")
         if expected.get("mode") != 0o644 or stat.S_IMODE(before.st_mode) != expected.get("mode"):
             raise EnrollmentError("payload_identity")
-        if before.st_uid != expected.get("owner"):
+        expected_owner = expected.get("owner") if installed_owner is None else installed_owner
+        if before.st_uid != expected_owner:
             raise EnrollmentError("payload_identity")
     try:
         plugin_yaml = (root / "plugin.yaml").read_text(encoding="utf-8")
@@ -190,22 +212,22 @@ def validate_tree(root: Path, manifest: dict[str, Any]) -> None:
         raise EnrollmentError("payload_identity")
 
 
-def installed_state(home: Path, state_root: Path, manifest: dict[str, Any]) -> tuple[bool, str]:
+def installed_state(home: Path, state_root: Path, manifest: dict[str, Any], uid: int) -> tuple[bool, str, dict[str, Any]]:
     target = home / "plugins" / "skynet-edr"
     metadata = state_root / "enrollment.json"
     if not target.exists() and not metadata.exists():
-        return False, "ABSENT"
+        return False, "ABSENT", {}
     if target.is_symlink() or not target.is_dir() or not metadata.is_file():
-        return False, "DRIFTED"
+        return False, "DRIFTED", {}
     try:
-        validate_tree(target, manifest)
+        validate_tree(target, manifest, installed_owner=uid)
         enrolled = load_json(metadata, "installed_state")
     except EnrollmentError:
-        return False, "DRIFTED"
+        return False, "DRIFTED", {}
     generation = canonical_generation(manifest)
     if enrolled.get("generation") != generation:
-        return False, "DRIFTED"
-    return True, generation
+        return False, "DRIFTED", {}
+    return True, generation, enrolled
 
 
 def observe(path: Path) -> dict[str, Any]:
@@ -213,11 +235,24 @@ def observe(path: Path) -> dict[str, Any]:
 
 
 def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict[str, Any], observations: Path) -> tuple[str, str]:
-    installed, detail = installed_state(home, state_root, manifest)
+    installed, detail, enrolled = installed_state(home, state_root, manifest, request["uid"])
     if not installed:
         return detail, "enrollment_state"
     obs = observe(observations)
     generation = canonical_generation(manifest)
+    observed_at = obs.get("observed_at_ns")
+    now = time.time_ns()
+    if (
+        obs.get("action") != "hook"
+        or obs.get("transaction_nonce") != enrolled.get("verified_nonce")
+        or obs.get("observed_generation") != generation
+        or obs.get("target_uid") != request["uid"]
+        or obs.get("effective_uid") != request["uid"]
+        or not isinstance(observed_at, int)
+        or observed_at > now
+        or now - observed_at > 30_000_000_000
+    ):
+        return "DRIFTED", "observation_failure"
     if obs.get("plugin_enabled") is not True or obs.get("loaded_generation") != generation:
         return "DRIFTED", "enablement"
     if obs.get("process_fresh") is not True:
@@ -243,7 +278,7 @@ def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict
     return "ENROLLED", "verified"
 
 
-def adapter_env(home: Path, profile: str, observations: Path, generation: str) -> dict[str, str]:
+def adapter_env(home: Path, profile: str, observations: Path, generation: str, uid: int) -> dict[str, str]:
     return {
         "HOME": str(home.parent),
         "HERMES_HOME": str(home),
@@ -251,20 +286,70 @@ def adapter_env(home: Path, profile: str, observations: Path, generation: str) -
         "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
         "SKYNET_EDR_GENERATION": generation,
         "SKYNET_EDR_OBSERVATIONS": str(observations),
+        "SKYNET_EDR_TARGET_UID": str(uid),
     }
 
 
-def run_adapter(adapter: Path, action: str, env: dict[str, str]) -> None:
+def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: Path) -> dict[str, Any]:
+    nonce = secrets.token_hex(32)
+    action_env = dict(env)
+    action_env["SKYNET_EDR_NONCE"] = nonce
+    action_env["SKYNET_EDR_ACTION"] = action
+    target_uid = int(env["SKYNET_EDR_TARGET_UID"])
+    target_gid = pwd.getpwuid(target_uid).pw_gid
+
+    def use_target_identity() -> None:
+        if target_uid == os.geteuid():
+            return
+        if os.geteuid() != 0:
+            raise OSError("identity transition unavailable")
+        os.setgroups([])
+        os.setgid(target_gid)
+        os.setuid(target_uid)
+
+    target_action = action in {"enable", "disable", "hook"}
     try:
         info = os.lstat(adapter)
-        if adapter.is_symlink() or not stat.S_ISREG(info.st_mode) or not os.access(adapter, os.X_OK):
+        if (adapter.is_symlink() or not stat.S_ISREG(info.st_mode) or not os.access(adapter, os.X_OK)
+                or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_uid != 0):
             raise OSError("invalid adapter")
-        result = subprocess.run([str(adapter), action], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=30, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
+        result = subprocess.run(
+            ["/usr/bin/python3", str(adapter), action], env=action_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=30, check=False, preexec_fn=use_target_identity if target_action else None,
+        )
+        if len(result.stdout) > 65_536:
+            raise OSError("oversized adapter response")
+        response = json.loads(result.stdout)
+    except (OSError, KeyError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         raise EnrollmentError("adapter_failure") from exc
-    if result.returncode != 0:
+    if result.returncode != 0 or not isinstance(response, dict):
         raise EnrollmentError("adapter_failure")
+    response.update({
+        "transaction_nonce": nonce,
+        "action": action,
+        "observed_generation": env["SKYNET_EDR_GENERATION"],
+        "target_uid": target_uid,
+        "effective_uid": target_uid if target_action else os.geteuid(),
+        "observed_at_ns": time.time_ns(),
+    })
+    observations.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".observation.", dir=observations.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, json.dumps(response, sort_keys=True).encode("ascii"))
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temporary, observations)
+        fsync_dir(observations.parent)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return response
 
 
 def fsync_dir(path: Path) -> None:
@@ -275,11 +360,13 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def copy_generation(source: Path, stage: Path, manifest: dict[str, Any]) -> None:
+def copy_generation(source: Path, stage: Path, manifest: dict[str, Any], uid: int, gid: int) -> None:
     stage.mkdir(mode=0o700)
+    os.chown(stage, uid, gid)
     for relative in ALLOWED_FILES:
         destination = stage / relative
         destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chown(destination.parent, uid, gid)
         source_path = source / relative
         source_info = os.lstat(source_path)
         source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -292,6 +379,7 @@ def copy_generation(source: Path, stage: Path, manifest: dict[str, Any]) -> None
                         break
                     os.write(destination_fd, chunk)
                 os.fchmod(destination_fd, 0o644)
+                os.fchown(destination_fd, uid, gid)
                 os.fsync(destination_fd)
             finally:
                 os.close(destination_fd)
@@ -300,18 +388,19 @@ def copy_generation(source: Path, stage: Path, manifest: dict[str, Any]) -> None
             os.close(source_fd)
         if (source_info.st_dev, source_info.st_ino, source_info.st_size) != (after.st_dev, after.st_ino, after.st_size):
             raise EnrollmentError("payload_identity")
-    validate_tree(stage, manifest)
+    validate_tree(stage, manifest, installed_owner=uid)
     for directory in sorted((path for path in stage.rglob("*") if path.is_dir()), reverse=True):
         fsync_dir(directory)
     fsync_dir(stage)
 
 
-def write_metadata(state_root: Path, generation: str, uid: int, profile: str) -> None:
+def write_metadata(state_root: Path, generation: str, uid: int, profile: str, verified_nonce: str | None) -> None:
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".enrollment.", dir=state_root)
     try:
         os.fchmod(fd, 0o600)
-        data = json.dumps({"schema": 1, "generation": generation, "uid": uid, "profile": profile}, sort_keys=True).encode("ascii")
+        data = json.dumps({"schema": 1, "generation": generation, "uid": uid, "profile": profile,
+                           "verified_nonce": verified_nonce}, sort_keys=True).encode("ascii")
         os.write(fd, data)
         os.fsync(fd)
         os.close(fd)
@@ -327,19 +416,93 @@ def write_metadata(state_root: Path, generation: str, uid: int, profile: str) ->
             pass
 
 
-def rollback_target(target: Path, prior: Path, state_root: Path) -> None:
+def restore_metadata(state_root: Path, previous: bytes | None) -> None:
+    metadata = state_root / "enrollment.json"
+    if previous is None:
+        try:
+            metadata.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    fd, temporary = tempfile.mkstemp(prefix=".rollback-metadata.", dir=state_root)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, previous)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temporary, metadata)
+        fsync_dir(state_root)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def rollback_target(target: Path, prior: Path, state_root: Path, previous_metadata: bytes | None) -> None:
     if target.exists():
         shutil.rmtree(target)
     if prior.exists():
         os.replace(prior, target)
+    restore_metadata(state_root, previous_metadata)
+
+
+def install_desktop(source: Path, home: Path, state_root: Path, uid: int, gid: int) -> tuple[Path, Path]:
+    parent = home / "desktop-plugins"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    os.chown(parent, uid, gid)
+    target = parent / "skynet-edr"
+    prior = state_root / "prior-desktop"
+    if prior.exists():
+        shutil.rmtree(prior)
+    stage = Path(tempfile.mkdtemp(prefix=".skynet-edr-desktop-", dir=parent))
+    os.chown(stage, uid, gid)
     try:
-        (state_root / "enrollment.json").unlink()
-    except FileNotFoundError:
-        pass
+        copy_generation_file(source / "desktop" / "plugin.js", stage / "plugin.js", uid, gid)
+        fsync_dir(stage)
+        if target.exists():
+            if target.is_symlink() or not target.is_dir() or {entry.name for entry in target.iterdir()} != {"plugin.js"}:
+                raise EnrollmentError("invalid_target")
+            os.replace(target, prior)
+        os.replace(stage, target)
+        fsync_dir(parent)
+    except Exception:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return target, prior
+
+
+def copy_generation_file(source: Path, destination: Path, uid: int, gid: int) -> None:
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        destination_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            while chunk := os.read(source_fd, 65536):
+                os.write(destination_fd, chunk)
+            os.fchmod(destination_fd, 0o644)
+            os.fchown(destination_fd, uid, gid)
+            os.fsync(destination_fd)
+        finally:
+            os.close(destination_fd)
+    finally:
+        os.close(source_fd)
+
+
+def rollback_desktop(target: Path, prior: Path) -> None:
+    if target.exists():
+        shutil.rmtree(target)
+    if prior.exists():
+        os.replace(prior, target)
+        fsync_dir(target.parent)
 
 
 def apply(request: dict[str, Any], source: Path, state_root: Path, observations: Path, adapter: Path) -> int:
     uid, home, profile, manifest = validate_request(request, source)
+    gid = pwd.getpwuid(uid).pw_gid
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = state_root / "enrollment.lock"
     with lock_path.open("a+b") as lock:
@@ -351,32 +514,39 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         generation = canonical_generation(manifest)
         target_parent = home / "plugins"
         target_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chown(target_parent, uid, gid)
         target = target_parent / "skynet-edr"
         stage = target_parent / f".skynet-edr-stage-{os.getpid()}"
         prior = state_root / "prior-generation"
+        metadata_path = state_root / "enrollment.json"
+        previous_metadata = metadata_path.read_bytes() if metadata_path.exists() else None
+        desktop_target: Path | None = None
+        desktop_prior: Path | None = None
         if stage.exists():
             shutil.rmtree(stage)
         if prior.exists():
             shutil.rmtree(prior)
         committed = False
         try:
-            copy_generation(source, stage, manifest)
+            copy_generation(source, stage, manifest, uid, gid)
             if target.exists():
                 if target.is_symlink() or not target.is_dir():
                     raise EnrollmentError("invalid_target")
                 os.replace(target, prior)
+            committed = True
             os.replace(stage, target)
             fsync_dir(target_parent)
-            write_metadata(state_root, generation, uid, profile)
-            committed = True
-            env = adapter_env(home, profile, observations, generation)
-            run_adapter(adapter, "enable", env)
-            if observe(observations).get("plugin_enabled") is not True:
+            desktop_target, desktop_prior = install_desktop(source, home, state_root, uid, gid)
+            write_metadata(state_root, generation, uid, profile, None)
+            env = adapter_env(home, profile, observations, generation, uid)
+            enabled = run_adapter(adapter, "enable", env, observations)
+            if enabled.get("plugin_enabled") is not True:
                 raise EnrollmentError("enablement")
             if request.get("restart_authorized") is not True:
                 return emit("RELOAD_REQUIRED", "reload_boundary")
-            run_adapter(adapter, "restart", env)
-            run_adapter(adapter, "hook", env)
+            run_adapter(adapter, "restart", env, observations)
+            hooked = run_adapter(adapter, "hook", env, observations)
+            write_metadata(state_root, generation, uid, profile, hooked["transaction_nonce"])
             final_state, final_category = assess(request, home, state_root, manifest, observations)
             if final_state != "ENROLLED":
                 raise EnrollmentError(final_category, final_state)
@@ -384,8 +554,10 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         except EnrollmentError as exc:
             if committed:
                 try:
-                    run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation))
-                    rollback_target(target, prior, state_root)
+                    run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, uid), observations)
+                    if desktop_target is not None and desktop_prior is not None:
+                        rollback_desktop(desktop_target, desktop_prior)
+                    rollback_target(target, prior, state_root, previous_metadata)
                 except (EnrollmentError, OSError):
                     return emit("ROLLBACK_REQUIRED", "rollback")
             if stage.exists():
@@ -403,11 +575,23 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
             return emit("ABSENT", "unenrolled", noop=True, success=True)
         generation = canonical_generation(manifest)
         try:
-            run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation))
-            if observe(observations).get("plugin_enabled") is not False:
+            disabled = run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, request["uid"]), observations)
+            if disabled.get("plugin_enabled") is not False:
                 raise EnrollmentError("enablement")
             if target.is_symlink() or not target.is_dir():
                 raise EnrollmentError("invalid_target")
+            desktop = home / "desktop-plugins" / "skynet-edr"
+            if desktop.exists():
+                expected = manifest["desktop/plugin.js"]
+                plugin = desktop / "plugin.js"
+                if (desktop.is_symlink() or not desktop.is_dir() or {entry.name for entry in desktop.iterdir()} != {"plugin.js"}
+                        or plugin.is_symlink() or not plugin.is_file() or plugin.stat().st_nlink != 1
+                        or plugin.stat().st_uid != request["uid"]
+                        or plugin.stat().st_size != expected["size"]
+                        or hashlib.sha256(plugin.read_bytes()).hexdigest() != expected["sha256"]):
+                    raise EnrollmentError("invalid_target")
+                shutil.rmtree(desktop)
+                fsync_dir(desktop.parent)
             shutil.rmtree(target)
             try:
                 (state_root / "enrollment.json").unlink()
@@ -429,10 +613,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def main(*, test_mode: bool = False) -> int:
     args = parse_args()
     try:
         request = load_json(args.request, "invalid_input")
+        if not test_mode:
+            trusted_paths = (
+                args.source == SYSTEM_SOURCE
+                and args.state_root == SYSTEM_STATE_ROOT
+                and args.observations == SYSTEM_OBSERVATIONS
+                and request.get("fixture") is not True
+                and os.geteuid() == 0
+            )
+            if args.verb in {"apply", "unenroll"}:
+                trusted_paths = trusted_paths and args.adapter == SYSTEM_ADAPTER
+            if not trusted_paths:
+                raise EnrollmentError("untrusted_runtime")
         _, home, _, manifest = validate_request(request, args.source)
         if args.verb in {"apply", "unenroll"}:
             if args.adapter is None or not args.adapter.is_absolute():

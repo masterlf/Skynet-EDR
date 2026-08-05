@@ -30,6 +30,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for the fail-closed Hermes enrollment command" >&2
+  exit 1
+fi
+
 case "$PREFIX" in
   /*) ;;
   *)
@@ -111,6 +116,7 @@ fi
 install_file "$ROOT/docs/INSTALL.md" /usr/share/doc/skynet-edr/INSTALL.md 0644 root:root
 install_file "$ROOT/docs/PACKAGING.md" /usr/share/doc/skynet-edr/PACKAGING.md 0644 root:root
 if [ -d "$ROOT/integrations/hermes/skynet-edr" ]; then
+  install_file "$ROOT/integrations/hermes/manifest.json" /usr/share/skynet-edr/hermes-plugin/manifest.json 0644 root:root
   install -d -m 0755 -o root -g root /usr/share/skynet-edr/hermes-plugin/skynet-edr
   install_file "$ROOT/integrations/hermes/skynet-edr/plugin.yaml" /usr/share/skynet-edr/hermes-plugin/skynet-edr/plugin.yaml 0644 root:root
   install_file "$ROOT/integrations/hermes/skynet-edr/__init__.py" /usr/share/skynet-edr/hermes-plugin/skynet-edr/__init__.py 0644 root:root

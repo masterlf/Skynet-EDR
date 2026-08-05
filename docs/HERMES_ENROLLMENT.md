@@ -10,16 +10,17 @@ The only compatibility cell exercised by the transaction tests is Ubuntu 24.04, 
 
 `skynet-edr-hermes-enroll check|apply|verify|unenroll` consumes:
 
-- `--request`: private JSON naming the OS account and numeric UID, exact absolute `hermes_home`, named profile, exact host tuple, exact Hermes/plugin versions, reviewed unit names, restart authorization, socket DAC+UID decisions, and an allowlisted file manifest containing SHA-256, size, mode, and owner;
+- `--request`: private JSON naming the OS account and numeric UID, exact absolute `hermes_home`, named profile, exact host tuple, exact Hermes/plugin versions, reviewed unit names, restart authorization, and socket DAC+UID decisions;
 - `--source`: exact trusted package payload directory. Non-fixture requests are
   pinned to `/usr/share/skynet-edr/hermes-plugin/skynet-edr`; `fixture: true` is
   test-only and must never be accepted by a future live adapter;
-- `--state-root`: private tool-owned lock, transaction metadata, prior generation, and preserved evidence root;
-- `--observations`: private fresh observation JSON produced by the reviewed boundary adapter;
-- `--adapter`: required only for mutations; an absolute executable invoked without a shell.
+- `--state-root`: production is pinned to `/var/lib/skynet-edr/hermes-enrollment`; caller-selected roots are rejected by the shipped entry point;
+- `--observations`: production is pinned inside that private root. The transaction, not the target process, atomically writes the bounded adapter result as `0600`;
+- `--adapter`: mutations are pinned to the root-owned, non-writable package adapter path. Arbitrary adapters are accepted only by the in-process deterministic test harness.
 
-The request also pins the canonical `manifest_sha256`; changing any manifest
-field without updating that digest fails closed. The compatibility name
+The production payload identity comes from the root-owned package manifest at
+`/usr/share/skynet-edr/hermes-plugin/manifest.json`; caller-supplied manifest
+fields are ignored outside deterministic tests. The compatibility name
 `skynet-edr-install-hermes-plugin` delegates to this command. The former advisory
 copy-and-print path is intentionally gone.
 
@@ -29,15 +30,15 @@ Output is one bounded JSON object with fixed `schema`, `state`, `category`, and 
 
 `check` is read-only. It resolves account/UID, rejects implicit root, relative/traversal/control-character paths, symlink/non-directory components, writable untrusted ancestors, unsupported host/version tuples, ambiguous authorization, malformed units, non-allowlisted payload entries, special/symlink/hard-linked files, and byte/size/mode/owner/version drift.
 
-`apply` serializes on a private lock, re-checks state, stages allowlisted files with `O_NOFOLLOW`, fsyncs files/directories, atomically renames the complete generation, preserves one prior generation, and invokes only the reviewed adapter actions. `HERMES_HOME`, `HERMES_PROFILE`, and the expected generation are passed on every adapter action. Enable, restart, and harmless real-hook actions require fresh read-back; command exit alone is never proof. Without explicit restart authorization, the result is `RELOAD_REQUIRED` and nonzero. A second verified apply is a no-op with no file/mtime/adapter churn.
+`apply` serializes on a private lock, re-checks state, stages allowlisted files with `O_NOFOLLOW`, fsyncs files/directories, atomically renames the complete backend and Desktop generations, preserves prior bytes plus metadata, and invokes only the reviewed adapter actions. `HERMES_HOME`, `HERMES_PROFILE`, and the expected generation are passed on every adapter action. Target Hermes actions execute after an explicit UID/GID/supplementary-group credential drop; installed files are owned by that numeric UID. Each action has a random nonce, and the parent accepts only a bounded adapter JSON result before atomically replacing the private observation. The final hook nonce is bound into enrollment metadata and expires after 30 seconds, so stale/replayed observations fail closed. Without explicit restart authorization, the result is `RELOAD_REQUIRED` and nonzero. A second freshly verified apply is a no-op with no file/mtime/adapter churn.
 
 `verify` rereads installed bytes and observations. It requires enabled read-back, exact loaded generation, a fresh process boundary, healthy listener and transport, zero backlog/degradation, fresh numeric UID plus `gateway` role, and a uniquely correlated committed harmless real hook that opened no incident. A synthetic canary never satisfies the hook proof.
 
-`unenroll` disables with read-back and removes only the selected tool-owned generation/metadata. It preserves evidence state and unrelated users/profiles. Evidence purge is deliberately out of scope.
+`unenroll` disables with fresh nonce-bound read-back and removes only matching selected backend/Desktop generations and metadata. It preserves evidence state and unrelated users/profiles. Evidence purge is deliberately out of scope.
 
 ## Adapter contract
 
-The adapter is a security boundary, not arbitrary plugin output. It receives one action argument: `enable`, `disable`, `restart`, or `hook`. It receives a minimal environment containing exact `HOME`, `HERMES_HOME`, `HERMES_PROFILE`, `SKYNET_EDR_GENERATION`, and `SKYNET_EDR_OBSERVATIONS`. It must use typed parsers for daemon config, exact per-unit role drop-ins, exact reviewed units, socket DAC and numeric UID authorization. It must never set a global role or silently broaden units/groups/config. It updates the private observation document atomically only after fresh read-back.
+The adapter is a security boundary, not arbitrary plugin output. It receives one action argument: `enable`, `disable`, `restart`, or `hook`. It receives a minimal environment containing exact `HOME`, `HERMES_HOME`, `HERMES_PROFILE`, generation, target UID, action, and random nonce. Target actions run as the requested non-root identity; restart remains privileged and bounded. The adapter returns one bounded JSON observation on stdout; stdout/stderr are never forwarded, and the parent writes trusted metadata plus the result privately. It must use typed parsers for daemon config, exact per-unit role drop-ins, exact reviewed units, socket DAC and numeric UID authorization. It must never set a global role or silently broaden units/groups/config.
 
 The repository fixture adapter is mocked at service/config boundaries and is not permission to mutate a live system.
 

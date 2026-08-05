@@ -71,6 +71,12 @@ contents:
       mode: 0644
       owner: root
       group: root
+  - src: ./dist/staging/nfpm/hermes-plugin/manifest.json
+    dst: /usr/share/skynet-edr/hermes-plugin/manifest.json
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
   - src: ./packaging/scripts/skynet-edr-install-hermes-plugin.sh
     dst: /usr/bin/skynet-edr-install-hermes-plugin
     file_info:
@@ -110,6 +116,20 @@ contents:
 
 depends:
   - systemd
+
+overrides:
+  deb:
+    depends:
+      - systemd
+      - python3
+  rpm:
+    depends:
+      - systemd
+      - python3
+  archlinux:
+    depends:
+      - systemd
+      - python
 
 deb:
   fields:

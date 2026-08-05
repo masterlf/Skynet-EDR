@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import pwd
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -90,31 +91,70 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.obs_path.write_text(json.dumps(self.obs), encoding="utf-8")
 
     def run_cli(self, verb, *extra):
+        harness = (
+            "import importlib.util,sys;"
+            f"s=importlib.util.spec_from_file_location('hermes_enroll',{str(MODULE)!r});"
+            "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+            "raise SystemExit(m.main(test_mode=True))"
+        )
         result = subprocess.run(
-            ["python3", str(MODULE), verb, "--request", str(self.request_path), "--source", str(self.source),
+            ["python3", "-c", harness, verb, "--request", str(self.request_path), "--source", str(self.source),
              "--state-root", str(self.state), "--observations", str(self.obs_path), *extra],
             cwd=ROOT, text=True, capture_output=True, check=False,
         )
         return result, json.loads(result.stdout)
 
-    def make_adapter(self, enabled=True, healthy=True):
+    def test_shipped_entrypoint_rejects_fixture_and_caller_selected_roots(self):
+        result = subprocess.run(
+            ["python3", str(MODULE), "verify", "--request", str(self.request_path), "--source", str(self.source),
+             "--state-root", str(self.state), "--observations", str(self.obs_path)],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        output = json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output["category"], "untrusted_runtime")
+
+    def test_nonfixture_payload_identity_comes_from_package_manifest(self):
+        module = load_module()
+        package_manifest = self.base / "manifest.json"
+        package_manifest.write_text(json.dumps({
+            "schema": 1,
+            "payload_version": "0.4.1",
+            "generation": self.request["manifest_sha256"],
+            "files": self.manifest,
+        }), encoding="utf-8")
+        package_manifest.chmod(0o644)
+        setattr(module, "SYSTEM_SOURCE", self.source)
+        setattr(module, "SYSTEM_MANIFEST", package_manifest)
+        request = dict(self.request)
+        request["fixture"] = False
+        request["manifest"] = {"attacker": {}}
+        request["manifest_sha256"] = "0" * 64
+        _, _, _, actual = module.validate_request(request, self.source)
+        self.assertEqual(actual, self.manifest)
+
+    def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile"):
+        home = self.home if home is None else home
         adapter = self.base / "adapter.py"
         adapter.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, os, pathlib, sys\n"
-            "p=pathlib.Path(os.environ['SKYNET_EDR_OBSERVATIONS'])\n"
-            "o=json.loads(p.read_text())\n"
-            "assert os.environ['HERMES_HOME']==" + repr(str(self.home)) + "\n"
-            "assert os.environ['HERMES_PROFILE']=='fixture-profile'\n"
+            "import json, os, sys\n"
+            "assert os.environ['HERMES_HOME']==" + repr(str(home)) + "\n"
+            "assert os.environ['HERMES_PROFILE']==" + repr(profile) + "\n"
+            "o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False,"
+            "'daemon':{'healthy':False,'listener':True,'transport':'available','backlog':0,'degraded':False},"
+            "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':False},"
+            "'real_hook':{'correlated':False,'committed':False,'incident_opened':False}}\n"
             "if sys.argv[1]=='enable':\n"
             f" o['plugin_enabled']={enabled!r}\n"
             " o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']\n"
             "elif sys.argv[1]=='disable': o['plugin_enabled']=False\n"
             "elif sys.argv[1]=='restart':\n"
-            f" o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}\n"
+            f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}\n"
             "elif sys.argv[1]=='hook':\n"
-            " o['real_hook']={'correlated':True,'committed':True,'incident_opened':False}\n"
-            "p.write_text(json.dumps(o))\n",
+            f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}; o['real_hook']={{'correlated':True,'committed':True,'incident_opened':False}}\n"
+            "o['adapter_euid']=os.geteuid()\n"
+            "print(json.dumps(o))\n",
             encoding="utf-8",
         )
         adapter.chmod(0o700)
@@ -141,9 +181,96 @@ class HermesEnrollmentTests(unittest.TestCase):
         after = {p.relative_to(target): (p.stat().st_mtime_ns, p.read_bytes()) for p in target.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
 
+    def test_stale_unchanged_observation_cannot_enroll(self):
+        generation = hashlib.sha256(
+            json.dumps(self.manifest, sort_keys=True, separators=(",", ":")).encode("ascii")
+        ).hexdigest()
+        self.obs.update({
+            "plugin_enabled": True,
+            "loaded_generation": generation,
+            "process_fresh": True,
+            "daemon": {"healthy": True, "listener": True, "transport": "available", "backlog": 0, "degraded": False},
+            "producer": {"uid": os.getuid(), "role": "gateway", "fresh": True},
+            "real_hook": {"correlated": True, "committed": True, "incident_opened": False},
+        })
+        self._write_inputs()
+        before = self.obs_path.read_bytes()
+        adapter = self.base / "noop.py"
+        adapter.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        adapter.chmod(0o700)
+        result, output = self.run_cli("apply", "--adapter", str(adapter))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(output["state"], "ENROLLED")
+        self.assertEqual(before, self.obs_path.read_bytes())
+
+    def test_failed_reapply_restores_prior_metadata_and_generation(self):
+        adapter = self.make_adapter()
+        result, _ = self.run_cli("apply", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata_before = (self.state / "enrollment.json").read_bytes()
+        target = self.home / "plugins" / "skynet-edr"
+        bytes_before = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+
+        self.obs = json.loads(self.obs_path.read_text(encoding="utf-8"))
+        self.obs["daemon"]["degraded"] = True
+        self._write_inputs()
+        result, output = self.run_cli("apply", "--adapter", self.make_adapter(enabled=False))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(output["state"], {"DRIFTED", "ROLLBACK_REQUIRED"})
+        self.assertEqual(metadata_before, (self.state / "enrollment.json").read_bytes())
+        self.assertEqual(bytes_before, {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()})
+
+    def test_desktop_companion_is_transactional(self):
+        adapter = self.make_adapter()
+        result, _ = self.run_cli("apply", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        desktop = self.home / "desktop-plugins" / "skynet-edr" / "plugin.js"
+        self.assertEqual(desktop.read_bytes(), (self.source / "desktop" / "plugin.js").read_bytes())
+        result, _ = self.run_cli("unenroll", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(desktop.exists())
+
     def test_custom_home_and_profile_are_passed_to_every_adapter_action(self):
         result, output = self.run_cli("apply", "--adapter", self.make_adapter())
         self.assertEqual(result.returncode, 0, (result.stderr, output))
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires root to prove credential drop")
+    def test_target_actions_and_installed_generation_use_requested_nonroot_uid(self):
+        target = pwd.getpwnam("nobody")
+        accessible = Path(tempfile.mkdtemp(prefix="skynet-hermes-target-", dir="/var/tmp"))
+        self.addCleanup(shutil.rmtree, accessible, True)
+        accessible.chmod(0o755)
+        target_home = accessible / "home"
+        target_home.mkdir(mode=0o700)
+        os.chown(target_home, target.pw_uid, target.pw_gid)
+        self.request.update({
+            "account": target.pw_name,
+            "uid": target.pw_uid,
+            "allow_root": False,
+            "hermes_home": str(target_home),
+            "profile": "target-profile",
+        })
+        self.obs["producer"]["uid"] = target.pw_uid
+        self._write_inputs()
+        adapter = accessible / "adapter.py"
+        adapter.write_text(
+            "import json,os,sys\n"
+            "healthy=sys.argv[1] in {'restart','hook'}\n"
+            "print(json.dumps({'plugin_enabled':sys.argv[1]!='disable','loaded_generation':os.environ['SKYNET_EDR_GENERATION'],"
+            "'process_fresh':healthy,'daemon':{'healthy':healthy,'listener':True,'transport':'available','backlog':0,'degraded':False},"
+            "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':healthy},"
+            "'real_hook':{'correlated':sys.argv[1]=='hook','committed':sys.argv[1]=='hook','incident_opened':False},"
+            "'adapter_euid':os.geteuid()}))\n",
+            encoding="utf-8",
+        )
+        adapter.chmod(0o755)
+        result, output = self.run_cli("apply", "--adapter", str(adapter))
+        self.assertEqual(result.returncode, 0, (result.stderr, output))
+        installed = target_home / "plugins" / "skynet-edr"
+        self.assertTrue(all(path.stat().st_uid == target.pw_uid for path in installed.rglob("*") if path.is_file()))
+        self.assertEqual((target_home / "desktop-plugins" / "skynet-edr" / "plugin.js").stat().st_uid, target.pw_uid)
+        observation = json.loads(self.obs_path.read_text(encoding="utf-8"))
+        self.assertEqual(observation["adapter_euid"], target.pw_uid)
 
     def test_enable_zero_without_readback_fails_closed_and_rolls_back(self):
         result, output = self.run_cli("apply", "--adapter", self.make_adapter(enabled=False))
@@ -262,6 +389,14 @@ class HermesEnrollmentTests(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertNotIn(marker, combined)
         self.assertEqual(output["category"], "rollback")
+
+    def test_all_package_formats_and_tarball_require_python_runtime(self):
+        nfpm = (ROOT / "packaging" / "nfpm.yaml").read_text(encoding="utf-8")
+        self.assertIn("deb:\n    depends:\n      - systemd\n      - python3", nfpm)
+        self.assertIn("rpm:\n    depends:\n      - systemd\n      - python3", nfpm)
+        self.assertIn("archlinux:\n    depends:\n      - systemd\n      - python", nfpm)
+        installer = (ROOT / "packaging" / "tarball" / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("command -v python3", installer)
 
 
 if __name__ == "__main__":
