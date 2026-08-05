@@ -77,6 +77,12 @@ contents:
       mode: 0755
       owner: root
       group: root
+  - src: ./packaging/scripts/skynet-edr-hermes-enroll.py
+    dst: /usr/bin/skynet-edr-hermes-enroll
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
   - src: ./docs/INSTALL.md
     dst: /usr/share/doc/skynet-edr/INSTALL.md
   - src: ./docs/PACKAGING.md

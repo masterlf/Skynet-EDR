@@ -43,6 +43,7 @@ fi
 rm -f "$PREFIX/bin/skynet-edr"
 rm -f "$PREFIX/bin/skynet-edr-daemon"
 rm -f "$PREFIX/bin/skynet-edr-install-hermes-plugin"
+rm -f "$PREFIX/bin/skynet-edr-hermes-enroll"
 rm -f /usr/lib/systemd/system/skynet-edr.service
 rm -f /usr/lib/sysusers.d/skynet-edr.conf
 rm -f /usr/lib/tmpfiles.d/skynet-edr.conf

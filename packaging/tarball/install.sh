@@ -129,6 +129,9 @@ fi
 if [ -f "$ROOT/skynet-edr-install-hermes-plugin.sh" ]; then
   install_file "$ROOT/skynet-edr-install-hermes-plugin.sh" "$PREFIX/bin/skynet-edr-install-hermes-plugin" 0755 root:root
 fi
+if [ -f "$ROOT/skynet-edr-hermes-enroll.py" ]; then
+  install_file "$ROOT/skynet-edr-hermes-enroll.py" "$PREFIX/bin/skynet-edr-hermes-enroll" 0755 root:root
+fi
 
 install -d -m 0750 -o skynet-edr -g skynet-edr /var/lib/skynet-edr /var/log/skynet-edr /var/cache/skynet-edr /run/skynet-edr
 

@@ -144,25 +144,19 @@ journalctl -u skynet-edr.service -n 100 --no-pager
 
 Current caveat: the service starts the conservative passive daemon path. Review `/etc/skynet-edr/config.toml` before enablement; privileged sensors remain disabled and unsupported by the MVP service.
 
-## Install the Hermes plugin
+## Enroll the Hermes plugin
 
-Skynet-EDR v0.4 packages ship a passive Hermes Agent plugin template plus a
-per-user installer. Run the installer as the Hermes user, not through the
-`skynet-edr` service account:
+The historical advisory copier has been removed because copied bytes and a
+successful enable command cannot prove enrollment. `skynet-edr-install-hermes-plugin`
+now delegates to the machine-readable `skynet-edr-hermes-enroll` transaction.
+See [Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md) for its exact request,
+manifest, observation, adapter, rollback, and clean-host gate contracts.
 
-```bash
-skynet-edr-install-hermes-plugin
-hermes plugins enable skynet-edr  # if Hermes requires explicit opt-in
-```
-
-Authorize the Hermes producer explicitly, then restart its login session and
-the daemon (replace `1000` with the reviewed Hermes user's numeric UID):
-
-```bash
-sudo usermod -aG skynet-edr-ingest "$USER"
-# Edit /etc/skynet-edr/config.toml: allowed_uids = [1000]
-sudo systemctl restart skynet-edr
-```
+The repository currently ships the transaction and deterministic boundary
+fixtures, but not a privileged live-host adapter. Therefore no live deployment
+may yet claim autonomous `ENROLLED`; the current operational verdict is
+`S3_IMPLEMENTATION_BLOCK`. Do not recreate the removed copy/enable/manual-restart
+sequence as a parallel success path.
 
 The plugin worker sends to `/run/skynet-edr-ingest/ingest.sock`. During daemon
 outages it writes a private versioned fallback under:
@@ -238,6 +232,7 @@ skynet-edr-VERSION-TARGET/
   install.sh
   uninstall.sh
   skynet-edr-install-hermes-plugin.sh
+  skynet-edr-hermes-enroll.py
   integrations/hermes/skynet-edr/plugin.yaml
   integrations/hermes/skynet-edr/__init__.py
   integrations/hermes/skynet-edr/README.md

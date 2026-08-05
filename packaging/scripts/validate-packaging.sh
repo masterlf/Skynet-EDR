@@ -26,6 +26,8 @@ packaging/scripts/verify-public-release.sh
 packaging/scripts/package-postinstall.sh
 packaging/scripts/package-postremove.sh
 packaging/scripts/skynet-edr-install-hermes-plugin.sh
+packaging/scripts/skynet-edr-hermes-enroll.py
+packaging/tests/test_hermes_enrollment.py
 packaging/scripts/vm-smoke.sh
 integrations/hermes/skynet-edr/plugin.yaml
 integrations/hermes/skynet-edr/__init__.py
@@ -51,7 +53,7 @@ else
 fi
 python3 -m unittest discover -s packaging/tests -p 'test_*.py'
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/validate-s2.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/vm-smoke.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/validate-s2.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/skynet-edr-hermes-enroll.py packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1
@@ -101,6 +103,7 @@ grep -q 'packaging/scripts/package-postremove.sh' packaging/nfpm.yaml
 grep -q '/usr/share/skynet-edr/hermes-plugin/skynet-edr' packaging/nfpm.yaml
 grep -q 'dist/staging/nfpm/hermes-plugin/skynet-edr' packaging/nfpm.yaml
 grep -q '/usr/bin/skynet-edr-install-hermes-plugin' packaging/nfpm.yaml
+grep -q '/usr/bin/skynet-edr-hermes-enroll' packaging/nfpm.yaml
 grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-tarball.sh
 grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-packages.sh
 python3 - <<'PY'
@@ -139,9 +142,7 @@ if grep -q 'cp -R integrations/hermes/skynet-edr' packaging/scripts/build-tarbal
   echo "Hermes plugin payload must be staged from an explicit allowlist, not copied recursively" >&2
   exit 1
 fi
-grep -q 'desktop-plugins/skynet-edr' packaging/scripts/skynet-edr-install-hermes-plugin.sh
-grep -q 'dashboard/plugin.js' packaging/scripts/skynet-edr-install-hermes-plugin.sh
-grep -q 'dashboard/plugin_api.py' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'skynet-edr-hermes-enroll' packaging/scripts/skynet-edr-install-hermes-plugin.sh
 grep -q 'dashboard/plugin.js' packaging/tarball/install.sh
 grep -q 'dashboard/plugin_api.py' packaging/tarball/install.sh
 grep -q 'desktop/plugin.js' packaging/tarball/install.sh
@@ -151,11 +152,7 @@ grep -q 'skynet.event.v0' integrations/hermes/skynet-edr/__init__.py
 grep -q 'skynet-edr-plugin.log' integrations/hermes/skynet-edr/README.md
 grep -q 'events-v1.jsonl' integrations/hermes/skynet-edr/README.md
 grep -q 'SKYNET_EDR_INGEST_SOCKET' integrations/hermes/skynet-edr/README.md
-grep -q 'events-v1.jsonl' packaging/scripts/skynet-edr-install-hermes-plugin.sh
-grep -q 'does not edit units' packaging/scripts/skynet-edr-install-hermes-plugin.sh
-grep -q 'HERMES_RUNTIME_ROLE=gateway' packaging/scripts/skynet-edr-install-hermes-plugin.sh
-grep -q 'HERMES_RUNTIME_ROLE=dashboard' packaging/scripts/skynet-edr-install-hermes-plugin.sh
-grep -q 'required_reported_roles' packaging/scripts/skynet-edr-install-hermes-plugin.sh
+grep -q 'SUPPORTED_HERMES' packaging/scripts/skynet-edr-hermes-enroll.py
 grep -q 'PLUGIN_SPOOL="$PLUGIN_STATE/events-v1.jsonl"' packaging/scripts/vm-smoke.sh
 if grep -q 'PLUGIN_SPOOL="$PLUGIN_STATE/events.jsonl"' packaging/scripts/vm-smoke.sh; then
   echo "VM smoke must not open the historical Hermes events.jsonl spool" >&2

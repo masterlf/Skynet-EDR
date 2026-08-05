@@ -24,6 +24,7 @@ install -m 0755 packaging/tarball/uninstall.sh "$ROOT/uninstall.sh"
 install -m 0755 packaging/tarball/install.sh "$ROOT/packaging/tarball/install.sh"
 install -m 0755 packaging/tarball/uninstall.sh "$ROOT/packaging/tarball/uninstall.sh"
 install -m 0755 packaging/scripts/skynet-edr-install-hermes-plugin.sh "$ROOT/skynet-edr-install-hermes-plugin.sh"
+install -m 0755 packaging/scripts/skynet-edr-hermes-enroll.py "$ROOT/skynet-edr-hermes-enroll.py"
 if [ -e "$STAGED_HERMES_PLUGIN" ] || [ -L "$STAGED_HERMES_PLUGIN" ]; then
   echo "Hermes plugin destination must be absent before staging: $STAGED_HERMES_PLUGIN" >&2
   exit 1
@@ -43,6 +44,7 @@ install -m 0644 LICENSE "$ROOT/LICENSE"
     install.sh \
     uninstall.sh \
     skynet-edr-install-hermes-plugin.sh \
+    skynet-edr-hermes-enroll.py \
     integrations/hermes/skynet-edr/plugin.yaml \
     integrations/hermes/skynet-edr/__init__.py \
     integrations/hermes/skynet-edr/README.md \

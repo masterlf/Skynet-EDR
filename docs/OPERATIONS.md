@@ -43,6 +43,11 @@ The doctor command intentionally does not require `rules.d` or `agents.d` direct
 
 ## Continuous ingestion operations
 
+Hermes enrollment automation remains blocked for live hosts until the explicit
+clean-host adapter gate passes. See [Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md);
+do not treat copied plugin bytes, a transport canary, or a zero-exit enable
+command as enrollment proof.
+
 The packaged continuous path accepts one length-prefixed `skynet.event.v0` event per authenticated AF_UNIX connection. Before persistence it applies the exact continuous-ingest event/source/trust/attribute projection; unknown, mistyped, raw-bearing, or non-allowlisted shapes are permanently rejected without an event, incident, or receipt. A successful transaction stores the projected event, evaluates the built-in sequence rules plus bounded `EDR-EXFIL-001` and `EDR-MALWARE-001` correlators, stores derived incidents before the receipt, then returns a versioned acknowledgement. It is not guard mode and never approves, delays, blocks, or rewrites an agent action.
 
 ### Deploy and enroll a producer
