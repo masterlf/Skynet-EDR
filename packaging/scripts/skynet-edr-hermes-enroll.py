@@ -394,8 +394,11 @@ def opened_user_directory(home: Path, name: str, uid: int, gid: int, *, create: 
     home_fd = -1
     child_fd = -1
     try:
-        home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        home_info = os.fstat(home_fd)
+        try:
+            home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            home_info = os.fstat(home_fd)
+        except OSError as exc:
+            raise EnrollmentError("invalid_target") from exc
         if home_info.st_uid != uid or home_info.st_mode & 0o077 or not stat.S_ISDIR(home_info.st_mode):
             raise EnrollmentError("ownership")
         try:

@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pwd
@@ -152,6 +153,51 @@ class HermesEnrollmentTests(unittest.TestCase):
             with self.assertRaises(module.EnrollmentError) as error:
                 module.validate_request(request, self.source)
         self.assertEqual(error.exception.category, "unsupported_contract")
+
+    def test_missing_canonical_home_fails_with_bounded_json_without_mutation(self):
+        module = load_module()
+        package_manifest = self.base / "manifest.json"
+        package_manifest.write_text(json.dumps({
+            "schema": 1,
+            "payload_version": "0.4.1",
+            "generation": self.request["manifest_sha256"],
+            "files": self.manifest,
+        }), encoding="utf-8")
+        package_manifest.chmod(0o644)
+        account_home = self.base / "missing-account-home"
+        canonical_home = account_home / ".hermes"
+        request = dict(self.request)
+        request["fixture"] = False
+        request["hermes_home"] = str(canonical_home)
+        request["profile"] = "default"
+        self.request_path.write_text(json.dumps(request), encoding="utf-8")
+        account = SimpleNamespace(pw_name=request["account"], pw_dir=str(account_home), pw_gid=os.getgid())
+        arguments = [
+            str(MODULE), "check", "--request", str(self.request_path), "--source", str(self.source),
+            "--state-root", str(self.state), "--observations", str(self.obs_path),
+        ]
+        output = io.StringIO()
+        errors = io.StringIO()
+        with (mock.patch.object(module, "SYSTEM_SOURCE", self.source),
+              mock.patch.object(module, "SYSTEM_MANIFEST", package_manifest),
+              mock.patch.object(module.pwd, "getpwuid", return_value=account),
+              mock.patch.object(module.sys, "argv", arguments),
+              mock.patch.object(module.sys, "stdout", output),
+              mock.patch.object(module.sys, "stderr", errors)):
+            result = module.main(test_mode=True)
+
+        lines = output.getvalue().splitlines()
+        self.assertNotEqual(result, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {
+            "schema": 1, "state": "DRIFTED", "category": "invalid_target", "noop": False,
+        })
+        combined = output.getvalue() + errors.getvalue()
+        self.assertNotIn(str(account_home), combined)
+        self.assertNotIn(str(canonical_home), combined)
+        self.assertNotIn("Traceback", combined)
+        self.assertFalse(account_home.exists())
+        self.assertFalse(self.state.exists())
 
     def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile", fail_action=None,
                      require_payload_before_prepare=False):
