@@ -1,9 +1,13 @@
+import contextlib
 import importlib.util
+import json
 import os
 import socket
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "packaging" / "scripts" / "skynet-edr-hermes-enrollment-adapter.py"
@@ -69,14 +73,102 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
     def test_only_exact_reviewed_unit_and_per_unit_role_are_rendered(self):
         generation = "a" * 64
         self.assertEqual(
-            self.module.render_dropin(["hermes-gateway.service"], generation),
+            self.module.render_dropin(
+                ["hermes-gateway.service"], generation, Path("/home/alice/.hermes"), "default"
+            ),
             ("[Service]\nEnvironment=HERMES_RUNTIME_ROLE=gateway\n"
-             f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n"),
+             f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n"
+             "Environment=HERMES_HOME=%h/.hermes\n"
+             "Environment=HERMES_PROFILE=default\n"),
         )
         for units in (["hermes-dashboard.service"], ["hermes-gateway@alice.service"], ["hermes-gateway.service", "other.service"]):
             with self.subTest(units=units):
                 with self.assertRaises(self.module.AdapterError):
-                    self.module.render_dropin(units, generation)
+                    self.module.render_dropin(units, generation, Path("/home/alice/.hermes"), "default")
+        with self.assertRaises(self.module.AdapterError):
+            self.module.render_dropin(
+                ["hermes-gateway.service"], generation, Path("/home/alice/.hermes"), "work"
+            )
+        self.assertEqual(
+            self.module.render_dropin(
+                ["hermes-gateway.service"], generation, Path("/home/bob/.hermes"), "default"
+            ),
+            self.module.render_dropin(
+                ["hermes-gateway.service"], generation, Path("/home/alice/.hermes"), "default"
+            ),
+        )
+
+    def test_context_binds_hermes_home_to_account_home(self):
+        account_home = self.base / "home" / "alice"
+        hermes_home = account_home / ".hermes"
+        hermes_home.mkdir(parents=True, mode=0o700)
+        home_info = hermes_home.stat()
+        env = {
+            "SKYNET_EDR_TARGET_UID": "1000",
+            "SKYNET_EDR_NONCE": "a" * 64,
+            "SKYNET_EDR_GENERATION": "b" * 64,
+            "HERMES_HOME": "/srv/attacker-selected/missing",
+            "HERMES_PROFILE": "default",
+            "SKYNET_EDR_HOME_DEVICE": str(home_info.st_dev),
+            "SKYNET_EDR_HOME_INODE": str(home_info.st_ino),
+        }
+        account = SimpleNamespace(pw_name="alice", pw_dir=str(account_home), pw_gid=os.getgid())
+        pinned_info = SimpleNamespace(
+            st_dev=home_info.st_dev, st_ino=home_info.st_ino, st_uid=1000, st_mode=home_info.st_mode
+        )
+        with (mock.patch.object(self.module.pwd, "getpwuid", return_value=account),
+              mock.patch.object(self.module.os, "fstat", return_value=pinned_info)):
+            with self.assertRaises(self.module.AdapterError):
+                self.module.validate_context("prepare", env, effective_uid=0)
+            env["HERMES_HOME"] = str(hermes_home)
+            context = self.module.validate_context("prepare", env, effective_uid=0)
+        self.addCleanup(os.close, context["home_fd"])
+        self.assertEqual(context["home"], hermes_home)
+
+    def test_context_rejects_custom_profile_as_unsupported(self):
+        account_home = self.base / "home" / "alice"
+        hermes_home = account_home / ".hermes"
+        hermes_home.mkdir(parents=True, mode=0o700)
+        home_info = hermes_home.stat()
+        env = {
+            "SKYNET_EDR_TARGET_UID": "1000",
+            "SKYNET_EDR_NONCE": "a" * 64,
+            "SKYNET_EDR_GENERATION": "b" * 64,
+            "HERMES_HOME": str(hermes_home),
+            "HERMES_PROFILE": "work",
+            "SKYNET_EDR_HOME_DEVICE": str(home_info.st_dev),
+            "SKYNET_EDR_HOME_INODE": str(home_info.st_ino),
+        }
+        account = SimpleNamespace(pw_name="alice", pw_dir=str(account_home), pw_gid=os.getgid())
+        with mock.patch.object(self.module.pwd, "getpwuid", return_value=account):
+            with self.assertRaises(self.module.AdapterError) as error:
+                self.module.validate_context("prepare", env, effective_uid=0)
+        self.assertEqual(error.exception.category, "unsupported_contract")
+
+    def test_child_environment_keeps_exact_canonical_hermes_home(self):
+        context = {
+            "uid": 1000,
+            "home": Path("/home/alice/.hermes"),
+            "profile": "default",
+            "home_fd": 42,
+        }
+        environment = self.module._minimal_env(context)
+        self.assertEqual(environment["HERMES_HOME"], "/home/alice/.hermes")
+        self.assertEqual(environment["HERMES_PROFILE"], "default")
+        self.assertNotIn("_SKYNET_EDR_HOME_FD", environment)
+
+    def test_real_hermes_019_plugin_status_is_parsed_strictly(self):
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "work"}
+        cases = (("enabled", True), ("not enabled", False))
+        for status, expected in cases:
+            payload = json.dumps([{"name": "skynet-edr", "status": status, "version": "0.4.1"}]).encode()
+            with self.subTest(status=status), mock.patch.object(self.module, "_run", return_value=payload):
+                self.assertIs(self.module._plugin_enabled(context), expected)
+        for invalid in ("unknown", True, None):
+            payload = json.dumps([{"name": "skynet-edr", "status": invalid, "version": "0.4.1"}]).encode()
+            with self.subTest(invalid=invalid), mock.patch.object(self.module, "_run", return_value=payload):
+                with self.assertRaises(self.module.AdapterError):
+                    self.module._plugin_enabled(context)
 
     def test_socket_requires_both_exact_dac_and_peer_uid_authorization(self):
         path = self.base / "ingest.sock"
@@ -104,6 +196,39 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             self.module.restore_files(snapshot, {"config": config, "dropin": dropin})
             self.assertEqual(config.read_text(encoding="utf-8"), BASE_CONFIG)
             self.assertEqual(dropin.read_text(encoding="utf-8"), "prior-dropin\n")
+
+    def test_failed_initial_prepare_removes_baseline_and_scope_residue(self):
+        config = self.base / "config.toml"
+        config.write_text(BASE_CONFIG, encoding="utf-8")
+        command = self.base / "command"
+        command.write_text("safe", encoding="utf-8")
+        command.chmod(0o755)
+        state = self.base / "adapter-state"
+        context = {
+            "uid": 1000,
+            "account": "alice",
+            "home": Path("/home/alice/.hermes"),
+            "profile": "work",
+            "generation": "b" * 64,
+        }
+        group = SimpleNamespace(gr_mem=[], gr_gid=1000)
+        patches = (
+            mock.patch.object(self.module, "CONFIG", config),
+            mock.patch.object(self.module, "DROPIN", self.base / "dropin" / "50-skynet-edr.conf"),
+            mock.patch.object(self.module, "STATE_ROOT", state),
+            mock.patch.object(self.module, "HERMES", command),
+            mock.patch.object(self.module, "SYSTEMCTL", command),
+            mock.patch.object(self.module, "USERMOD", command),
+            mock.patch.object(self.module.grp, "getgrnam", return_value=group),
+            mock.patch.object(self.module, "_plugin_enabled", side_effect=self.module.AdapterError("readback_failure")),
+        )
+        with contextlib.ExitStack() as stack:
+            for active in patches:
+                stack.enter_context(active)
+            with self.assertRaises(self.module.AdapterError):
+                self.module.prepare(context)
+        self.assertFalse((state / "baseline.json").exists())
+        self.assertFalse(self.module._scope(context).exists())
 
     def test_bounded_json_rejects_hostile_or_oversized_child_output(self):
         marker = "FAKE_SECRET_DO_NOT_STORE_7129"

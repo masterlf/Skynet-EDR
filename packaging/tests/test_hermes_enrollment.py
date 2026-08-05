@@ -10,6 +10,8 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "packaging" / "scripts" / "skynet-edr-hermes-enroll.py"
@@ -130,10 +132,29 @@ class HermesEnrollmentTests(unittest.TestCase):
         request["fixture"] = False
         request["manifest"] = {"attacker": {}}
         request["manifest_sha256"] = "0" * 64
-        _, _, _, actual = module.validate_request(request, self.source)
+        canonical_home = self.base / ".hermes"
+        canonical_home.mkdir(mode=0o700)
+        request["hermes_home"] = str(canonical_home)
+        request["profile"] = "default"
+        account = SimpleNamespace(pw_name=request["account"], pw_dir=str(self.base), pw_gid=os.getgid())
+        with mock.patch.object(module.pwd, "getpwuid", return_value=account):
+            _, _, _, actual = module.validate_request(request, self.source)
         self.assertEqual(actual, self.manifest)
 
-    def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile", fail_action=None):
+    def test_nonfixture_custom_profile_is_unsupported(self):
+        module = load_module()
+        request = dict(self.request)
+        request["fixture"] = False
+        request["hermes_home"] = str(self.base / ".hermes")
+        request["profile"] = "work"
+        account = SimpleNamespace(pw_name=request["account"], pw_dir=str(self.base), pw_gid=os.getgid())
+        with mock.patch.object(module.pwd, "getpwuid", return_value=account):
+            with self.assertRaises(module.EnrollmentError) as error:
+                module.validate_request(request, self.source)
+        self.assertEqual(error.exception.category, "unsupported_contract")
+
+    def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile", fail_action=None,
+                     require_payload_before_prepare=False):
         home = self.home if home is None else home
         adapter = self.base / "adapter.py"
         adapter.write_text(
@@ -142,6 +163,8 @@ class HermesEnrollmentTests(unittest.TestCase):
             f"if sys.argv[1] == {fail_action!r}: raise SystemExit(9)\n"
             "assert os.environ['HERMES_HOME']==" + repr(str(home)) + "\n"
             "assert os.environ['HERMES_PROFILE']==" + repr(profile) + "\n"
+            + ("if sys.argv[1]=='prepare': assert os.path.isfile(os.path.join(os.environ['HERMES_HOME'],'plugins','skynet-edr','plugin.yaml'))\n"
+               if require_payload_before_prepare else "") +
             "o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False,"
             "'daemon':{'healthy':False,'listener':True,'transport':'available','backlog':0,'degraded':False},"
             "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':False},"
@@ -160,6 +183,72 @@ class HermesEnrollmentTests(unittest.TestCase):
         )
         adapter.chmod(0o700)
         return str(adapter)
+
+    def test_prepare_observes_staged_payload_and_no_restart_returns_reload_required(self):
+        self.request["restart_authorized"] = False
+        self._write_inputs()
+        adapter = self.make_adapter(require_payload_before_prepare=True)
+        result, output = self.run_cli("apply", "--adapter", adapter)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output["state"], "RELOAD_REQUIRED")
+
+    def test_split_filesystem_is_rejected_before_any_mutation(self):
+        module = load_module()
+        state = self.base / "new-state-root"
+        adapter = Path(self.make_adapter())
+        original_stat = module.os.stat
+
+        def split_stat(path, *args, **kwargs):
+            info = original_stat(path, *args, **kwargs)
+            device = 2 if Path(path) == self.home or str(path).startswith("/proc/self/fd/") else 1
+            return SimpleNamespace(**{
+                name: getattr(info, name)
+                for name in ("st_mode", "st_ino", "st_uid", "st_gid", "st_nlink")
+            }, st_dev=device)
+
+        with mock.patch.object(module.os, "stat", side_effect=split_stat):
+            with self.assertRaises(module.EnrollmentError) as error:
+                module.apply(self.request, self.source, state, self.obs_path, adapter)
+        self.assertEqual(error.exception.category, "unsupported_layout")
+        self.assertFalse(state.exists())
+        self.assertFalse((self.home / "plugins").exists())
+        self.assertFalse((self.home / "desktop-plugins").exists())
+
+    def test_symlinked_plugin_parents_cannot_pivot_privileged_writes(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        marker = outside / "keep"
+        marker.write_text("unchanged", encoding="utf-8")
+        for parent_name in ("plugins", "desktop-plugins"):
+            with self.subTest(parent=parent_name):
+                candidate = self.home / parent_name
+                candidate.symlink_to(outside, target_is_directory=True)
+                check_result, check_output = self.run_cli("check")
+                self.assertNotEqual(check_result.returncode, 0)
+                self.assertEqual(check_output["category"], "invalid_target")
+                result, output = self.run_cli("apply", "--adapter", self.make_adapter())
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotEqual(output["state"], "ENROLLED")
+                self.assertTrue(candidate.is_symlink())
+                self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+                self.assertFalse((outside / "skynet-edr").exists())
+                candidate.unlink()
+
+    def test_special_or_hardlinked_plugin_parents_are_rejected(self):
+        source_file = self.base / "linked-parent"
+        source_file.write_text("do not follow", encoding="utf-8")
+        for parent_name, hardlink in (("plugins", False), ("desktop-plugins", True)):
+            with self.subTest(parent=parent_name):
+                candidate = self.home / parent_name
+                if hardlink:
+                    os.link(source_file, candidate)
+                else:
+                    candidate.write_text("special-like non-directory", encoding="utf-8")
+                result, output = self.run_cli("apply", "--adapter", self.make_adapter())
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output["category"], "invalid_target")
+                self.assertEqual(source_file.read_text(encoding="utf-8"), "do not follow")
+                candidate.unlink()
 
     def test_check_is_side_effect_free_and_absent_is_nonzero(self):
         before = self.obs_path.read_bytes()
@@ -383,9 +472,18 @@ class HermesEnrollmentTests(unittest.TestCase):
     def test_reload_required_without_authorization(self):
         self.request["restart_authorized"] = False
         self._write_inputs()
-        result, output = self.run_cli("apply", "--adapter", self.make_adapter())
+        adapter = self.make_adapter()
+        result, output = self.run_cli("apply", "--adapter", adapter)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output["state"], "RELOAD_REQUIRED")
+        result, output = self.run_cli("verify")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output["state"], "RELOAD_REQUIRED")
+        self.request["restart_authorized"] = True
+        self._write_inputs()
+        result, output = self.run_cli("apply", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output["state"], "ENROLLED")
 
     def test_unenroll_is_repeatable_preserves_evidence_and_other_profile(self):
         adapter = self.make_adapter()
@@ -424,7 +522,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         result, output = self.run_cli("apply", "--adapter", str(adapter))
         combined = result.stdout + result.stderr
         self.assertNotIn(marker, combined)
-        self.assertEqual(output["category"], "adapter_failure")
+        self.assertEqual(output["category"], "rollback")
 
     def test_all_package_formats_and_tarball_require_python_runtime(self):
         nfpm = (ROOT / "packaging" / "nfpm.yaml").read_text(encoding="utf-8")

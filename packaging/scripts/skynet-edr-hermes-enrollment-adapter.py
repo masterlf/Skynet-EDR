@@ -42,6 +42,7 @@ DAEMON_UNIT = "skynet-edr.service"
 MAX_OUTPUT = 65_536
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_PROFILE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
+SAFE_HOME = re.compile(r"^/[A-Za-z0-9_./@-]{1,4095}$")
 INGEST_KEYS = {
     "enabled",
     "socket",
@@ -92,6 +93,8 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
         generation = env["SKYNET_EDR_GENERATION"]
         home_text = env["HERMES_HOME"]
         profile = env["HERMES_PROFILE"]
+        expected_device = int(env["SKYNET_EDR_HOME_DEVICE"])
+        expected_inode = int(env["SKYNET_EDR_HOME_INODE"])
     except (KeyError, TypeError, ValueError) as exc:
         raise AdapterError("invalid_context") from exc
     if str(uid) != uid_text or uid <= 0 or uid > 2**31 - 1:
@@ -99,18 +102,32 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
     if not HEX64.fullmatch(nonce) or not HEX64.fullmatch(generation):
         raise AdapterError("invalid_context")
     home = Path(home_text)
-    if not home.is_absolute() or ".." in home.parts or home == Path("/"):
+    if (not home.is_absolute() or ".." in home.parts or home == Path("/")
+            or not SAFE_HOME.fullmatch(home_text)):
         raise AdapterError("invalid_context")
     if not SAFE_PROFILE.fullmatch(profile):
         raise AdapterError("invalid_context")
+    if profile != "default":
+        raise AdapterError("unsupported_contract")
     try:
         account = pwd.getpwuid(uid)
     except KeyError as exc:
         raise AdapterError("identity") from exc
     if action in {"enable", "disable"} and effective_uid != uid:
         raise AdapterError("identity")
+    if home != Path(account.pw_dir) / ".hermes":
+        raise AdapterError("untrusted_path")
+    try:
+        home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        home_info = os.fstat(home_fd)
+    except OSError as exc:
+        raise AdapterError("untrusted_path") from exc
+    if ((home_info.st_dev, home_info.st_ino) != (expected_device, expected_inode)
+            or home_info.st_uid != uid or home_info.st_mode & 0o022):
+        os.close(home_fd)
+        raise AdapterError("untrusted_path")
     return {"uid": uid, "account": account.pw_name, "home": home, "profile": profile,
-            "nonce": nonce, "generation": generation, "action": action}
+            "nonce": nonce, "generation": generation, "action": action, "home_fd": home_fd}
 
 
 def _toml_ingest(text: str) -> dict[str, Any]:
@@ -176,12 +193,16 @@ def rewrite_ingest_toml(text: str, uid: int, *, enabled: bool) -> str:
     return updated
 
 
-def render_dropin(units: list[str], generation: str) -> str:
+def render_dropin(units: list[str], generation: str, home: Path, profile: str) -> str:
     if units != [UNIT]:
         raise AdapterError("unit_scope")
+    if profile != "default" or home.name != ".hermes":
+        raise AdapterError("unsupported_contract")
     return ("[Service]\n"
             "Environment=HERMES_RUNTIME_ROLE=gateway\n"
-            f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n")
+            f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n"
+            "Environment=HERMES_HOME=%h/.hermes\n"
+            "Environment=HERMES_PROFILE=default\n")
 
 
 def authorization_ok(*, dac: bool, configured_uids: list[int], target_uid: int) -> bool:
@@ -355,9 +376,14 @@ def _plugin_enabled(context: dict[str, Any]) -> bool:
     if type(value) is not list:
         raise AdapterError("readback_failure")
     matches = [item for item in value if type(item) is dict and item.get("name") == "skynet-edr"]
-    if len(matches) != 1 or type(matches[0].get("enabled")) is not bool:
+    if len(matches) != 1 or "enabled" in matches[0]:
         raise AdapterError("readback_failure")
-    return matches[0]["enabled"]
+    status = matches[0].get("status")
+    if status == "enabled":
+        return True
+    if status == "not enabled":
+        return False
+    raise AdapterError("readback_failure")
 
 
 def _status() -> dict[str, Any]:
@@ -488,28 +514,41 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
         raise AdapterError("untrusted_path")
     _verify_managed()
     scope = _scope(context)
+    scope_created = not scope.exists()
     scope.mkdir(parents=True, exist_ok=True, mode=0o700)
     snapshot_path = scope / "snapshot.json"
     baseline_path = STATE_ROOT / "baseline.json"
+    baseline_created = not baseline_path.exists()
     if not baseline_path.exists():
         baseline = snapshot_files({"config": CONFIG, "dropin": DROPIN})
         _atomic_write(baseline_path, json.dumps(baseline, sort_keys=True).encode("ascii"), 0o600)
-    if not snapshot_path.exists():
-        snapshot = {"uid": context["uid"], "profile": context["profile"],
-                    "home": str(context["home"]), "generation": context["generation"],
-                    "group_member": context["account"] in group.gr_mem,
-                    "plugin_enabled": _plugin_enabled(context)}
-        _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
-    else:
-        _safe_regular(snapshot_path)
-        snapshot = parse_bounded_json(snapshot_path.read_bytes())
-        if (type(snapshot) is not dict or snapshot.get("uid") != context["uid"]
-                or snapshot.get("profile") != context["profile"]
-                or snapshot.get("home") != str(context["home"])):
-            raise AdapterError("existing_transaction")
-        snapshot["generation"] = context["generation"]
-        snapshot.pop("restart_identity", None)
-        _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
+    try:
+        if not snapshot_path.exists():
+            snapshot = {"uid": context["uid"], "profile": context["profile"],
+                        "home": str(context["home"]), "generation": context["generation"],
+                        "group_member": context["account"] in group.gr_mem,
+                        "plugin_enabled": _plugin_enabled(context)}
+            _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
+        else:
+            _safe_regular(snapshot_path)
+            snapshot = parse_bounded_json(snapshot_path.read_bytes())
+            if (type(snapshot) is not dict or snapshot.get("uid") != context["uid"]
+                    or snapshot.get("profile") != context["profile"]
+                    or snapshot.get("home") != str(context["home"])):
+                raise AdapterError("existing_transaction")
+            snapshot["generation"] = context["generation"]
+            snapshot.pop("restart_identity", None)
+            _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
+    except Exception:
+        if not snapshot_path.exists():
+            if baseline_created:
+                baseline_path.unlink(missing_ok=True)
+            if scope_created:
+                try:
+                    scope.rmdir()
+                except OSError:
+                    pass
+        raise
     try:
         config = CONFIG.read_text(encoding="utf-8")
         _atomic_write(CONFIG, rewrite_ingest_toml(config, context["uid"], enabled=True).encode("utf-8"),
@@ -517,7 +556,11 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
         if context["account"] not in grp.getgrnam(GROUP).gr_mem:
             _run([str(USERMOD), "-a", "-G", GROUP, context["account"]],
                  env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
-        _atomic_write(DROPIN, render_dropin([UNIT], _runtime_instance(context)).encode("ascii"), 0o644)
+        _atomic_write(
+            DROPIN,
+            render_dropin([UNIT], _runtime_instance(context), context["home"], context["profile"]).encode("ascii"),
+            0o644,
+        )
         _run([str(SYSTEMCTL), "--user", "daemon-reload"], env=_minimal_env(context), target=context)
         _write_managed()
     except Exception:
@@ -534,6 +577,8 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
         _verify_managed()
     scope = _scope(context)
     snapshot_path = scope / "snapshot.json"
+    if not scope.exists() and not snapshot_path.exists():
+        return {"prepared": False, "plugin_enabled": False}
     _safe_regular(snapshot_path)
     snapshot = parse_bounded_json(snapshot_path.read_bytes())
     if (type(snapshot) is not dict or snapshot.get("uid") != context["uid"]
