@@ -202,7 +202,8 @@ def render_dropin(units: list[str], generation: str, home: Path, profile: str) -
             "Environment=HERMES_RUNTIME_ROLE=gateway\n"
             f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n"
             "Environment=HERMES_HOME=%h/.hermes\n"
-            "Environment=HERMES_PROFILE=default\n")
+            "Environment=HERMES_PROFILE=default\n"
+            "Environment=PYTHONDONTWRITEBYTECODE=1\n")
 
 
 def authorization_ok(*, dac: bool, configured_uids: list[int], target_uid: int) -> bool:
@@ -363,6 +364,7 @@ def _run(argv: list[str], *, env: dict[str, str], target: dict[str, Any] | None 
 def _minimal_env(context: dict[str, Any]) -> dict[str, str]:
     return {"HOME": str(context["home"].parent), "HERMES_HOME": str(context["home"]),
             "HERMES_PROFILE": context["profile"], "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "XDG_RUNTIME_DIR": f"/run/user/{context['uid']}",
             "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{context['uid']}/bus"}
 
@@ -413,23 +415,70 @@ def _matching_source(ingestion: dict[str, Any], context: dict[str, Any], instanc
     return None
 
 
-def _gateway_identity(context: dict[str, Any]) -> tuple[int, int]:
+def _fresh_committed_source(ingestion: dict[str, Any], context: dict[str, Any], instance_id: str,
+                            previous_commit: int) -> dict[str, Any] | None:
+    source = _matching_source(ingestion, context, instance_id)
+    if source is None:
+        return None
+    committed = source.get("last_event_committed_at_unix_ms")
+    if (not isinstance(committed, int) or isinstance(committed, bool)
+            or committed <= previous_commit):
+        return None
+    return source
+
+
+def _service_identity(context: dict[str, Any], unit: str) -> tuple[int, int]:
+    user_unit = unit == UNIT
+    argv = [str(SYSTEMCTL)]
+    if user_unit:
+        argv.append("--user")
+    argv.extend(["show", unit, "--property=MainPID",
+                 "--property=ExecMainStartTimestampMonotonic", "--value"])
     raw = _run(
-        [str(SYSTEMCTL), "--user", "show", UNIT, "--property=MainPID",
-         "--property=ExecMainStartTimestampMonotonic", "--value"],
-        env=_minimal_env(context),
-        target=context if os.geteuid() == 0 else None,
+        argv,
+        env=_minimal_env(context) if user_unit else {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        target=context if user_unit and os.geteuid() == 0 else None,
     )
     try:
         values = [int(value) for value in raw.decode("ascii").splitlines()]
     except (UnicodeError, ValueError) as exc:
         raise AdapterError("readback_failure") from exc
-    if len(values) != 2 or any(value < 0 for value in values):
+    if len(values) != 2 or any(value <= 0 for value in values):
         raise AdapterError("readback_failure")
     return values[0], values[1]
 
 
-def _gateway_context_matches(context: dict[str, Any]) -> bool:
+def _process_groups(pid: int) -> set[int]:
+    if type(pid) is not int or pid <= 0:
+        raise AdapterError("readback_failure")
+    path = Path("/proc") / str(pid) / "status"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            data = os.read(fd, MAX_OUTPUT + 1)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise AdapterError("readback_failure") from exc
+    if not stat.S_ISREG(info.st_mode) or len(data) > MAX_OUTPUT:
+        raise AdapterError("readback_failure")
+    try:
+        lines = data.decode("ascii").splitlines()
+        groups_lines = [line for line in lines if line.startswith("Groups:")]
+        if len(groups_lines) != 1:
+            raise ValueError("ambiguous groups")
+        groups = {int(value) for value in groups_lines[0].split()[1:]}
+    except (UnicodeError, ValueError) as exc:
+        raise AdapterError("readback_failure") from exc
+    return groups
+
+
+def _gateway_identity(context: dict[str, Any]) -> tuple[int, int]:
+    return _service_identity(context, UNIT)
+
+
+def _gateway_context_matches(context: dict[str, Any], instance_id: str | None = None) -> bool:
     raw = _run(
         [str(SYSTEMCTL), "--user", "show", UNIT, "--property=Environment", "--value"],
         env=_minimal_env(context),
@@ -439,7 +488,14 @@ def _gateway_context_matches(context: dict[str, Any]) -> bool:
         values = set(shlex.split(raw.decode("utf-8")))
     except (UnicodeError, ValueError):
         return False
-    return {f"HERMES_HOME={context['home']}", f"HERMES_PROFILE={context['profile']}"}.issubset(values)
+    expected_instance = context["generation"] if instance_id is None else instance_id
+    return {
+        f"HERMES_HOME={context['home']}",
+        f"HERMES_PROFILE={context['profile']}",
+        "HERMES_RUNTIME_ROLE=gateway",
+        "PYTHONDONTWRITEBYTECODE=1",
+        f"SKYNET_EDR_RUNTIME_INSTANCE={expected_instance}",
+    }.issubset(values)
 
 
 def _record_restart_identity(context: dict[str, Any], identity: tuple[int, int]) -> None:
@@ -507,6 +563,7 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
         group = grp.getgrnam(GROUP)
     except KeyError as exc:
         raise AdapterError("missing_prerequisite") from exc
+    state_root_created = not STATE_ROOT.exists()
     STATE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     state_info = os.lstat(STATE_ROOT)
     if (not stat.S_ISDIR(state_info.st_mode) or state_info.st_uid != 0
@@ -546,8 +603,13 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
             if scope_created:
                 try:
                     scope.rmdir()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    raise AdapterError("rollback") from exc
+            if state_root_created:
+                try:
+                    STATE_ROOT.rmdir()
+                except OSError as exc:
+                    raise AdapterError("rollback") from exc
         raise
     try:
         config = CONFIG.read_text(encoding="utf-8")
@@ -566,6 +628,8 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         try:
             rollback(context, verify_managed=False)
+            if state_root_created:
+                STATE_ROOT.rmdir()
         except Exception as rollback_error:
             raise AdapterError("rollback") from rollback_error
         raise
@@ -646,6 +710,89 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
     return {"prepared": False, "plugin_enabled": False}
 
 
+def _restart(context: dict[str, Any]) -> dict[str, Any]:
+    manager_unit = f"user@{context['uid']}.service"
+    manager_before = _service_identity(context, manager_unit)
+    gateway_before = _service_identity(context, UNIT)
+    _run([str(SYSTEMCTL), "restart", manager_unit], env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+    _run([str(SYSTEMCTL), "restart", DAEMON_UNIT], env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+    manager_after = _service_identity(context, manager_unit)
+    gateway_after = _service_identity(context, UNIT)
+    try:
+        ingest_gid = grp.getgrnam(GROUP).gr_gid
+    except KeyError as exc:
+        raise AdapterError("readback_failure") from exc
+    if (manager_after == manager_before or gateway_after == gateway_before
+            or ingest_gid not in _process_groups(manager_after[0])
+            or ingest_gid not in _process_groups(gateway_after[0])
+            or not _gateway_context_matches(context)):
+        raise AdapterError("readback_failure")
+    _record_restart_identity(context, gateway_after)
+    return _observation(context, process_fresh=True)
+
+
+def _restart_gateway(context: dict[str, Any], instance_id: str) -> tuple[int, int]:
+    before = _gateway_identity(context)
+    _run([str(SYSTEMCTL), "--user", "daemon-reload"], env=_minimal_env(context), target=context)
+    _run([str(SYSTEMCTL), "--user", "restart", UNIT], env=_minimal_env(context), target=context)
+    after = _gateway_identity(context)
+    try:
+        ingest_gid = grp.getgrnam(GROUP).gr_gid
+    except KeyError as exc:
+        raise AdapterError("readback_failure") from exc
+    if (after == before or ingest_gid not in _process_groups(after[0])
+            or not _gateway_context_matches(context, instance_id)):
+        raise AdapterError("readback_failure")
+    return after
+
+
+def _hook(context: dict[str, Any]) -> dict[str, Any]:
+    _safe_regular(DROPIN)
+    generation_dropin = render_dropin(
+        [UNIT], context["generation"], context["home"], context["profile"]
+    ).encode("ascii")
+    if DROPIN.read_bytes() != generation_dropin:
+        raise AdapterError("config_drift")
+    before_ingestion = _status().get("ingestion", {})
+    before_source = (_matching_source(before_ingestion, context, context["nonce"])
+                     if type(before_ingestion) is dict else None)
+    before_commit = before_source.get("last_event_committed_at_unix_ms", 0) if before_source else 0
+    if not isinstance(before_commit, int) or isinstance(before_commit, bool):
+        raise AdapterError("hook_failure")
+    hook_error: Exception | None = None
+    committed_source: dict[str, Any] | None = None
+    try:
+        nonce_dropin = render_dropin(
+            [UNIT], context["nonce"], context["home"], context["profile"]
+        ).encode("ascii")
+        _atomic_write(DROPIN, nonce_dropin, 0o644)
+        _restart_gateway(context, context["nonce"])
+        _run([str(HERMES), "chat", "--max-turns", "1", "--toolsets", "none", "-q",
+              "Enrollment health check: reply exactly OK and perform no tool calls."],
+             env=_minimal_env(context), target=context)
+        for _ in range(10):
+            ingestion = _status().get("ingestion", {})
+            committed_source = (_fresh_committed_source(
+                ingestion, context, context["nonce"], before_commit
+            ) if type(ingestion) is dict else None)
+            if committed_source is not None:
+                break
+            time.sleep(0.2)
+        else:
+            raise AdapterError("hook_failure")
+    except Exception as exc:
+        hook_error = exc
+    try:
+        _atomic_write(DROPIN, generation_dropin, 0o644)
+        restored_identity = _restart_gateway(context, context["generation"])
+        _record_restart_identity(context, restored_identity)
+    except Exception as exc:
+        raise AdapterError("hook_failure") from exc
+    if hook_error is not None or committed_source is None:
+        raise AdapterError("hook_failure") from hook_error
+    return _observation(context, process_fresh=True, real_hook=True)
+
+
 def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
     if action == "prepare":
         return prepare(context)
@@ -663,37 +810,9 @@ def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
     if action == "restart":
         _safe_regular(SYSTEMCTL)
         _safe_regular(HERMES)
-        before_identity = _gateway_identity(context)
-        _run([str(SYSTEMCTL), "restart", DAEMON_UNIT], env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
-        _run([str(SYSTEMCTL), "--user", "restart", UNIT], env=_minimal_env(context), target=context)
-        after_identity = _gateway_identity(context)
-        process_fresh = (after_identity[0] > 0 and after_identity[1] > 0
-                         and after_identity != before_identity)
-        if process_fresh:
-            _record_restart_identity(context, after_identity)
-        return _observation(context, process_fresh=process_fresh)
+        return _restart(context)
     _safe_regular(HERMES)
-    process_fresh = _gateway_identity(context) == _restart_identity(context)
-    before_ingestion = _status().get("ingestion", {})
-    before_source = _matching_source(before_ingestion, context, context["nonce"]) if type(before_ingestion) is dict else None
-    before = before_source.get("last_event_committed_at_unix_ms", 0) if before_source else 0
-    hook_env = _minimal_env(context)
-    hook_env.update({"HERMES_RUNTIME_ROLE": "gateway", "SKYNET_EDR_RUNTIME_INSTANCE": context["nonce"]})
-    _run([str(HERMES), "chat", "--max-turns", "1", "--toolsets", "none", "-q",
-          "Enrollment health check: reply exactly OK and perform no tool calls."],
-         env=hook_env, target=context)
-    after = 0
-    for _ in range(10):
-        after_ingestion = _status().get("ingestion", {})
-        after_source = _matching_source(after_ingestion, context, context["nonce"]) if type(after_ingestion) is dict else None
-        after = after_source.get("last_event_committed_at_unix_ms", 0) if after_source else 0
-        if (isinstance(before, int) and not isinstance(before, bool)
-                and isinstance(after, int) and not isinstance(after, bool) and after > before):
-            break
-        time.sleep(0.2)
-    else:
-        raise AdapterError("hook_failure")
-    return _observation(context, process_fresh=process_fresh, real_hook=True)
+    return _hook(context)
 
 
 def emit(value: dict[str, Any], *, ok: bool) -> int:

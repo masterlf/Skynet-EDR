@@ -449,6 +449,28 @@ class HermesEnrollmentTests(unittest.TestCase):
                 self.assertFalse((self.home / "plugins" / "skynet-edr").exists())
                 self.assertFalse((self.state / "enrollment.json").exists())
 
+    def test_failed_initial_prepare_restores_exact_zero_residue_baseline(self):
+        self.obs_path.unlink()
+        adapter = self.make_adapter(fail_action="prepare")
+        result, output = self.run_cli("apply", "--adapter", adapter)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output["category"], "adapter_failure")
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.obs_path.exists())
+        self.assertFalse((self.home / "plugins").exists())
+        self.assertFalse((self.home / "desktop-plugins").exists())
+
+    def test_failed_initial_prepare_preserves_preexisting_state_and_observation(self):
+        self.state.mkdir()
+        evidence = self.state / "evidence.log"
+        evidence.write_text("preserve", encoding="utf-8")
+        observation = self.obs_path.read_bytes()
+        adapter = self.make_adapter(fail_action="prepare")
+        result, _ = self.run_cli("apply", "--adapter", adapter)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(evidence.read_text(encoding="utf-8"), "preserve")
+        self.assertEqual(self.obs_path.read_bytes(), observation)
+
     def test_synthetic_canary_is_not_real_hook_proof(self):
         result, _ = self.run_cli("apply", "--adapter", self.make_adapter())
         self.assertEqual(result.returncode, 0, result.stderr)

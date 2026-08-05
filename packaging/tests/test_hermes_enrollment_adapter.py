@@ -79,7 +79,8 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             ("[Service]\nEnvironment=HERMES_RUNTIME_ROLE=gateway\n"
              f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n"
              "Environment=HERMES_HOME=%h/.hermes\n"
-             "Environment=HERMES_PROFILE=default\n"),
+             "Environment=HERMES_PROFILE=default\n"
+             "Environment=PYTHONDONTWRITEBYTECODE=1\n"),
         )
         for units in (["hermes-dashboard.service"], ["hermes-gateway@alice.service"], ["hermes-gateway.service", "other.service"]):
             with self.subTest(units=units):
@@ -155,7 +156,148 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         environment = self.module._minimal_env(context)
         self.assertEqual(environment["HERMES_HOME"], "/home/alice/.hermes")
         self.assertEqual(environment["HERMES_PROFILE"], "default")
+        self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertNotIn("_SKYNET_EDR_HOME_FD", environment)
+
+    def test_gateway_environment_readback_requires_bytecode_role_and_exact_instance(self):
+        context = {
+            "uid": 1000,
+            "home": Path("/home/alice/.hermes"),
+            "profile": "default",
+            "generation": "b" * 64,
+        }
+        required = (
+            "HERMES_HOME=/home/alice/.hermes HERMES_PROFILE=default "
+            "HERMES_RUNTIME_ROLE=gateway PYTHONDONTWRITEBYTECODE=1 "
+            f"SKYNET_EDR_RUNTIME_INSTANCE={context['generation']}\n"
+        ).encode()
+        with mock.patch.object(self.module, "_run", return_value=required):
+            self.assertTrue(self.module._gateway_context_matches(context))
+        for missing in ("PYTHONDONTWRITEBYTECODE=1", "HERMES_RUNTIME_ROLE=gateway",
+                        f"SKYNET_EDR_RUNTIME_INSTANCE={context['generation']}"):
+            with self.subTest(missing=missing), mock.patch.object(
+                self.module, "_run", return_value=required.replace(missing.encode(), b"")
+            ):
+                self.assertFalse(self.module._gateway_context_matches(context))
+
+    def test_authorized_restart_refreshes_complete_user_manager_and_gateway_groups(self):
+        context = {
+            "uid": 1000,
+            "account": "alice",
+            "home": Path("/home/alice/.hermes"),
+            "profile": "default",
+            "generation": "b" * 64,
+        }
+        calls = []
+        identities = iter([(11, 101), (21, 201), (12, 102), (22, 202)])
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return b""
+
+        observation = {"process_fresh": True}
+        with (mock.patch.object(self.module, "_service_identity", side_effect=lambda *_args, **_kwargs: next(identities)),
+              mock.patch.object(self.module, "_process_groups", side_effect=[{1000, 987}, {1000, 987}]),
+              mock.patch.object(self.module.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=987)),
+              mock.patch.object(self.module, "_run", side_effect=run),
+              mock.patch.object(self.module, "_gateway_context_matches", return_value=True),
+              mock.patch.object(self.module, "_record_restart_identity"),
+              mock.patch.object(self.module, "_observation", return_value=observation)):
+            self.assertEqual(self.module._restart(context), observation)
+        self.assertIn([str(self.module.SYSTEMCTL), "restart", "user@1000.service"], calls)
+        self.assertIn([str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT], calls)
+
+    def test_authorized_restart_fails_closed_on_stale_groups_or_unproven_manager_readback(self):
+        context = {
+            "uid": 1000,
+            "account": "alice",
+            "home": Path("/home/alice/.hermes"),
+            "profile": "default",
+            "generation": "b" * 64,
+        }
+        matrices = (
+            ([(11, 101), (21, 201), (11, 101), (22, 202)], [{1000, 987}, {1000, 987}]),
+            ([(11, 101), (21, 201), (12, 102), (22, 202)], [{1000}, {1000, 987}]),
+            ([(11, 101), (21, 201), (12, 102), (22, 202)], [{1000, 987}, {1000}]),
+        )
+        for identities, groups in matrices:
+            with self.subTest(identities=identities, groups=groups), contextlib.ExitStack() as stack:
+                for active in (
+                    mock.patch.object(self.module, "_service_identity", side_effect=identities),
+                    mock.patch.object(self.module, "_process_groups", side_effect=groups),
+                    mock.patch.object(self.module.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=987)),
+                    mock.patch.object(self.module, "_run", return_value=b""),
+                    mock.patch.object(self.module, "_gateway_context_matches", return_value=True),
+                ):
+                    stack.enter_context(active)
+                with self.assertRaises(self.module.AdapterError):
+                    self.module._restart(context)
+
+    def test_real_shaped_hook_source_requires_exact_nonce_uid_role_and_fresh_commit(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        nonce = "a" * 64
+        valid = {
+            "authenticated_uid": 1000,
+            "runtime_role": "gateway",
+            "instance_id": nonce,
+            "last_event_committed_at_unix_ms": 102,
+        }
+        self.assertIsNotNone(self.module._fresh_committed_source({"sources": [valid]}, context, nonce, 101))
+        mutations = (
+            {"instance_id": "b" * 64},
+            {"authenticated_uid": 1001},
+            {"runtime_role": "legacy"},
+            {"last_event_committed_at_unix_ms": 101},
+            {"last_event_committed_at_unix_ms": None},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                source = dict(valid)
+                source.update(mutation)
+                self.assertIsNone(self.module._fresh_committed_source({"sources": [source]}, context, nonce, 101))
+
+    def test_hook_nonce_is_loaded_by_gateway_then_generation_is_restored(self):
+        generation = "b" * 64
+        nonce = "a" * 64
+        context = {
+            "uid": 1000,
+            "home": Path("/home/alice/.hermes"),
+            "profile": "default",
+            "generation": generation,
+            "nonce": nonce,
+        }
+        dropin = self.base / "50-skynet-edr.conf"
+        dropin.write_text(
+            self.module.render_dropin([self.module.UNIT], generation, context["home"], "default"),
+            encoding="ascii",
+        )
+        restart_instances = []
+
+        def restart_gateway(_context, instance_id):
+            restart_instances.append(instance_id)
+            self.assertIn(f"SKYNET_EDR_RUNTIME_INSTANCE={instance_id}", dropin.read_text(encoding="ascii"))
+            return (10 + len(restart_instances), 100 + len(restart_instances))
+
+        committed = {
+            "authenticated_uid": 1000,
+            "runtime_role": "gateway",
+            "instance_id": nonce,
+            "last_event_committed_at_unix_ms": 102,
+        }
+        statuses = iter([{"ingestion": {"sources": []}}, {"ingestion": {"sources": [committed]}}])
+        observation = {"real_hook": {"correlated": True, "committed": True}}
+        with (mock.patch.object(self.module, "DROPIN", dropin),
+              mock.patch.object(self.module, "_status", side_effect=lambda: next(statuses)),
+              mock.patch.object(self.module, "_restart_gateway", side_effect=restart_gateway),
+              mock.patch.object(self.module, "_run", return_value=b""),
+              mock.patch.object(self.module, "_record_restart_identity"),
+              mock.patch.object(self.module, "_observation", return_value=observation)):
+            self.assertEqual(self.module._hook(context), observation)
+        self.assertEqual(restart_instances, [nonce, generation])
+        self.assertEqual(
+            dropin.read_text(encoding="ascii"),
+            self.module.render_dropin([self.module.UNIT], generation, context["home"], "default"),
+        )
 
     def test_real_hermes_019_plugin_status_is_parsed_strictly(self):
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "work"}
@@ -229,6 +371,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 self.module.prepare(context)
         self.assertFalse((state / "baseline.json").exists())
         self.assertFalse(self.module._scope(context).exists())
+        self.assertFalse(state.exists())
 
     def test_bounded_json_rejects_hostile_or_oversized_child_output(self):
         marker = "FAKE_SECRET_DO_NOT_STORE_7129"
