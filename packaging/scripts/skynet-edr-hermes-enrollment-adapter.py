@@ -1058,15 +1058,12 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
     if other_scopes:
         _write_managed()
     else:
-        (STATE_ROOT / "managed.json").unlink(missing_ok=True)
-    snapshot_path.unlink()
-    try:
-        scope.rmdir()
-    except OSError:
-        pass
-    if not other_scopes:
-        baseline_path.unlink()
-    return {"prepared": False, "plugin_enabled": False}
+        _verify_managed()
+    # S3-V3C-Lite intentionally keeps rollback authority and its exact snapshot.
+    # A later root operator may inspect/recover/remove it; this adapter never
+    # deletes managed transaction evidence automatically.
+    return {"prepared": False, "plugin_enabled": snapshot["plugin_enabled"],
+            "reload_required": True, "rollback_phase": "RESTORED_VERIFIED"}
 
 
 def _old_identity_gone(identity: ProcessIdentity, deadline_ns: int) -> bool:

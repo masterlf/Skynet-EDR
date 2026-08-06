@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -48,6 +50,15 @@ MAX_PAYLOAD_FILE = 8 * 1024 * 1024
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 REVIEWED_UNITS = ["hermes-gateway.service"]
 ATTEST_BUDGET_NS = 15_000_000_000
+JOURNAL_KEYS = {"schema", "transaction_nonce", "operation", "target", "objects", "phase", "result", "manual_recovery"}
+JOURNAL_OBJECT_KEYS = {"source_parent", "source_name", "source_identity", "quarantine_parent", "quarantine_name", "quarantine_identity"}
+IDENTITY_KEYS = {"dev", "ino", "type", "mode", "uid", "gid", "nlink", "size", "tree_sha256"}
+PARENT_IDENTITY_KEYS = {"dev", "ino", "mode", "uid", "gid"}
+JOURNAL_OBJECT_NAMES = {"backend", "desktop", "metadata", "observation"}
+JOURNAL_PHASES = {"STARTED", "DISABLED", "ADAPTER_RESTORED", "QUARANTINING", "QUARANTINED"}
+MANUAL_RECOVERY = ("Manual root recovery required: inspect the exact quarantine and transaction journal; "
+                   "restore only an identity-matching object to an absent source with atomic no-replace rename. "
+                   "No quarantined managed content is removed automatically.")
 ATTEST_RESPONSE_KEYS = {
     "plugin_enabled", "loaded_generation", "process_fresh", "daemon", "producer",
     "real_hook", "restart_blast_radius", "identities", "commit_sequence",
@@ -56,6 +67,13 @@ ATTEST_OBSERVATION_KEYS = ATTEST_RESPONSE_KEYS | {
     "target_uid", "observed_generation", "transaction_nonce",
     "action", "effective_uid", "observed_at_ns",
 }
+ADAPTER_BASE_KEYS = {
+    "prepare": {"prepared", "plugin_enabled"},
+    "rollback": {"prepared", "plugin_enabled", "reload_required", "rollback_phase"},
+    "enable": {"plugin_enabled", "loaded_generation", "process_fresh"},
+    "disable": {"plugin_enabled", "loaded_generation", "process_fresh"},
+}
+ADAPTER_ENVELOPE_KEYS = {"transaction_nonce", "action", "observed_generation", "target_uid", "effective_uid", "observed_at_ns"}
 
 
 class EnrollmentError(Exception):
@@ -417,6 +435,246 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _parent_identity(fd: int) -> dict[str, int]:
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    return {"dev": info.st_dev, "ino": info.st_ino, "mode": info.st_mode,
+            "uid": info.st_uid, "gid": info.st_gid}
+
+
+def _tree_digest(fd: int, device: int, owner: int, *, depth: int = 0,
+                 budget: list[int] | None = None) -> str:
+    if depth > 16:
+        raise EnrollmentError("quarantine_bounds", "MANUAL_RECOVERY_REQUIRED")
+    budget = [0, 0] if budget is None else budget
+    digest = hashlib.sha256()
+    for name in sorted(os.listdir(fd)):
+        if not name or name in {".", ".."} or "/" in name or "\0" in name:
+            raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+        budget[0] += 1
+        budget[1] += len(name.encode("utf-8"))
+        if budget[0] > 256 or budget[1] > 64 * 1024 * 1024:
+            raise EnrollmentError("quarantine_bounds", "MANUAL_RECOVERY_REQUIRED")
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if before.st_dev != device or before.st_uid != owner:
+            raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(f"{before.st_mode}:{before.st_uid}:{before.st_gid}:".encode("ascii"))
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        if stat.S_ISDIR(before.st_mode):
+            flags |= os.O_DIRECTORY
+        elif not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise EnrollmentError("quarantine_type", "MANUAL_RECOVERY_REQUIRED")
+        child = os.open(name, flags, dir_fd=fd)
+        try:
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid,
+                    opened.st_nlink, opened.st_size) != (before.st_dev, before.st_ino,
+                    before.st_mode, before.st_uid, before.st_gid, before.st_nlink, before.st_size):
+                raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+            if stat.S_ISDIR(opened.st_mode):
+                digest.update(b"d" + bytes.fromhex(_tree_digest(
+                    child, device, owner, depth=depth + 1, budget=budget
+                )))
+            else:
+                content = hashlib.sha256()
+                length = 0
+                while chunk := os.read(child, 65_536):
+                    length += len(chunk)
+                    budget[1] += len(chunk)
+                    if budget[1] > 64 * 1024 * 1024:
+                        raise EnrollmentError("quarantine_bounds", "MANUAL_RECOVERY_REQUIRED")
+                    content.update(chunk)
+                if length != before.st_size or os.fstat(child).st_ino != before.st_ino:
+                    raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+                digest.update(b"f" + content.digest())
+        finally:
+            os.close(child)
+    return digest.hexdigest()
+
+
+def object_identity(parent_fd: int, name: str, owner: int) -> dict[str, Any]:
+    if SAFE_NAME.fullmatch(name) is None:
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    kind = "directory" if stat.S_ISDIR(before.st_mode) else "regular" if stat.S_ISREG(before.st_mode) else ""
+    if before.st_uid != owner or not kind or (kind == "regular" and before.st_nlink != 1):
+        raise EnrollmentError("quarantine_type", "MANUAL_RECOVERY_REQUIRED")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if kind == "directory" else 0)
+    fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        fixed = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                              info.st_gid, info.st_nlink, info.st_size)
+        if fixed(before) != fixed(opened):
+            raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+        if kind == "directory":
+            tree_sha256 = _tree_digest(fd, opened.st_dev, owner)
+        else:
+            data = os.read(fd, 65_537)
+            if len(data) != opened.st_size or len(data) > 65_536:
+                raise EnrollmentError("quarantine_bounds", "MANUAL_RECOVERY_REQUIRED")
+            tree_sha256 = hashlib.sha256(data).hexdigest()
+    finally:
+        os.close(fd)
+    return {"dev": before.st_dev, "ino": before.st_ino, "type": kind,
+            "mode": before.st_mode, "uid": before.st_uid, "gid": before.st_gid,
+            "nlink": before.st_nlink, "size": before.st_size, "tree_sha256": tree_sha256}
+
+
+def _rename_noreplace(source_fd: int, source_name: str, destination_fd: int,
+                      destination_name: str, state: str) -> None:
+    if SAFE_NAME.fullmatch(source_name) is None or SAFE_NAME.fullmatch(destination_name) is None:
+        raise EnrollmentError("quarantine_identity", state)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                              ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+    except (AttributeError, OSError) as exc:
+        raise EnrollmentError("unsupported_layout", state) from exc
+    if renameat2(source_fd, source_name.encode("ascii"), destination_fd,
+                 destination_name.encode("ascii"), 1) != 0:
+        value = ctypes.get_errno()
+        category = "unsupported_layout" if value in {errno.ENOSYS, errno.EINVAL, errno.EXDEV} else "quarantine_collision"
+        raise EnrollmentError(category, state) from OSError(value, os.strerror(value))
+
+
+def detach_nondestructive(source_fd: int, source_name: str, quarantine_fd: int,
+                          quarantine_name: str, owner: int) -> dict[str, Any]:
+    if _parent_identity(source_fd)["dev"] != _parent_identity(quarantine_fd)["dev"]:
+        raise EnrollmentError("unsupported_layout", "MANUAL_RECOVERY_REQUIRED")
+    expected = object_identity(source_fd, source_name, owner)
+    try:
+        os.stat(quarantine_name, dir_fd=quarantine_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise EnrollmentError("quarantine_collision", "MANUAL_RECOVERY_REQUIRED")
+    if object_identity(source_fd, source_name, owner) != expected:
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    _rename_noreplace(source_fd, source_name, quarantine_fd, quarantine_name,
+                      "MANUAL_RECOVERY_REQUIRED")
+    os.fsync(source_fd)
+    os.fsync(quarantine_fd)
+    actual = object_identity(quarantine_fd, quarantine_name, owner)
+    try:
+        os.stat(source_name, dir_fd=source_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    if actual != expected:
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    return actual
+
+
+def restore_nondestructive(quarantine_fd: int, quarantine_name: str, source_fd: int,
+                           source_name: str, expected: dict[str, Any], owner: int) -> dict[str, Any]:
+    if _parent_identity(quarantine_fd)["dev"] != _parent_identity(source_fd)["dev"]:
+        raise EnrollmentError("unsupported_layout", "MANUAL_RECOVERY_REQUIRED")
+    try:
+        os.stat(source_name, dir_fd=source_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise EnrollmentError("restore_collision", "MANUAL_RECOVERY_REQUIRED")
+    if object_identity(quarantine_fd, quarantine_name, owner) != expected:
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    _rename_noreplace(quarantine_fd, quarantine_name, source_fd, source_name,
+                      "MANUAL_RECOVERY_REQUIRED")
+    os.fsync(quarantine_fd)
+    os.fsync(source_fd)
+    actual = object_identity(source_fd, source_name, owner)
+    if actual != expected:
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    return actual
+
+
+def new_quarantine_journal(nonce: str, operation: str, uid: int, home: Path,
+                           profile: str, generation: str) -> dict[str, Any]:
+    if (re.fullmatch(r"[0-9a-f]{64}", nonce) is None or operation not in {"unenroll", "rollback"}
+            or type(uid) is not int or uid < 0 or type(profile) is not str
+            or SAFE_NAME.fullmatch(profile) is None
+            or re.fullmatch(r"[0-9a-f]{64}", generation) is None):
+        raise EnrollmentError("journal", "MANUAL_RECOVERY_REQUIRED")
+    return {"schema": 1, "transaction_nonce": nonce, "operation": operation,
+            "target": {"uid": uid, "home": str(home), "profile": profile, "generation": generation},
+            "objects": {}, "phase": "STARTED", "result": None,
+            "manual_recovery": MANUAL_RECOVERY}
+
+
+def _valid_identity(value: Any) -> bool:
+    return (type(value) is dict and set(value) == IDENTITY_KEYS
+            and value.get("type") in {"directory", "regular"}
+            and all(type(value.get(key)) is int and value[key] >= 0
+                    for key in IDENTITY_KEYS - {"type", "tree_sha256"})
+            and type(value.get("tree_sha256")) is str
+            and re.fullmatch(r"[0-9a-f]{64}", value["tree_sha256"]) is not None)
+
+
+def load_quarantine_journal(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_bytes()
+        if not raw or len(raw) > 262_144:
+            raise ValueError("journal size")
+        value = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise EnrollmentError("journal", "MANUAL_RECOVERY_REQUIRED") from exc
+    target = value.get("target") if type(value) is dict else None
+    objects = value.get("objects") if type(value) is dict else None
+    if (type(value) is not dict or set(value) != JOURNAL_KEYS
+            or type(value.get("schema")) is not int or value["schema"] != 1
+            or re.fullmatch(r"[0-9a-f]{64}", value.get("transaction_nonce", "")) is None
+            or value.get("operation") not in {"unenroll", "rollback"}
+            or type(target) is not dict or set(target) != {"uid", "home", "profile", "generation"}
+            or type(target.get("uid")) is not int or target["uid"] < 0
+            or type(target.get("home")) is not str or type(target.get("profile")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", target.get("generation", "")) is None
+            or type(objects) is not dict or value.get("phase") not in JOURNAL_PHASES
+            or not set(objects).issubset(JOURNAL_OBJECT_NAMES)
+            or value.get("result") not in {None, "QUARANTINED", "MANUAL_RECOVERY_REQUIRED"}
+            or value.get("manual_recovery") != MANUAL_RECOVERY):
+        raise EnrollmentError("journal", "MANUAL_RECOVERY_REQUIRED")
+    for record in objects.values():
+        if (type(record) is not dict or set(record) != JOURNAL_OBJECT_KEYS
+                or type(record.get("source_parent")) is not dict
+                or type(record.get("quarantine_parent")) is not dict
+                or type(record.get("source_name")) is not str
+                or SAFE_NAME.fullmatch(record["source_name"]) is None
+                or type(record.get("quarantine_name")) is not str
+                or SAFE_NAME.fullmatch(record["quarantine_name"]) is None
+                or not _valid_identity(record.get("source_identity"))
+                or not _valid_identity(record.get("quarantine_identity"))):
+            raise EnrollmentError("journal", "MANUAL_RECOVERY_REQUIRED")
+        for parent in (record["source_parent"], record["quarantine_parent"]):
+            if (set(parent) != PARENT_IDENTITY_KEYS
+                    or any(type(parent.get(key)) is not int or parent[key] < 0
+                           for key in PARENT_IDENTITY_KEYS)):
+                raise EnrollmentError("journal", "MANUAL_RECOVERY_REQUIRED")
+    return value
+
+
+def write_quarantine_journal(path: Path, journal: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, json.dumps(journal, sort_keys=True, separators=(",", ":")).encode("ascii"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(parent_fd)
+        os.replace(temporary, path)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def _remaining_seconds(deadline_ns: int) -> float:
     remaining = deadline_ns - time.monotonic_ns()
     if remaining <= 0:
@@ -534,6 +792,20 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
             raise EnrollmentError("adapter_failure")
         validate_attest_response(response, action_env, expected_event_id)
         _remaining_seconds(deadline_ns)
+    elif (action not in ADAPTER_BASE_KEYS or set(response) != ADAPTER_BASE_KEYS[action]
+          or type(response.get("plugin_enabled")) is not bool
+          or (action == "prepare" and response.get("prepared") is not True)
+          or (action == "rollback" and (
+              response.get("prepared") is not False
+              or response.get("reload_required") is not True
+              or response.get("rollback_phase") != "RESTORED_VERIFIED"))
+          or (action in {"enable", "disable"} and (
+              type(response.get("process_fresh")) is not bool
+              or response.get("process_fresh") is not False
+              or response.get("plugin_enabled") is not (action == "enable")
+              or response.get("loaded_generation") != (
+                  env["SKYNET_EDR_GENERATION"] if action == "enable" else None)))):
+        raise EnrollmentError("adapter_failure")
     response.update({
         "transaction_nonce": nonce,
         "action": action,
@@ -544,7 +816,7 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
     })
     if deadline_ns is not None:
         _remaining_seconds(deadline_ns)
-    previous_observation = snapshot_optional_regular(observations)
+    snapshot_optional_regular(observations)
     if deadline_ns is not None:
         _remaining_seconds(deadline_ns)
     observations.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -564,11 +836,6 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
         if deadline_ns is not None:
             _remaining_seconds(deadline_ns)
     except Exception:
-        if replaced:
-            try:
-                restore_optional_regular(observations, previous_observation)
-            except Exception as rollback_error:
-                raise EnrollmentError("rollback") from rollback_error
         raise
     finally:
         if fd >= 0:
@@ -780,6 +1047,21 @@ def require_same_filesystem(home: Path, state_root: Path) -> None:
         raise EnrollmentError("unsupported_layout")
 
 
+def open_private_state_directory(path: Path, expected_dev: int) -> int:
+    """Pin root-owned private state without repairing hostile pre-existing paths."""
+    info = os.lstat(path)
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0
+            or info.st_mode & 0o022 or info.st_dev != expected_dev):
+        raise EnrollmentError("unsupported_layout", "MANUAL_RECOVERY_REQUIRED")
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    pinned = os.fstat(fd)
+    if (pinned.st_dev != info.st_dev or pinned.st_ino != info.st_ino or pinned.st_uid != 0
+            or pinned.st_mode & 0o022 or not stat.S_ISDIR(pinned.st_mode)):
+        os.close(fd)
+        raise EnrollmentError("unsupported_layout", "MANUAL_RECOVERY_REQUIRED")
+    return fd
+
+
 def copy_generation(source: Path, stage: Path, manifest: dict[str, Any], uid: int, gid: int) -> None:
     stage.mkdir(mode=0o700)
     os.chown(stage, uid, gid)
@@ -819,7 +1101,7 @@ def write_metadata(state_root: Path, generation: str, uid: int, profile: str, ve
     if deadline_ns is not None:
         _remaining_seconds(deadline_ns)
     metadata_path = state_root / "enrollment.json"
-    previous = snapshot_optional_regular(metadata_path)
+    snapshot_optional_regular(metadata_path)
     if deadline_ns is not None:
         _remaining_seconds(deadline_ns)
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -842,11 +1124,6 @@ def write_metadata(state_root: Path, generation: str, uid: int, profile: str, ve
         if deadline_ns is not None:
             _remaining_seconds(deadline_ns)
     except Exception:
-        if replaced:
-            try:
-                restore_metadata(state_root, previous[1] if previous[0] else None)
-            except Exception as rollback_error:
-                raise EnrollmentError("rollback") from rollback_error
         raise
     finally:
         if fd >= 0:
@@ -868,46 +1145,13 @@ def enrollment_lock(state_root: Path) -> Path:
     return state_root / "enrollment.lock"
 
 
-def restore_metadata(state_root: Path, previous: bytes | None) -> None:
-    metadata = state_root / "enrollment.json"
-    if previous is None:
-        try:
-            metadata.unlink()
-        except FileNotFoundError:
-            pass
-        return
-    fd, temporary = tempfile.mkstemp(prefix=".rollback-metadata.", dir=state_root)
-    try:
-        os.fchmod(fd, 0o600)
-        os.write(fd, previous)
-        os.fsync(fd)
-        os.close(fd)
-        fd = -1
-        os.replace(temporary, metadata)
-        fsync_dir(state_root)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-
-
-def rollback_target(target: Path, prior: Path, state_root: Path, previous_metadata: bytes | None) -> None:
-    if target.exists():
-        shutil.rmtree(target)
-    if prior.exists():
-        os.replace(prior, target)
-    restore_metadata(state_root, previous_metadata)
-
-
 def install_desktop(source: Path, parent: Path, state_root: Path, uid: int, gid: int) -> tuple[Path, Path]:
     target = parent / "skynet-edr"
     prior = state_root / "prior-desktop"
     if prior.exists():
-        shutil.rmtree(prior)
+        raise EnrollmentError("active_transaction", "MANUAL_RECOVERY_REQUIRED")
     stage = Path(tempfile.mkdtemp(prefix=".skynet-edr-desktop-", dir=state_root))
+    mutation_started = False
     try:
         copy_generation_file(source / "desktop" / "plugin.js", stage / "plugin.js", uid, gid)
         os.chown(stage, uid, gid)
@@ -917,20 +1161,15 @@ def install_desktop(source: Path, parent: Path, state_root: Path, uid: int, gid:
             if (not stat.S_ISDIR(target_info.st_mode)
                     or {entry.name for entry in target.iterdir()} != {"plugin.js"}):
                 raise EnrollmentError("invalid_target")
+            mutation_started = True
             os.replace(target, prior)
+        else:
+            mutation_started = True
         os.replace(stage, target)
         fsync_dir(parent)
     except Exception:
-        if stage.exists():
+        if not mutation_started and stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
-        if prior.exists():
-            if target.exists() or target.is_symlink():
-                target_info = os.lstat(target)
-                if not stat.S_ISDIR(target_info.st_mode):
-                    raise EnrollmentError("rollback")
-                shutil.rmtree(target)
-            os.replace(prior, target)
-            fsync_dir(parent)
         raise
     return target, prior
 
@@ -949,14 +1188,6 @@ def copy_generation_file(source: Path, destination: Path, uid: int, gid: int) ->
             os.close(destination_fd)
     finally:
         os.close(source_fd)
-
-
-def rollback_desktop(target: Path, prior: Path) -> None:
-    if target.exists():
-        shutil.rmtree(target)
-    if prior.exists():
-        os.replace(prior, target)
-        fsync_dir(target.parent)
 
 
 def apply(request: dict[str, Any], source: Path, state_root: Path, observations: Path, adapter: Path) -> int:
@@ -980,6 +1211,8 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         assert opened is not None and desktop_parent is not None
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if (state_root / "transaction.json").exists():
+            return emit("MANUAL_RECOVERY_REQUIRED", "active_transaction")
         state, category = assess(request, home, state_root, manifest, observations, opened)
         initial_absent = state == "ABSENT"
         if state == "ENROLLED":
@@ -1001,17 +1234,18 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         target = target_parent / "skynet-edr"
         stage = state_root / f".skynet-edr-stage-{os.getpid()}"
         prior = state_root / "prior-generation"
-        metadata_path = state_root / "enrollment.json"
-        previous_metadata = metadata_path.read_bytes() if metadata_path.exists() else None
-        desktop_target: Path | None = None
-        desktop_prior: Path | None = None
-        if stage.exists():
-            shutil.rmtree(stage)
-        if prior.exists():
-            shutil.rmtree(prior)
+        if stage.exists() or prior.exists():
+            journal = new_quarantine_journal(
+                secrets.token_hex(32), "rollback", uid, home, profile,
+                canonical_generation(manifest),
+            )
+            journal["result"] = "MANUAL_RECOVERY_REQUIRED"
+            try:
+                write_quarantine_journal(state_root / "transaction.json", journal)
+            except (EnrollmentError, OSError):
+                pass
+            return emit("MANUAL_RECOVERY_REQUIRED", "active_transaction")
         committed = False
-        host_prepare_attempted = False
-        enable_attempted = False
         try:
             copy_generation(source, stage, manifest, uid, gid)
             if target.exists() or target.is_symlink():
@@ -1022,12 +1256,10 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
             committed = True
             os.replace(stage, target)
             fsync_dir(target_parent)
-            desktop_target, desktop_prior = install_desktop(source, desktop_parent, state_root, uid, gid)
+            install_desktop(source, desktop_parent, state_root, uid, gid)
             write_metadata(state_root, generation, uid, profile, None)
-            host_prepare_attempted = True
             run_adapter(adapter, "prepare", adapter_env(home, profile, observations, generation, uid), observations)
             env = adapter_env(home, profile, observations, generation, uid)
-            enable_attempted = True
             enabled = run_adapter(adapter, "enable", env, observations)
             if enabled.get("plugin_enabled") is not True:
                 raise EnrollmentError("enablement")
@@ -1044,15 +1276,17 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         except (EnrollmentError, OSError) as exc:
             failure_state = exc.state if isinstance(exc, EnrollmentError) else "DRIFTED"
             failure_category = exc.category if isinstance(exc, EnrollmentError) else "internal_failure"
+            if committed:
+                journal = new_quarantine_journal(
+                    secrets.token_hex(32), "rollback", uid, home, profile, generation
+                )
+                journal["result"] = "MANUAL_RECOVERY_REQUIRED"
+                try:
+                    write_quarantine_journal(state_root / "transaction.json", journal)
+                except (EnrollmentError, OSError):
+                    pass
+                return emit("MANUAL_RECOVERY_REQUIRED", failure_category)
             try:
-                if enable_attempted:
-                    run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, uid), observations)
-                if host_prepare_attempted:
-                    run_adapter(adapter, "rollback", adapter_env(home, profile, observations, generation, uid), observations)
-                if committed:
-                    if desktop_target is not None and desktop_prior is not None:
-                        rollback_desktop(desktop_target, desktop_prior)
-                    rollback_target(target, prior, state_root, previous_metadata)
                 if initial_absent:
                     restore_optional_regular(observations, previous_observation)
                     if lock_created:
@@ -1076,6 +1310,67 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
             return emit(failure_state, failure_category)
 
 
+def _quarantine_one(journal_path: Path, journal: dict[str, Any], key: str,
+                    source_fd: int, source_name: str, quarantine_fd: int,
+                    quarantine_name: str, owner: int) -> None:
+    record = journal["objects"].get(key)
+    if record is None:
+        try:
+            source_identity = object_identity(source_fd, source_name, owner)
+        except FileNotFoundError:
+            return
+        record = {
+            "source_parent": _parent_identity(source_fd), "source_name": source_name,
+            "source_identity": source_identity,
+            "quarantine_parent": _parent_identity(quarantine_fd),
+            "quarantine_name": quarantine_name,
+            # rename preserves the exact object identity; recording this before the
+            # syscall makes a crash after durable rename safely adoptable.
+            "quarantine_identity": source_identity,
+        }
+        journal["objects"][key] = record
+        journal["phase"] = "QUARANTINING"
+        write_quarantine_journal(journal_path, journal)
+    if (_parent_identity(source_fd) != record["source_parent"]
+            or _parent_identity(quarantine_fd) != record["quarantine_parent"]):
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+    try:
+        source_identity = object_identity(source_fd, source_name, owner)
+    except FileNotFoundError:
+        source_identity = None
+    try:
+        quarantine_identity = object_identity(quarantine_fd, quarantine_name, owner)
+    except FileNotFoundError:
+        quarantine_identity = None
+    if source_identity is not None and quarantine_identity is not None:
+        raise EnrollmentError("quarantine_collision", "MANUAL_RECOVERY_REQUIRED")
+    if quarantine_identity is None:
+        if source_identity != record["source_identity"]:
+            raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+        quarantine_identity = detach_nondestructive(
+            source_fd, source_name, quarantine_fd, quarantine_name, owner
+        )
+    if source_identity is None and quarantine_identity != record["quarantine_identity"]:
+        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+
+
+def _fresh_quarantine_proof(journal: dict[str, Any], bindings: dict[str, tuple[int, int]]) -> None:
+    for key, record in journal["objects"].items():
+        source_fd, quarantine_fd = bindings[key]
+        if (_parent_identity(source_fd) != record["source_parent"]
+                or _parent_identity(quarantine_fd) != record["quarantine_parent"]):
+            raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+        try:
+            os.stat(record["source_name"], dir_fd=source_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise EnrollmentError("active_source", "MANUAL_RECOVERY_REQUIRED")
+        owner = record["source_identity"]["uid"]
+        if object_identity(quarantine_fd, record["quarantine_name"], owner) != record["quarantine_identity"]:
+            raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+
+
 def unenroll(request: dict[str, Any], source: Path, state_root: Path, observations: Path, adapter: Path) -> int:
     uid, home, profile, manifest = validate_request(request, source)
     gid = pwd.getpwuid(uid).pw_gid
@@ -1090,22 +1385,29 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
         plugins_parent, _ = plugin_directory
         desktop_parent, _ = desktop_directory
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        if plugins_parent is None and not (state_root / "enrollment.json").exists():
+        journal_path = state_root / "transaction.json"
+        if plugins_parent is None and not (state_root / "enrollment.json").exists() and not journal_path.exists():
             return emit("ABSENT", "unenrolled", noop=True, success=True)
-        if plugins_parent is None:
+        if plugins_parent is None and not journal_path.exists():
             return emit("DRIFTED", "invalid_target")
-        target = plugins_parent / "skynet-edr"
-        if not target.exists() and not (state_root / "enrollment.json").exists():
+        target = plugins_parent / "skynet-edr" if plugins_parent is not None else None
+        if target is not None and not target.exists() and not (state_root / "enrollment.json").exists() and not journal_path.exists():
             return emit("ABSENT", "unenrolled", noop=True, success=True)
         generation = canonical_generation(manifest)
-        if target.is_symlink() or not target.is_dir():
-            return emit("DRIFTED", "invalid_target")
-        try:
-            validate_tree(target, manifest, installed_owner=request["uid"])
-        except EnrollmentError:
-            return emit("DRIFTED", "invalid_target")
+        repeated = journal_path.exists()
+        journal = load_quarantine_journal(journal_path) if repeated else None
+        if journal is not None and journal["target"] != {
+                "uid": uid, "home": str(home), "profile": profile, "generation": generation}:
+            return emit("MANUAL_RECOVERY_REQUIRED", "journal")
+        if journal is None:
+            if target is None or target.is_symlink() or not target.is_dir():
+                return emit("DRIFTED", "invalid_target")
+            try:
+                validate_tree(target, manifest, installed_owner=request["uid"])
+            except EnrollmentError:
+                return emit("DRIFTED", "invalid_target")
         desktop = desktop_parent / "skynet-edr" if desktop_parent is not None else None
-        if desktop is not None and desktop.exists():
+        if journal is None and desktop is not None and desktop.exists():
             expected = manifest["desktop/plugin.js"]
             plugin = desktop / "plugin.js"
             if (desktop.is_symlink() or not desktop.is_dir() or {entry.name for entry in desktop.iterdir()} != {"plugin.js"}
@@ -1114,22 +1416,119 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
                     or plugin.stat().st_size != expected["size"]
                     or hashlib.sha256(plugin.read_bytes()).hexdigest() != expected["sha256"]):
                 return emit("DRIFTED", "invalid_target")
+        transaction_fd = -1
+        quarantine_root_fd = -1
+        private_state_fd = -1
         try:
-            disabled = run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, request["uid"]), observations)
-            if disabled.get("plugin_enabled") is not False:
-                raise EnrollmentError("enablement")
-            run_adapter(adapter, "rollback", adapter_env(home, profile, observations, generation, request["uid"]), observations)
-            if desktop is not None and desktop.exists():
-                shutil.rmtree(desktop)
-                fsync_dir(desktop.parent)
-            shutil.rmtree(target)
-            try:
-                (state_root / "enrollment.json").unlink()
-            except FileNotFoundError:
-                pass
-            return emit("ABSENT", "unenrolled", success=True)
-        except EnrollmentError as exc:
-            return emit(exc.state, exc.category)
+            state_info = os.lstat(state_root)
+            private_state_fd = open_private_state_directory(state_root, state_info.st_dev)
+            quarantine_root = state_root / "quarantine"
+            if exists_nofollow(quarantine_root):
+                quarantine_root_fd = open_private_state_directory(quarantine_root, state_info.st_dev)
+            if journal is None:
+                nonce = secrets.token_hex(32)
+                journal = new_quarantine_journal(nonce, "unenroll", uid, home, profile, generation)
+                quarantine_root.mkdir(mode=0o700, exist_ok=True)
+                quarantine_root_fd = open_private_state_directory(quarantine_root, state_info.st_dev)
+                fsync_dir(state_root)
+                transaction = quarantine_root / nonce
+                transaction.mkdir(mode=0o700)
+                fsync_dir(quarantine_root)
+                write_quarantine_journal(journal_path, journal)
+            else:
+                nonce = journal["transaction_nonce"]
+                transaction = quarantine_root / nonce
+            if quarantine_root_fd < 0:
+                raise EnrollmentError("unsupported_layout", "MANUAL_RECOVERY_REQUIRED")
+            transaction_fd = open_private_state_directory(transaction, state_info.st_dev)
+            transaction_info = os.fstat(transaction_fd)
+            expected_owner = 0
+            if (transaction_info.st_uid != expected_owner or transaction_info.st_mode & 0o022
+                    or transaction_info.st_dev != os.fstat(quarantine_root_fd).st_dev):
+                raise EnrollmentError("unsupported_layout", "MANUAL_RECOVERY_REQUIRED")
+            if journal["phase"] == "QUARANTINED" and journal["result"] == "QUARANTINED":
+                bindings: dict[str, tuple[int, int]] = {}
+                for key in journal["objects"]:
+                    if key == "backend" and plugins_parent is not None:
+                        source_fd = os.open(plugins_parent, os.O_RDONLY | os.O_DIRECTORY)
+                    elif key == "desktop" and desktop_parent is not None:
+                        source_fd = os.open(desktop_parent, os.O_RDONLY | os.O_DIRECTORY)
+                    elif key == "metadata":
+                        source_fd = private_state_fd
+                    elif key == "observation":
+                        source_fd = os.open(observations.parent, os.O_RDONLY | os.O_DIRECTORY
+                                            | os.O_NOFOLLOW)
+                    else:
+                        raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+                    bindings[key] = (source_fd, transaction_fd)
+                _fresh_quarantine_proof(journal, bindings)
+                return emit("QUARANTINED", "unenrolled", noop=True, success=True)
+            if journal["phase"] == "STARTED":
+                disabled = run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, uid), observations)
+                if set(disabled) != ADAPTER_BASE_KEYS["disable"] | ADAPTER_ENVELOPE_KEYS \
+                        or disabled.get("plugin_enabled") is not False \
+                        or disabled.get("loaded_generation") is not None \
+                        or type(disabled.get("process_fresh")) is not bool:
+                    raise EnrollmentError("enablement", "MANUAL_RECOVERY_REQUIRED")
+                journal["phase"] = "DISABLED"
+                write_quarantine_journal(journal_path, journal)
+            if journal["phase"] == "DISABLED":
+                restored = run_adapter(adapter, "rollback", adapter_env(home, profile, observations, generation, uid), observations)
+                if set(restored) != ADAPTER_BASE_KEYS["rollback"] | ADAPTER_ENVELOPE_KEYS \
+                        or restored.get("prepared") is not False \
+                        or type(restored.get("plugin_enabled")) is not bool \
+                        or restored.get("reload_required") is not True \
+                        or restored.get("rollback_phase") != "RESTORED_VERIFIED":
+                    raise EnrollmentError("rollback", "MANUAL_RECOVERY_REQUIRED")
+                journal["phase"] = "ADAPTER_RESTORED"
+                write_quarantine_journal(journal_path, journal)
+            bindings: dict[str, tuple[int, int]] = {}
+            if plugins_parent is not None:
+                # opened_user_directory already pins and validates this proc-fd path.
+                plugin_fd = os.open(plugins_parent, os.O_RDONLY | os.O_DIRECTORY)
+                bindings["backend"] = (plugin_fd, transaction_fd)
+                _quarantine_one(journal_path, journal, "backend", plugin_fd, "skynet-edr",
+                                transaction_fd, "backend", uid)
+            if desktop_parent is not None:
+                desktop_fd = os.open(desktop_parent, os.O_RDONLY | os.O_DIRECTORY)
+                bindings["desktop"] = (desktop_fd, transaction_fd)
+                _quarantine_one(journal_path, journal, "desktop", desktop_fd, "skynet-edr",
+                                transaction_fd, "desktop", uid)
+            for key, path, name in (("metadata", state_root / "enrollment.json", "metadata"),
+                                    ("observation", observations, "observation")):
+                parent_fd = private_state_fd if path.parent == state_root else os.open(
+                    path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                )
+                bindings[key] = (parent_fd, transaction_fd)
+                _quarantine_one(journal_path, journal, key, parent_fd, path.name,
+                                transaction_fd, name, expected_owner)
+            journal["phase"] = "QUARANTINED"
+            journal["result"] = "QUARANTINED"
+            write_quarantine_journal(journal_path, journal)
+            _fresh_quarantine_proof(journal, bindings)
+            return emit("QUARANTINED", "unenrolled", noop=repeated,
+                        success=True)
+        except (EnrollmentError, OSError) as exc:
+            category = exc.category if isinstance(exc, EnrollmentError) else "internal_failure"
+            if journal is not None:
+                journal["result"] = "MANUAL_RECOVERY_REQUIRED"
+                try:
+                    write_quarantine_journal(journal_path, journal)
+                except OSError:
+                    pass
+            return emit("MANUAL_RECOVERY_REQUIRED", category)
+        finally:
+            # Closing descriptors is not deletion; quarantined objects and the journal survive.
+            for value in list(locals().get("bindings", {}).values()):
+                fd = value[0]
+                if fd != private_state_fd:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            for fd in (private_state_fd, transaction_fd, quarantine_root_fd):
+                if fd >= 0:
+                    os.close(fd)
 
 
 def parse_args() -> argparse.Namespace:

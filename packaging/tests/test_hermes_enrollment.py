@@ -213,7 +213,10 @@ class HermesEnrollmentTests(unittest.TestCase):
             "assert os.environ['HERMES_PROFILE']==" + repr(profile) + "\n"
             + ("if sys.argv[1]=='prepare': assert os.path.isfile(os.path.join(os.environ['HERMES_HOME'],'plugins','skynet-edr','plugin.yaml'))\n"
                if require_payload_before_prepare else "") +
-            "o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False,"
+            "o={'prepared':True,'plugin_enabled':False}\n"
+            "if sys.argv[1] in ('enable','disable'): o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False}\n"
+            "elif sys.argv[1]=='rollback': o={'prepared':False,'plugin_enabled':False,'reload_required':True,'rollback_phase':'RESTORED_VERIFIED'}\n"
+            "elif sys.argv[1]=='attest': o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False,"
             "'daemon':{'healthy':False,'listener':True,'transport':'available','backlog':0,'degraded':False},"
             "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':False,'generation':os.environ['SKYNET_EDR_GENERATION'],'runtime_nonce':'c'*64},"
             "'real_hook':{'correlated':False,'committed':False,'incident_opened':False},"
@@ -222,7 +225,7 @@ class HermesEnrollmentTests(unittest.TestCase):
             f" o['plugin_enabled']={enabled!r}\n"
             " o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']\n"
             "elif sys.argv[1]=='disable': o['plugin_enabled']=False\n"
-            "elif sys.argv[1]=='attest':\n"
+            "if sys.argv[1]=='attest':\n"
             f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}; o['real_hook']={{'correlated':True,'committed':True,'incident_opened':False,'event_id':os.environ['SKYNET_EDR_CANARY_EVENT_ID'],'receipt_status':'persisted'}}\n"
             "print(json.dumps(o))\n",
             encoding="utf-8",
@@ -422,7 +425,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertNotEqual(output["state"], "ENROLLED")
         self.assertEqual(before, self.obs_path.read_bytes())
 
-    def test_failed_reapply_restores_prior_metadata_and_generation(self):
+    def test_failed_reapply_preserves_mutated_state_for_manual_recovery(self):
         adapter = self.make_adapter()
         result, _ = self.run_cli("apply", "--adapter", adapter)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -435,9 +438,63 @@ class HermesEnrollmentTests(unittest.TestCase):
         self._write_inputs()
         result, output = self.run_cli("apply", "--adapter", self.make_adapter(enabled=False))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(output["state"], {"DRIFTED", "ROLLBACK_REQUIRED"})
-        self.assertEqual(metadata_before, (self.state / "enrollment.json").read_bytes())
+        self.assertEqual(output["state"], "MANUAL_RECOVERY_REQUIRED")
+        self.assertTrue((self.state / "transaction.json").is_file())
+        self.assertTrue((self.state / "prior-generation").is_dir())
+        self.assertNotEqual(metadata_before, (self.state / "enrollment.json").read_bytes())
         self.assertEqual(bytes_before, {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()})
+
+    def test_post_mutation_apply_failure_never_runs_destructive_cleanup_and_retry_is_fenced(self):
+        module = load_module()
+        adapter = Path(self.make_adapter())
+        output = io.StringIO()
+
+        def fail_prepare(_adapter, action, *_args, **_kwargs):
+            if action == "prepare":
+                raise module.EnrollmentError("adapter_failure")
+            raise AssertionError(f"unexpected cleanup adapter action: {action}")
+
+        forbidden = [
+            mock.patch.object(module, name, side_effect=AssertionError(f"{name} forbidden"))
+            for name in ("restore_optional_regular",
+                         "remove_created_regular", "remove_created_directory",
+                         "remove_empty_user_directory")
+        ]
+        with contextlib.ExitStack() as stack:
+            for guard in forbidden:
+                stack.enter_context(guard)
+            stack.enter_context(mock.patch.object(module.shutil, "rmtree", side_effect=AssertionError("rmtree forbidden")))
+            stack.enter_context(mock.patch.object(module, "run_adapter", side_effect=fail_prepare))
+            stack.enter_context(mock.patch.object(module.sys, "stdout", output))
+            result = module.apply(self.request, self.source, self.state, self.obs_path, adapter)
+
+        response = json.loads(output.getvalue())
+        self.assertNotEqual(result, 0)
+        self.assertEqual(response, {"schema": 1, "state": "MANUAL_RECOVERY_REQUIRED",
+                                    "category": "adapter_failure", "noop": False})
+        journal = module.load_quarantine_journal(self.state / "transaction.json")
+        self.assertEqual((journal["operation"], journal["phase"], journal["result"]),
+                         ("rollback", "STARTED", "MANUAL_RECOVERY_REQUIRED"))
+        target = self.home / "plugins" / "skynet-edr"
+        desktop = self.home / "desktop-plugins" / "skynet-edr"
+        before = {
+            "target": {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()},
+            "desktop": {p.relative_to(desktop): p.read_bytes() for p in desktop.rglob("*") if p.is_file()},
+            "metadata": (self.state / "enrollment.json").read_bytes(),
+            "observation": self.obs_path.read_bytes(),
+        }
+        retry_output = io.StringIO()
+        with (mock.patch.object(module, "run_adapter", side_effect=AssertionError("retry mutated adapter")),
+              mock.patch.object(module.sys, "stdout", retry_output)):
+            retry = module.apply(self.request, self.source, self.state, self.obs_path, adapter)
+        self.assertNotEqual(retry, 0)
+        self.assertEqual(json.loads(retry_output.getvalue())["state"], "MANUAL_RECOVERY_REQUIRED")
+        self.assertEqual(before, {
+            "target": {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()},
+            "desktop": {p.relative_to(desktop): p.read_bytes() for p in desktop.rglob("*") if p.is_file()},
+            "metadata": (self.state / "enrollment.json").read_bytes(),
+            "observation": self.obs_path.read_bytes(),
+        })
 
     def test_desktop_companion_is_transactional(self):
         adapter = self.make_adapter()
@@ -546,7 +603,7 @@ class HermesEnrollmentTests(unittest.TestCase):
             )
         self.assertLess(module.time.monotonic() - started, 1.0)
 
-    def test_deadline_expiry_during_metadata_fsync_restores_previous_bytes(self):
+    def test_deadline_expiry_during_metadata_fsync_preserves_current_bytes(self):
         module = load_module()
         state = self.base / "metadata-state"
         state.mkdir()
@@ -555,9 +612,10 @@ class HermesEnrollmentTests(unittest.TestCase):
         with mock.patch.object(module.time, "monotonic_ns", side_effect=[0, 0, 0, 100]):
             with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
                 module.write_metadata(state, "b" * 64, 1000, "default", "c" * 64, deadline_ns=100)
-        self.assertEqual(metadata.read_bytes(), b"previous-evidence")
+        self.assertNotEqual(metadata.read_bytes(), b"previous-evidence")
+        self.assertEqual(json.loads(metadata.read_text(encoding="ascii"))["generation"], "b" * 64)
 
-    def test_failed_deadline_bounded_observation_fsync_restores_previous_evidence(self):
+    def test_failed_deadline_bounded_observation_fsync_preserves_current_evidence(self):
         module = load_module()
         adapter = Path(self.make_adapter())
         env = module.adapter_env(
@@ -575,7 +633,8 @@ class HermesEnrollmentTests(unittest.TestCase):
                     deadline_ns=module.time.monotonic_ns() + module.ATTEST_BUDGET_NS,
                     attestation_token=token, expected_event_id=module.canary_event_id(token),
                 )
-        self.assertEqual(self.obs_path.read_bytes(), before)
+        self.assertNotEqual(self.obs_path.read_bytes(), before)
+        self.assertEqual(json.loads(self.obs_path.read_text(encoding="ascii"))["action"], "attest")
 
     def test_runtime_state_and_nonce_are_isolated_by_uid_and_profile(self):
         module = load_module()
@@ -620,11 +679,15 @@ class HermesEnrollmentTests(unittest.TestCase):
             "import json,os,sys\n"
             f"open({str(action_log)!r},'a').write(json.dumps([sys.argv[1],os.geteuid()])+'\\n')\n"
             "healthy=sys.argv[1]=='attest'\n"
-            "print(json.dumps({'plugin_enabled':sys.argv[1]!='disable','loaded_generation':os.environ['SKYNET_EDR_GENERATION'],"
+            "if sys.argv[1]=='prepare': o={'prepared':True,'plugin_enabled':False}\n"
+            "elif sys.argv[1]=='rollback': o={'prepared':False,'plugin_enabled':False,'reload_required':True,'rollback_phase':'RESTORED_VERIFIED'}\n"
+            "elif sys.argv[1] in ('enable','disable'): o={'plugin_enabled':sys.argv[1]=='enable','loaded_generation':os.environ['SKYNET_EDR_GENERATION'] if sys.argv[1]=='enable' else None,'process_fresh':False}\n"
+            "else: o={'plugin_enabled':True,'loaded_generation':os.environ['SKYNET_EDR_GENERATION'],"
             "'process_fresh':healthy,'daemon':{'healthy':healthy,'listener':True,'transport':'available','backlog':0,'degraded':False},"
             "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':healthy,'generation':os.environ['SKYNET_EDR_GENERATION'],'runtime_nonce':'c'*64},"
             "'real_hook':{'correlated':sys.argv[1]=='attest','committed':sys.argv[1]=='attest','incident_opened':False,'event_id':os.environ.get('SKYNET_EDR_CANARY_EVENT_ID'),'receipt_status':'persisted' if sys.argv[1]=='attest' else None},"
-            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1}))\n",
+            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1}\n"
+            "print(json.dumps(o))\n",
             encoding="utf-8",
         )
         adapter.chmod(0o755)
@@ -637,32 +700,36 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertEqual(actions["enable"], target.pw_uid)
         self.assertEqual(actions["attest"], 0)
 
-    def test_enable_zero_without_readback_fails_closed_and_rolls_back(self):
+    def test_enable_zero_without_readback_requires_manual_recovery(self):
         result, output = self.run_cli("apply", "--adapter", self.make_adapter(enabled=False))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(output["state"], {"DRIFTED", "ROLLBACK_REQUIRED"})
-        self.assertFalse((self.home / "plugins" / "skynet-edr").exists())
+        self.assertEqual(output["state"], "MANUAL_RECOVERY_REQUIRED")
+        self.assertTrue((self.home / "plugins" / "skynet-edr").is_dir())
+        self.assertTrue((self.state / "transaction.json").is_file())
 
-    def test_each_adapter_mutation_failure_restores_bytes_and_metadata(self):
+    def test_each_post_mutation_adapter_failure_preserves_bytes_and_metadata(self):
         for action in ("prepare", "enable", "attest"):
             with self.subTest(action=action):
                 self.setUp()
                 result, output = self.run_cli("apply", "--adapter", self.make_adapter(fail_action=action))
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn(output["state"], {"DRIFTED", "ROLLBACK_REQUIRED"})
-                self.assertFalse((self.home / "plugins" / "skynet-edr").exists())
-                self.assertFalse((self.state / "enrollment.json").exists())
+                self.assertEqual(output["state"], "MANUAL_RECOVERY_REQUIRED")
+                self.assertTrue((self.home / "plugins" / "skynet-edr").is_dir())
+                self.assertTrue((self.state / "enrollment.json").is_file())
+                self.assertTrue((self.state / "transaction.json").is_file())
 
-    def test_failed_initial_prepare_restores_exact_zero_residue_baseline(self):
+    def test_failed_initial_prepare_preserves_mutated_state_and_evidence(self):
         self.obs_path.unlink()
         adapter = self.make_adapter(fail_action="prepare")
         result, output = self.run_cli("apply", "--adapter", adapter)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output["category"], "adapter_failure")
-        self.assertFalse(self.state.exists())
+        self.assertEqual(output["state"], "MANUAL_RECOVERY_REQUIRED")
+        self.assertTrue((self.state / "transaction.json").is_file())
+        self.assertTrue((self.state / "enrollment.json").is_file())
         self.assertFalse(self.obs_path.exists())
-        self.assertFalse((self.home / "plugins").exists())
-        self.assertFalse((self.home / "desktop-plugins").exists())
+        self.assertTrue((self.home / "plugins" / "skynet-edr").is_dir())
+        self.assertTrue((self.home / "desktop-plugins" / "skynet-edr").is_dir())
 
     def test_failed_prepare_preserves_parent_created_in_check_mkdir_race(self):
         for parent_name in ("plugins", "desktop-plugins"):
@@ -879,12 +946,163 @@ class HermesEnrollmentTests(unittest.TestCase):
         other.mkdir()
         result, output = self.run_cli("unenroll", "--adapter", adapter)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output["state"], "ABSENT")
+        self.assertEqual(output, {
+            "category": "unenrolled", "noop": False, "schema": 1,
+            "state": "QUARANTINED",
+        })
         self.assertTrue(evidence.exists())
         self.assertTrue(other.exists())
+        quarantine = self.state / "quarantine"
+        entries = sorted(quarantine.iterdir())
+        self.assertEqual(len(entries), 1)
+        before = {
+            str(path.relative_to(quarantine)): (path.stat().st_ino, path.stat().st_size)
+            for path in entries[0].rglob("*")
+        }
+        journal = json.loads((self.state / "transaction.json").read_text(encoding="ascii"))
+        self.assertEqual(journal["phase"], "QUARANTINED")
+        self.assertEqual(journal["result"], "QUARANTINED")
+        self.assertIn("manual", journal["manual_recovery"].lower())
+        journal_path = self.state / "transaction.json"
+        journal_before = (journal_path.read_bytes(), journal_path.stat().st_ino,
+                          journal_path.stat().st_mtime_ns)
         result, output = self.run_cli("unenroll", "--adapter", adapter)
         self.assertEqual(result.returncode, 0)
         self.assertTrue(output["noop"])
+        self.assertEqual(output["state"], "QUARANTINED")
+        self.assertEqual(before, {
+            str(path.relative_to(quarantine)): (path.stat().st_ino, path.stat().st_size)
+            for path in entries[0].rglob("*")
+        })
+        self.assertEqual(journal_before, (journal_path.read_bytes(), journal_path.stat().st_ino,
+                                          journal_path.stat().st_mtime_ns))
+
+    def test_unenroll_rejects_untrusted_quarantine_parent_before_mutation(self):
+        adapter = self.make_adapter()
+        result, _ = self.run_cli("apply", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        quarantine = self.state / "quarantine"
+        quarantine.mkdir(mode=0o700)
+        os.chown(quarantine, 65534, 65534)
+        before = {path: (path.lstat().st_ino, path.lstat().st_mtime_ns,
+                         path.read_bytes() if path.is_file() else None)
+                  for path in self.base.rglob("*")}
+        result, output = self.run_cli("unenroll", "--adapter", adapter)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output["state"], "MANUAL_RECOVERY_REQUIRED")
+        self.assertEqual(before, {path: (path.lstat().st_ino, path.lstat().st_mtime_ns,
+                                        path.read_bytes() if path.is_file() else None)
+                                  for path in self.base.rglob("*")})
+        self.assertFalse((self.state / "transaction.json").exists())
+
+    def test_quarantine_detach_is_atomic_no_replace_and_never_deletes(self):
+        module = load_module()
+        source_parent = self.home / "plugins"
+        source_parent.mkdir(mode=0o700)
+        source = source_parent / "skynet-edr"
+        source.mkdir(mode=0o700)
+        marker = source / "keep"
+        marker.write_text("managed", encoding="ascii")
+        quarantine = self.base / "quarantine"
+        quarantine.mkdir(mode=0o700)
+        source_fd = os.open(source_parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        quarantine_fd = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.addCleanup(os.close, source_fd)
+        self.addCleanup(os.close, quarantine_fd)
+        (quarantine / "collision").mkdir(mode=0o700)
+        with self.assertRaises(module.EnrollmentError):
+            module.detach_nondestructive(source_fd, "skynet-edr", quarantine_fd, "collision", os.getuid())
+        self.assertTrue(marker.exists())
+        with (mock.patch.object(module.os, "unlink", side_effect=AssertionError("delete forbidden")),
+              mock.patch.object(module.os, "rmdir", side_effect=AssertionError("delete forbidden")),
+              mock.patch.object(module.shutil, "rmtree", side_effect=AssertionError("purge forbidden"))):
+            identity = module.detach_nondestructive(
+                source_fd, "skynet-edr", quarantine_fd, "backend", os.getuid()
+            )
+        self.assertFalse(source.exists())
+        self.assertEqual(identity["ino"], (quarantine / "backend").stat().st_ino)
+        self.assertEqual((quarantine / "backend" / "keep").read_text(encoding="ascii"), "managed")
+
+    def test_quarantine_rejects_hostile_identity_and_cross_device(self):
+        module = load_module()
+        source_parent = self.home / "plugins"
+        source_parent.mkdir(mode=0o700)
+        quarantine = self.base / "quarantine"
+        quarantine.mkdir(mode=0o700)
+        source_fd = os.open(source_parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        quarantine_fd = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.addCleanup(os.close, source_fd)
+        self.addCleanup(os.close, quarantine_fd)
+        regular = source_parent / "regular"
+        regular.write_text("managed", encoding="ascii")
+        os.link(regular, source_parent / "hardlink")
+        with self.assertRaises(module.EnrollmentError):
+            module.detach_nondestructive(source_fd, "regular", quarantine_fd, "regular", os.getuid())
+        fifo = source_parent / "fifo"
+        os.mkfifo(fifo)
+        with self.assertRaises(module.EnrollmentError):
+            module.detach_nondestructive(source_fd, "fifo", quarantine_fd, "fifo", os.getuid())
+        with mock.patch.object(module.os, "fstat", side_effect=[os.fstat(source_fd),
+                                                               SimpleNamespace(**{
+                                                                   name: getattr(os.fstat(quarantine_fd), name)
+                                                                   for name in ("st_ino", "st_mode", "st_uid", "st_gid")
+                                                               }, st_dev=os.fstat(source_fd).st_dev + 1)]):
+            with self.assertRaises(module.EnrollmentError):
+                module.detach_nondestructive(source_fd, "missing", quarantine_fd, "missing", os.getuid())
+
+    def test_journal_schema_is_exact_typed_and_duplicate_rejecting(self):
+        module = load_module()
+        journal_path = self.base / "transaction.json"
+        journal = module.new_quarantine_journal(
+            "a" * 64, "unenroll", os.getuid(), self.home,
+            "fixture-profile", "b" * 64,
+        )
+        module.write_quarantine_journal(journal_path, journal)
+        self.assertEqual(module.load_quarantine_journal(journal_path), journal)
+        raw = journal_path.read_text(encoding="ascii")
+        journal_path.write_text(raw[:-1] + ',"phase":"STARTED"}', encoding="ascii")
+        with self.assertRaises(module.EnrollmentError):
+            module.load_quarantine_journal(journal_path)
+        journal["unknown"] = False
+        journal_path.write_text(json.dumps(journal), encoding="ascii")
+        with self.assertRaises(module.EnrollmentError):
+            module.load_quarantine_journal(journal_path)
+        journal.pop("unknown")
+        journal["target"]["uid"] = True
+        journal_path.write_text(json.dumps(journal), encoding="ascii")
+        with self.assertRaises(module.EnrollmentError):
+            module.load_quarantine_journal(journal_path)
+        for schema in (True, False):
+            candidate = module.new_quarantine_journal(
+                "a" * 64, "unenroll", os.getuid(), self.home,
+                "fixture-profile", "b" * 64,
+            )
+            candidate["schema"] = schema
+            journal_path.write_text(json.dumps(candidate), encoding="ascii")
+            with self.assertRaises(module.EnrollmentError):
+                module.load_quarantine_journal(journal_path)
+
+    def test_restore_is_exact_atomic_and_never_overwrites(self):
+        module = load_module()
+        source_parent = self.home / "plugins"
+        source_parent.mkdir(mode=0o700)
+        quarantine = self.base / "quarantine"
+        quarantine.mkdir(mode=0o700)
+        detached = quarantine / "backend"
+        detached.mkdir(mode=0o700)
+        (detached / "keep").write_text("managed", encoding="ascii")
+        source_fd = os.open(source_parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        quarantine_fd = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.addCleanup(os.close, source_fd)
+        self.addCleanup(os.close, quarantine_fd)
+        expected = module.object_identity(quarantine_fd, "backend", os.getuid())
+        (source_parent / "skynet-edr").mkdir(mode=0o700)
+        with self.assertRaises(module.EnrollmentError) as error:
+            module.restore_nondestructive(
+                quarantine_fd, "backend", source_fd, "skynet-edr", expected, os.getuid()
+            )
+        self.assertEqual(error.exception.state, "MANUAL_RECOVERY_REQUIRED")
+        self.assertTrue(detached.exists())
 
     def test_concurrent_apply_serializes_to_one_mutation(self):
         adapter = self.make_adapter()
@@ -905,7 +1123,8 @@ class HermesEnrollmentTests(unittest.TestCase):
         result, output = self.run_cli("apply", "--adapter", str(adapter))
         combined = result.stdout + result.stderr
         self.assertNotIn(marker, combined)
-        self.assertEqual(output["category"], "rollback")
+        self.assertEqual((output["state"], output["category"]),
+                         ("MANUAL_RECOVERY_REQUIRED", "adapter_failure"))
 
     def test_all_package_formats_and_tarball_require_python_runtime(self):
         nfpm = (ROOT / "packaging" / "nfpm.yaml").read_text(encoding="utf-8")
