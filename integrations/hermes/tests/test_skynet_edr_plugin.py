@@ -179,6 +179,8 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_HERMES_PLUGIN_ENABLED", None)
         os.environ.pop("SKYNET_EDR_FALLBACK_MAX_BYTES", None)
         os.environ.pop("SKYNET_EDR_CHECKPOINT_PATH", None)
+        os.environ.pop("SKYNET_EDR_PLUGIN_GENERATION", None)
+        os.environ.pop("SKYNET_EDR_RUNTIME_INSTANCE_NONCE", None)
         os.environ["SKYNET_EDR_INGEST_SOCKET"] = str(self.state_dir / "missing-ingest.sock")
         self.plugin = load_plugin()
         logger = logging.getLogger("skynet_edr_hermes_plugin")
@@ -205,6 +207,8 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_HERMES_PLUGIN_ENABLED", None)
         os.environ.pop("SKYNET_EDR_FALLBACK_MAX_BYTES", None)
         os.environ.pop("SKYNET_EDR_CHECKPOINT_PATH", None)
+        os.environ.pop("SKYNET_EDR_PLUGIN_GENERATION", None)
+        os.environ.pop("SKYNET_EDR_RUNTIME_INSTANCE_NONCE", None)
         os.environ.pop("SKYNET_EDR_INGEST_SOCKET", None)
 
     def read_events(self):
@@ -250,6 +254,8 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
 
     def test_terminal_ack_requires_version_and_matching_event_id(self):
         line = '{"event_id":"evt_ack_expected"}'
+        os.environ["SKYNET_EDR_PLUGIN_GENERATION"] = "a" * 64
+        os.environ["SKYNET_EDR_RUNTIME_INSTANCE_NONCE"] = "b" * 64
 
         class FakeSocket:
             def __init__(self, ack):
@@ -294,7 +300,72 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         with patch.object(self.plugin.socket, "socket", return_value=FakeSocket(collision)):
             self.assertEqual(self.plugin._send_frame(line), "collision")
 
+    def test_v3_event_transport_wraps_without_mutating_canonical_payload(self):
+        os.environ["HERMES_RUNTIME_ROLE"] = "gateway"
+        os.environ["SKYNET_EDR_PLUGIN_GENERATION"] = "a" * 64
+        os.environ["SKYNET_EDR_RUNTIME_INSTANCE_NONCE"] = "b" * 64
+        line = '{"schema_version":"skynet.event.v0","event_id":"evt_v3_wrap"}'
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = b""
+                self.ack = b'{"version":1,"event_id":"evt_v3_wrap","status":"persisted"}\n'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _path):
+                pass
+
+            def sendall(self, payload):
+                self.sent = payload
+
+            def recv(self, _size):
+                ack, self.ack = self.ack, b""
+                return ack
+
+        fake = FakeSocket()
+        with patch.object(self.plugin.socket, "socket", return_value=fake):
+            self.assertEqual(self.plugin._send_frame(line), "persisted")
+        envelope = json.loads(fake.sent[4:])
+        self.assertEqual(envelope["version"], 3)
+        self.assertEqual(envelope["message_type"], "canonical_event")
+        self.assertEqual(envelope["runtime_role"], "gateway")
+        self.assertEqual(envelope["plugin_generation"], "a" * 64)
+        self.assertRegex(envelope["runtime_instance_nonce"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(envelope["runtime_instance_nonce"], "b" * 64)
+        self.assertEqual(envelope["event"], json.loads(line))
+
+    def test_v3_transport_rejects_invalid_generation(self):
+        for value in ["", "A" * 64, "a" * 63, "g" * 64, "/root/FAKE_SECRET"]:
+            with self.subTest(value=value), patch.dict(
+                os.environ,
+                {
+                    "SKYNET_EDR_PLUGIN_GENERATION": value,
+                },
+            ):
+                self.assertEqual(
+                    self.plugin._send_frame('{"event_id":"evt_invalid"}'),
+                    "retry_later",
+                )
+
+    def test_runtime_nonce_is_unique_per_plugin_process_import(self):
+        os.environ["SKYNET_EDR_PLUGIN_GENERATION"] = "a" * 64
+        other_plugin = load_plugin()
+        self.assertNotEqual(
+            self.plugin._transport_identity()[1],
+            other_plugin._transport_identity()[1],
+        )
+
     def test_producer_health_frame_is_bounded_checkpoint_aware_and_path_free(self):
+        os.environ["SKYNET_EDR_PLUGIN_GENERATION"] = "a" * 64
+        os.environ["SKYNET_EDR_RUNTIME_INSTANCE_NONCE"] = "b" * 64
         fallback = self.state_dir / "events-v1.jsonl"
         fallback.write_text('{"event_id":"evt_health"}\n', encoding="utf-8")
         (self.state_dir / "events-v1.offset").write_text("4", encoding="ascii")
@@ -334,9 +405,11 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         body = json.loads(fake.sent[4:])
         self.assertEqual(declared, len(fake.sent) - 4)
         self.assertEqual(body["message_type"], "producer_health")
-        self.assertEqual(body["version"], 2)
+        self.assertEqual(body["version"], 3)
         self.assertIn(body["runtime_role"], {"gateway", "dashboard", "worker", "unknown"})
-        self.assertRegex(body["instance_id"], r"^[a-z0-9][a-z0-9-]{0,63}$")
+        self.assertEqual(body["plugin_generation"], "a" * 64)
+        self.assertRegex(body["runtime_instance_nonce"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(body["runtime_instance_nonce"], "b" * 64)
         self.assertEqual(body["checkpoint_bytes"], 4)
         self.assertEqual(body["backlog_bytes"], fallback.stat().st_size - 4)
         self.assertEqual(body["transport_state"], "degraded")

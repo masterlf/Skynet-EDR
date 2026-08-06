@@ -15,6 +15,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import socket
 import stat
 import threading
@@ -101,6 +102,7 @@ _lock = threading.Lock()
 _logger_lock = threading.Lock()
 _session_trace_id = f"hermes-local-{uuid.uuid4().hex}"
 _runtime_instance_fallback = uuid.uuid4().hex
+_runtime_instance_nonce = secrets.token_hex(32)
 _counter = 0
 _logger: logging.Logger | None = None
 
@@ -508,8 +510,8 @@ def _report_transport_counters() -> None:
 
 
 def _send_frame(line: str) -> str:
-    payload = line.encode("utf-8")
-    if not payload or len(payload) > MAX_INGEST_FRAME_BYTES:
+    canonical_payload = line.encode("utf-8")
+    if not canonical_payload or len(canonical_payload) > MAX_INGEST_FRAME_BYTES:
         return "rejected_permanent"
     try:
         request = json.loads(line)
@@ -517,6 +519,24 @@ def _send_frame(line: str) -> str:
         if not isinstance(event_id, str) or not event_id:
             return "rejected_permanent"
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return "rejected_permanent"
+    identity = _transport_identity()
+    if identity is None:
+        return "retry_later"
+    generation, nonce = identity
+    payload = json.dumps(
+        {
+            "version": 3,
+            "message_type": "canonical_event",
+            "runtime_role": _runtime_role(),
+            "plugin_generation": generation,
+            "runtime_instance_nonce": nonce,
+            "event": request,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(payload) > MAX_INGEST_FRAME_BYTES:
         return "rejected_permanent"
     socket_path = os.environ.get("SKYNET_EDR_INGEST_SOCKET", DEFAULT_INGEST_SOCKET)
     timeout = min(2.0, max(0.01, _safe_positive_int_env("SKYNET_EDR_SOCKET_TIMEOUT_MS", 250) / 1000))
@@ -569,12 +589,17 @@ def _send_health_report() -> bool:
         # Cumulative counters remain visible for audit, but current transport health must
         # recover after a transient failure once the durable backlog is fully drained.
         degraded = backlog > 0
+        identity = _transport_identity()
+        if identity is None:
+            return False
+        generation, nonce = identity
         payload = json.dumps(
             {
-                "version": 2,
+                "version": 3,
                 "message_type": "producer_health",
                 "runtime_role": _runtime_role(),
-                "instance_id": _runtime_instance_id(),
+                "plugin_generation": generation,
+                "runtime_instance_nonce": nonce,
                 "checkpoint_bytes": checkpoint,
                 "backlog_bytes": backlog,
                 "backlog_age_ms": backlog_age_ms,
@@ -716,6 +741,17 @@ def _runtime_role() -> str:
     """Return only a fixed Hermes runtime role; hostile labels become unknown."""
     configured = os.environ.get("HERMES_RUNTIME_ROLE", "unknown")
     return configured if configured in {"gateway", "dashboard", "worker", "unknown"} else "unknown"
+
+
+def _transport_identity() -> tuple[str, str] | None:
+    """Return the controlled generation and this process's random runtime nonce."""
+    generation = os.environ.get("SKYNET_EDR_PLUGIN_GENERATION", "")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", generation) is None
+        or generation == _runtime_instance_nonce
+    ):
+        return None
+    return generation, _runtime_instance_nonce
 
 
 def _runtime_instance_id() -> str:

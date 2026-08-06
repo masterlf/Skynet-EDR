@@ -394,6 +394,7 @@ version = "0.4.1"
 dependencies = [
  "nix",
  "rusqlite",
+ "serde",
  "serde_json",
  "skynet-edr-core",
  "skynet-edr-mcp",

@@ -4,6 +4,8 @@ Phase 12 adds an ingestion and MVP detection boundary for already-recorded Herme
 
 For new Hermes/OpenClaw adapters, prefer the canonical event envelope documented in [Canonical Event Schema](EVENT_SCHEMA.md). The legacy Hermes trace shape below remains supported as an MVP compatibility input, but live v0.4 integrations should emit `skynet.event.v0` events directly where possible.
 
+Live Unix transport uses a separate strict protocol-v3 wrapper for both producer health and canonical events. Its exact source identity is the kernel-authenticated UID plus fixed runtime role, lowercase 64-hex plugin generation, and independent lowercase 64-hex runtime-instance nonce. The nested canonical event remains unchanged. Per-source commit sequence advances only after `Persisted`; `Duplicate` and `Collision` are terminal outcomes but do not prove a fresh hook commit. Legacy v1/v2 health and raw canonical frames remain observable compatibility inputs with `s3_eligible=false`.
+
 ## Security boundary
 
 - Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.
