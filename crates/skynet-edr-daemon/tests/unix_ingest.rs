@@ -105,6 +105,41 @@ fn v3_event_raw(event: &str) -> String {
     )
 }
 
+fn duplicate_json_field(frame: &str, field: &str, first: &str, second: &str) -> String {
+    let original = format!(r#""{field}":{second}"#);
+    let duplicate = format!(r#""{field}":{first},"{field}":{second}"#);
+    let mutated = frame.replacen(&original, &duplicate, 1);
+    assert_ne!(mutated, frame, "duplicate fixture field {field}");
+    mutated
+}
+
+fn assert_duplicate_health_rejected(name: &str, report: &str) {
+    let db_path = temp_path(&format!("duplicate-health-{name}.sqlite"));
+    let config = config(
+        temp_path(&format!("duplicate-health-{name}.sock")),
+        vec![1_234],
+    );
+    let health = IngestionHealth::with_required_reported_roles(vec![ProducerRole::Gateway]);
+    health.record_listener_started();
+    let ack = exchange_with_health(1_234, &config, &db_path, &frame(report.as_bytes()), &health);
+
+    assert!(
+        ack.contains(r#""status":"rejected_permanent""#)
+            && ack.contains(r#""reason":"invalid_health""#),
+        "{name}: {ack}"
+    );
+    assert!(!ack.contains("health_recorded"), "{name}: {ack}");
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["state"], "degraded", "{name}");
+    assert_eq!(status["sources"], serde_json::json!([]), "{name}");
+    assert_eq!(
+        status["required_reported_roles"][0]["state"], "absent",
+        "{name}"
+    );
+    assert_eq!(health.snapshot().events_persisted_total, 0, "{name}");
+    assert!(!db_path.exists(), "{name}");
+}
+
 fn frame(payload: &[u8]) -> Vec<u8> {
     let mut framed = u32::try_from(payload.len())
         .expect("test payload length fits")
@@ -1020,6 +1055,94 @@ fn v3_rejects_duplicate_envelope_identity_fields_without_source_success() {
             );
             assert!(!db_path.exists(), "{kind} {index}");
         }
+    }
+}
+
+#[test]
+fn duplicate_health_fields_are_rejected_before_version_dispatch_without_source_success() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let v1 = r#"{"version":1,"message_type":"producer_health","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}"#;
+    let v2 = r#"{"version":2,"message_type":"producer_health","runtime_role":"gateway","instance_id":"gateway-a1","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}"#;
+    let v3 = format!(
+        r#"{{"version":3,"message_type":"producer_health","runtime_role":"gateway","plugin_generation":"{GENERATION}","runtime_instance_nonce":"{NONCE}","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}}"#
+    );
+    let cases = [
+        (
+            "version-3-then-2",
+            duplicate_json_field(v2, "version", "3", "2"),
+        ),
+        (
+            "version-2-then-3",
+            duplicate_json_field(&v3, "version", "2", "3"),
+        ),
+        (
+            "version-3-then-1",
+            duplicate_json_field(v1, "version", "3", "1"),
+        ),
+        (
+            "message-type",
+            duplicate_json_field(
+                v2,
+                "message_type",
+                r#""producer_health""#,
+                r#""producer_health""#,
+            ),
+        ),
+        (
+            "runtime-role",
+            duplicate_json_field(v2, "runtime_role", r#""gateway""#, r#""gateway""#),
+        ),
+        (
+            "instance-id",
+            duplicate_json_field(v2, "instance_id", r#""gateway-a1""#, r#""gateway-a1""#),
+        ),
+        (
+            "plugin-generation",
+            duplicate_json_field(
+                &v3,
+                "plugin_generation",
+                &format!(r#""{GENERATION}""#),
+                &format!(r#""{GENERATION}""#),
+            ),
+        ),
+        (
+            "runtime-instance-nonce",
+            duplicate_json_field(
+                &v3,
+                "runtime_instance_nonce",
+                &format!(r#""{NONCE}""#),
+                &format!(r#""{NONCE}""#),
+            ),
+        ),
+        (
+            "checkpoint-bytes",
+            duplicate_json_field(v2, "checkpoint_bytes", "1", "0"),
+        ),
+        (
+            "backlog-bytes",
+            duplicate_json_field(v2, "backlog_bytes", "1", "0"),
+        ),
+        (
+            "backlog-age-ms",
+            duplicate_json_field(v2, "backlog_age_ms", "1", "null"),
+        ),
+        (
+            "events-dropped-total",
+            duplicate_json_field(v2, "events_dropped_total", "1", "0"),
+        ),
+        (
+            "events-malformed-total",
+            duplicate_json_field(v2, "events_malformed_total", "1", "0"),
+        ),
+        (
+            "transport-state",
+            duplicate_json_field(v2, "transport_state", r#""degraded""#, r#""available""#),
+        ),
+    ];
+
+    for (name, report) in cases {
+        assert_duplicate_health_rejected(name, &report);
     }
 }
 

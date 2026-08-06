@@ -472,6 +472,54 @@ fn has_no_duplicate_json_keys(input: &str) -> bool {
     serde_json::from_str::<DuplicateRejectingJson>(input).is_ok()
 }
 
+struct ProducerHealthFrameProbe {
+    contains_producer_health_type: bool,
+}
+
+impl<'de> Deserialize<'de> for ProducerHealthFrameProbe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ProducerHealthFrameProbeVisitor)
+    }
+}
+
+struct ProducerHealthFrameProbeVisitor;
+
+impl<'de> Visitor<'de> for ProducerHealthFrameProbeVisitor {
+    type Value = ProducerHealthFrameProbe;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON producer frame object")
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut contains_producer_health_type = false;
+        while let Some(key) = object.next_key::<String>()? {
+            let value = object.next_value::<Box<RawValue>>()?;
+            if key == "message_type"
+                && serde_json::from_str::<String>(value.get()).ok().as_deref()
+                    == Some("producer_health")
+            {
+                contains_producer_health_type = true;
+            }
+        }
+        Ok(ProducerHealthFrameProbe {
+            contains_producer_health_type,
+        })
+    }
+}
+
+fn is_producer_health_frame(input: &str) -> Option<bool> {
+    serde_json::from_str::<ProducerHealthFrameProbe>(input)
+        .ok()
+        .map(|probe| probe.contains_producer_health_type)
+}
+
 fn valid_instance_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
@@ -1240,14 +1288,17 @@ fn handle_producer_health_frame(
     peer: &AuthenticatedPeer,
     health: &IngestionHealth,
 ) -> Option<io::Result<()>> {
-    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    if value
-        .get("message_type")
-        .and_then(serde_json::Value::as_str)
-        != Some("producer_health")
-    {
+    if !is_producer_health_frame(text)? {
         return None;
     }
+    if !has_no_duplicate_json_keys(text) {
+        health.invalid.fetch_add(1, Ordering::Relaxed);
+        return Some(write_ack(
+            stream,
+            &json!({"version":1,"status":"rejected_permanent","reason":"invalid_health"}),
+        ));
+    }
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
     let report = if value.get("version").and_then(serde_json::Value::as_u64) == Some(3) {
         parse_producer_health_v3(text)
     } else {
