@@ -99,6 +99,12 @@ fn v3_event(
     })
 }
 
+fn v3_event_raw(event: &str) -> String {
+    format!(
+        r#"{{"version":3,"message_type":"canonical_event","runtime_role":"gateway","plugin_generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime_instance_nonce":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","event":{event}}}"#
+    )
+}
+
 fn frame(payload: &[u8]) -> Vec<u8> {
     let mut framed = u32::try_from(payload.len())
         .expect("test payload length fits")
@@ -850,6 +856,171 @@ fn v3_valid_identity_with_invalid_nested_event_is_attributed_to_exact_source() {
         "malformed_frame"
     );
     assert!(!db_path.exists());
+}
+
+#[test]
+fn v3_rejects_duplicate_keys_throughout_raw_nested_events_without_persistence() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let cases = [
+        (
+            "event_id",
+            r#""event_id": "evt_01HZCANONICAL","#,
+            r#""event_id": "evt_duplicate", "event_id": "evt_01HZCANONICAL","#,
+        ),
+        (
+            "attributes",
+            r#""attributes": {"#,
+            r#""attributes": {}, "attributes": {"#,
+        ),
+        (
+            "attribute metadata",
+            r#""direct_ip": true"#,
+            r#""direct_ip": false, "direct_ip": true"#,
+        ),
+        (
+            "redaction metadata",
+            r#""contains_sensitive_data": true,"#,
+            r#""contains_sensitive_data": false, "contains_sensitive_data": true,"#,
+        ),
+        (
+            "redaction array metadata",
+            r#""path": "attributes.token","#,
+            r#""path": "attributes.command", "path": "attributes.token","#,
+        ),
+        (
+            "numeric field",
+            r#""observed_at_unix_ms": 1781560000000,"#,
+            r#""observed_at_unix_ms": 1, "observed_at_unix_ms": 1781560000000,"#,
+        ),
+    ];
+
+    for (name, original, duplicate) in cases {
+        let event = CANONICAL_EVENT.replacen(original, duplicate, 1);
+        assert_ne!(event, CANONICAL_EVENT, "{name} fixture mutation");
+        let db_path = temp_path(&format!("v3-duplicate-{name}.sqlite"));
+        let config = config(temp_path(&format!("v3-duplicate-{name}.sock")), vec![1_234]);
+        let health = IngestionHealth::default();
+        let report = v3_health("gateway", GENERATION, NONCE);
+        let health_ack = exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&report).unwrap()),
+            &health,
+        );
+        assert!(
+            health_ack.contains("health_recorded"),
+            "{name}: {health_ack}"
+        );
+
+        let ack = exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(v3_event_raw(&event).as_bytes()),
+            &health,
+        );
+
+        assert!(
+            ack.contains(r#""status":"rejected_permanent""#)
+                && ack.contains(r#""reason":"invalid_event""#),
+            "{name}: {ack}"
+        );
+        let status = health.status_json(Duration::from_secs(30));
+        assert_eq!(status["sources"].as_array().unwrap().len(), 1, "{name}");
+        assert_eq!(status["sources"][0]["runtime_role"], "gateway", "{name}");
+        assert_eq!(
+            status["sources"][0]["plugin_generation"], GENERATION,
+            "{name}"
+        );
+        assert_eq!(
+            status["sources"][0]["runtime_instance_nonce"], NONCE,
+            "{name}"
+        );
+        assert_eq!(status["sources"][0]["events_persisted_total"], 0, "{name}");
+        assert_eq!(status["sources"][0]["commit_sequence"], 0, "{name}");
+        assert_eq!(status["sources"][0]["events_malformed_total"], 1, "{name}");
+        assert!(!db_path.exists(), "{name}");
+    }
+}
+
+#[test]
+fn v3_rejects_duplicate_envelope_identity_fields_without_source_success() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let event = v3_event_raw(CANONICAL_EVENT);
+    let event_cases = [
+        event.replacen(
+            r#""runtime_role":"gateway""#,
+            r#""runtime_role":"gateway","runtime_role":"gateway""#,
+            1,
+        ),
+        event.replacen(
+            &format!(r#""plugin_generation":"{GENERATION}""#),
+            &format!(r#""plugin_generation":"{GENERATION}","plugin_generation":"{GENERATION}""#),
+            1,
+        ),
+        event.replacen(
+            &format!(r#""runtime_instance_nonce":"{NONCE}""#),
+            &format!(r#""runtime_instance_nonce":"{NONCE}","runtime_instance_nonce":"{NONCE}""#),
+            1,
+        ),
+    ];
+    let health = format!(
+        r#"{{"version":3,"message_type":"producer_health","runtime_role":"gateway","plugin_generation":"{GENERATION}","runtime_instance_nonce":"{NONCE}","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}}"#
+    );
+    let health_cases = [
+        health.replacen(
+            r#""runtime_role":"gateway""#,
+            r#""runtime_role":"gateway","runtime_role":"gateway""#,
+            1,
+        ),
+        health.replacen(
+            &format!(r#""plugin_generation":"{GENERATION}""#),
+            &format!(r#""plugin_generation":"{GENERATION}","plugin_generation":"{GENERATION}""#),
+            1,
+        ),
+        health.replacen(
+            &format!(r#""runtime_instance_nonce":"{NONCE}""#),
+            &format!(r#""runtime_instance_nonce":"{NONCE}","runtime_instance_nonce":"{NONCE}""#),
+            1,
+        ),
+    ];
+
+    for (kind, cases, reason) in [
+        ("event", event_cases.as_slice(), "invalid_event"),
+        ("health", health_cases.as_slice(), "invalid_health"),
+    ] {
+        for (index, envelope) in cases.iter().enumerate() {
+            let db_path = temp_path(&format!("v3-duplicate-{kind}-identity-{index}.sqlite"));
+            let config = config(
+                temp_path(&format!("v3-duplicate-{kind}-identity-{index}.sock")),
+                vec![1_234],
+            );
+            let source_health = IngestionHealth::default();
+            let ack = exchange_with_health(
+                1_234,
+                &config,
+                &db_path,
+                &frame(envelope.as_bytes()),
+                &source_health,
+            );
+            assert!(
+                ack.contains(r#""status":"rejected_permanent""#) && ack.contains(reason),
+                "{kind} {index}: {ack}"
+            );
+            assert_eq!(source_health.snapshot().events_persisted_total, 0);
+            assert!(
+                source_health.status_json(Duration::from_secs(30))["sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|source| source["s3_eligible"] == false)
+            );
+            assert!(!db_path.exists(), "{kind} {index}");
+        }
+    }
 }
 
 #[test]

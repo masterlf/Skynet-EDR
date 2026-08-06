@@ -77,7 +77,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 ["hermes-gateway.service"], generation, Path("/home/alice/.hermes"), "default"
             ),
             ("[Service]\nEnvironment=HERMES_RUNTIME_ROLE=gateway\n"
-             f"Environment=SKYNET_EDR_PLUGIN_GENERATION={generation}\n"
+             f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n"
              "Environment=HERMES_HOME=%h/.hermes\n"
              "Environment=HERMES_PROFILE=default\n"
              "Environment=PYTHONDONTWRITEBYTECODE=1\n"),
@@ -169,12 +169,12 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         required = (
             "HERMES_HOME=/home/alice/.hermes HERMES_PROFILE=default "
             "HERMES_RUNTIME_ROLE=gateway PYTHONDONTWRITEBYTECODE=1 "
-            f"SKYNET_EDR_PLUGIN_GENERATION={context['generation']}\n"
+            f"SKYNET_EDR_RUNTIME_INSTANCE={context['generation']}\n"
         ).encode()
         with mock.patch.object(self.module, "_run", return_value=required):
             self.assertTrue(self.module._gateway_context_matches(context))
         for missing in ("PYTHONDONTWRITEBYTECODE=1", "HERMES_RUNTIME_ROLE=gateway",
-                        f"SKYNET_EDR_PLUGIN_GENERATION={context['generation']}"):
+                        f"SKYNET_EDR_RUNTIME_INSTANCE={context['generation']}"):
             with self.subTest(missing=missing), mock.patch.object(
                 self.module, "_run", return_value=required.replace(missing.encode(), b"")
             ):
@@ -239,30 +239,22 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         valid = {
             "authenticated_uid": 1000,
             "runtime_role": "gateway",
-            "plugin_generation": nonce,
-            "s3_eligible": True,
-            "kernel_peer_pid": 111,
-            "commit_sequence": 102,
+            "instance_id": nonce,
+            "last_event_committed_at_unix_ms": 102,
         }
-        self.assertIsNotNone(self.module._fresh_committed_source(
-            {"sources": [valid]}, context, nonce, 101, 111
-        ))
+        self.assertIsNotNone(self.module._fresh_committed_source({"sources": [valid]}, context, nonce, 101))
         mutations = (
-            {"plugin_generation": "b" * 64},
+            {"instance_id": "b" * 64},
             {"authenticated_uid": 1001},
             {"runtime_role": "legacy"},
-            {"kernel_peer_pid": 222},
-            {"commit_sequence": 101},
-            {"commit_sequence": None},
-            {"s3_eligible": False},
+            {"last_event_committed_at_unix_ms": 101},
+            {"last_event_committed_at_unix_ms": None},
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 source = dict(valid)
                 source.update(mutation)
-                self.assertIsNone(self.module._fresh_committed_source(
-                    {"sources": [source]}, context, nonce, 101, 111
-                ))
+                self.assertIsNone(self.module._fresh_committed_source({"sources": [source]}, context, nonce, 101))
 
     def test_hook_nonce_is_loaded_by_gateway_then_generation_is_restored(self):
         generation = "b" * 64
@@ -283,20 +275,16 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
 
         def restart_gateway(_context, instance_id):
             restart_instances.append(instance_id)
-            self.assertIn(f"SKYNET_EDR_PLUGIN_GENERATION={instance_id}", dropin.read_text(encoding="ascii"))
+            self.assertIn(f"SKYNET_EDR_RUNTIME_INSTANCE={instance_id}", dropin.read_text(encoding="ascii"))
             return (10 + len(restart_instances), 100 + len(restart_instances))
 
-        ready = {
+        committed = {
             "authenticated_uid": 1000,
             "runtime_role": "gateway",
-            "plugin_generation": nonce,
-            "s3_eligible": True,
-            "kernel_peer_pid": 11,
-            "backlog_bytes": 0,
-            "commit_sequence": 1,
+            "instance_id": nonce,
+            "last_event_committed_at_unix_ms": 102,
         }
-        committed = dict(ready, commit_sequence=2)
-        statuses = iter([{"ingestion": {"sources": [ready]}}, {"ingestion": {"sources": [committed]}}])
+        statuses = iter([{"ingestion": {"sources": []}}, {"ingestion": {"sources": [committed]}}])
         observation = {"real_hook": {"correlated": True, "committed": True}}
         with (mock.patch.object(self.module, "DROPIN", dropin),
               mock.patch.object(self.module, "_status", side_effect=lambda: next(statuses)),

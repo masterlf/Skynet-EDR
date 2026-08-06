@@ -1,7 +1,8 @@
 //! Bounded authenticated Linux `AF_UNIX` continuous ingestion.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
     fs::{self, File},
     io::{self, Read, Write},
     os::fd::{AsRawFd, OwnedFd},
@@ -23,8 +24,11 @@ use nix::{
     sys::stat::Mode,
     unistd::{chown, Gid, Uid},
 };
-use serde::Deserialize;
-use serde_json::json;
+use serde::{
+    de::{MapAccess, SeqAccess, Visitor},
+    Deserialize,
+};
+use serde_json::{json, value::RawValue};
 use skynet_edr_core::{
     built_in_ai_agent_sequence_rules, parse_canonical_event_json, CanonicalEventEnvelope,
     ContinuousIngestError, ContinuousIngestStatus, LocalStore,
@@ -370,12 +374,10 @@ struct CanonicalEventTransportV3 {
     runtime_role: String,
     plugin_generation: String,
     runtime_instance_nonce: String,
-    event: serde_json::Value,
+    event: Box<RawValue>,
 }
 
-fn parse_v3_event_transport(
-    text: &str,
-) -> Option<(ProducerRole, String, String, serde_json::Value)> {
+fn parse_v3_event_transport(text: &str) -> Option<(ProducerRole, String, String, Box<RawValue>)> {
     let envelope: CanonicalEventTransportV3 = serde_json::from_str(text).ok()?;
     if envelope.version != 3 || envelope.message_type != "canonical_event" {
         return None;
@@ -393,6 +395,81 @@ fn parse_v3_event_transport(
         envelope.runtime_instance_nonce,
         envelope.event,
     ))
+}
+
+struct DuplicateRejectingJson;
+
+impl<'de> Deserialize<'de> for DuplicateRejectingJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateRejectingJsonVisitor)
+    }
+}
+
+struct DuplicateRejectingJsonVisitor;
+
+impl<'de> Visitor<'de> for DuplicateRejectingJsonVisitor {
+    type Value = DuplicateRejectingJson;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<DuplicateRejectingJson>()?.is_some() {}
+        Ok(DuplicateRejectingJson)
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = object.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(serde::de::Error::custom("duplicate JSON object key"));
+            }
+            object.next_value::<DuplicateRejectingJson>()?;
+        }
+        Ok(DuplicateRejectingJson)
+    }
+}
+
+fn has_no_duplicate_json_keys(input: &str) -> bool {
+    serde_json::from_str::<DuplicateRejectingJson>(input).is_ok()
 }
 
 fn valid_instance_id(value: &str) -> bool {
@@ -1374,7 +1451,7 @@ pub fn process_ingest_connection(
                 .map(str::to_owned)
         });
     if message_type.as_deref() == Some("canonical_event") {
-        let Some((role, generation, nonce, event_value)) = parse_v3_event_transport(text) else {
+        let Some((role, generation, nonce, raw_event)) = parse_v3_event_transport(text) else {
             health.invalid.fetch_add(1, Ordering::Relaxed);
             health.record_source_error(&legacy_key, "malformed_frame");
             return write_ack(
@@ -1390,7 +1467,11 @@ pub fn process_ingest_connection(
                 &json!({"version":1,"status":"rejected_permanent","reason":"peer_identity"}),
             );
         };
-        let Ok(event) = parse_canonical_event_json(&event_value.to_string()) else {
+        let event_text = raw_event.get();
+        let Some(event) = has_no_duplicate_json_keys(event_text)
+            .then(|| parse_canonical_event_json(event_text))
+            .and_then(Result::ok)
+        else {
             health.invalid.fetch_add(1, Ordering::Relaxed);
             health.record_source_error_for_peer(
                 &source_key,

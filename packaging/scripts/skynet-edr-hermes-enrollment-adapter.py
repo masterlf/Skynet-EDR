@@ -200,7 +200,7 @@ def render_dropin(units: list[str], generation: str, home: Path, profile: str) -
         raise AdapterError("unsupported_contract")
     return ("[Service]\n"
             "Environment=HERMES_RUNTIME_ROLE=gateway\n"
-            f"Environment=SKYNET_EDR_PLUGIN_GENERATION={generation}\n"
+            f"Environment=SKYNET_EDR_RUNTIME_INSTANCE={generation}\n"
             "Environment=HERMES_HOME=%h/.hermes\n"
             "Environment=HERMES_PROFILE=default\n"
             "Environment=PYTHONDONTWRITEBYTECODE=1\n")
@@ -402,8 +402,7 @@ def _status() -> dict[str, Any]:
     return value
 
 
-def _matching_source(ingestion: dict[str, Any], context: dict[str, Any],
-                     instance_id: str | None = None, expected_pid: int | None = None) -> dict[str, Any] | None:
+def _matching_source(ingestion: dict[str, Any], context: dict[str, Any], instance_id: str | None = None) -> dict[str, Any] | None:
     sources = ingestion.get("sources", [])
     if type(sources) is not list:
         return None
@@ -411,19 +410,17 @@ def _matching_source(ingestion: dict[str, Any], context: dict[str, Any],
         if (type(source) is dict
                 and source.get("authenticated_uid") == context["uid"]
                 and source.get("runtime_role") == "gateway"
-                and source.get("plugin_generation") == (instance_id or _runtime_instance(context))
-                and source.get("s3_eligible") is True
-                and (expected_pid is None or source.get("kernel_peer_pid") == expected_pid)):
+                and source.get("instance_id") == (instance_id or _runtime_instance(context))):
             return source
     return None
 
 
 def _fresh_committed_source(ingestion: dict[str, Any], context: dict[str, Any], instance_id: str,
-                            previous_commit: int, expected_pid: int | None = None) -> dict[str, Any] | None:
-    source = _matching_source(ingestion, context, instance_id, expected_pid)
+                            previous_commit: int) -> dict[str, Any] | None:
+    source = _matching_source(ingestion, context, instance_id)
     if source is None:
         return None
-    committed = source.get("commit_sequence")
+    committed = source.get("last_event_committed_at_unix_ms")
     if (not isinstance(committed, int) or isinstance(committed, bool)
             or committed <= previous_commit):
         return None
@@ -497,7 +494,7 @@ def _gateway_context_matches(context: dict[str, Any], instance_id: str | None = 
         f"HERMES_PROFILE={context['profile']}",
         "HERMES_RUNTIME_ROLE=gateway",
         "PYTHONDONTWRITEBYTECODE=1",
-        f"SKYNET_EDR_PLUGIN_GENERATION={expected_instance}",
+        f"SKYNET_EDR_RUNTIME_INSTANCE={expected_instance}",
     }.issubset(values)
 
 
@@ -527,8 +524,7 @@ def _restart_identity(context: dict[str, Any]) -> tuple[int, int]:
 def _observation(context: dict[str, Any], *, process_fresh: bool, real_hook: bool = False) -> dict[str, Any]:
     status = _status() if process_fresh else {}
     ingestion = status.get("ingestion", {}) if type(status) is dict else {}
-    expected_pid = _restart_identity(context)[0] if process_fresh else None
-    producer = _matching_source(ingestion, context, expected_pid=expected_pid) or {}
+    producer = _matching_source(ingestion, context) or {}
     try:
         group_id = grp.getgrnam(GROUP).gr_gid
         configured = _toml_ingest(CONFIG.read_text(encoding="utf-8"))["allowed_uids"]
@@ -757,6 +753,12 @@ def _hook(context: dict[str, Any]) -> dict[str, Any]:
     ).encode("ascii")
     if DROPIN.read_bytes() != generation_dropin:
         raise AdapterError("config_drift")
+    before_ingestion = _status().get("ingestion", {})
+    before_source = (_matching_source(before_ingestion, context, context["nonce"])
+                     if type(before_ingestion) is dict else None)
+    before_commit = before_source.get("last_event_committed_at_unix_ms", 0) if before_source else 0
+    if not isinstance(before_commit, int) or isinstance(before_commit, bool):
+        raise AdapterError("hook_failure")
     hook_error: Exception | None = None
     committed_source: dict[str, Any] | None = None
     try:
@@ -764,27 +766,14 @@ def _hook(context: dict[str, Any]) -> dict[str, Any]:
             [UNIT], context["nonce"], context["home"], context["profile"]
         ).encode("ascii")
         _atomic_write(DROPIN, nonce_dropin, 0o644)
-        temporary_identity = _restart_gateway(context, context["nonce"])
-        before_commit: int | None = None
-        for _ in range(10):
-            ingestion = _status().get("ingestion", {})
-            source = (_matching_source(ingestion, context, context["nonce"], temporary_identity[0])
-                      if type(ingestion) is dict else None)
-            candidate = source.get("commit_sequence") if source else None
-            if (source is not None and source.get("backlog_bytes") == 0
-                    and isinstance(candidate, int) and not isinstance(candidate, bool)):
-                before_commit = candidate
-                break
-            time.sleep(0.2)
-        if before_commit is None:
-            raise AdapterError("hook_failure")
+        _restart_gateway(context, context["nonce"])
         _run([str(HERMES), "chat", "--max-turns", "1", "--toolsets", "none", "-q",
               "Enrollment health check: reply exactly OK and perform no tool calls."],
              env=_minimal_env(context), target=context)
         for _ in range(10):
             ingestion = _status().get("ingestion", {})
             committed_source = (_fresh_committed_source(
-                ingestion, context, context["nonce"], before_commit, temporary_identity[0]
+                ingestion, context, context["nonce"], before_commit
             ) if type(ingestion) is dict else None)
             if committed_source is not None:
                 break
