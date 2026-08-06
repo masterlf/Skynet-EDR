@@ -31,7 +31,7 @@ use serde::{
 use serde_json::{json, value::RawValue};
 use skynet_edr_core::{
     built_in_ai_agent_sequence_rules, parse_canonical_event_json, CanonicalEventEnvelope,
-    ContinuousIngestError, ContinuousIngestStatus, LocalStore,
+    ContinuousIngestError, ContinuousIngestResult, ContinuousIngestStatus, LocalStore,
 };
 
 const MAX_HEALTH_SOURCES: usize = 64;
@@ -151,6 +151,9 @@ struct SourceHealth {
     transport_state: Option<ProducerTransportState>,
     last_error_category: Option<&'static str>,
     last_error_at_unix_ms: Option<u64>,
+    last_persisted_canary_event_id: Option<String>,
+    last_persisted_canary_receipt_status: Option<&'static str>,
+    last_persisted_canary_incidents_opened: Option<u64>,
 }
 
 impl SourceHealth {
@@ -829,26 +832,38 @@ impl IngestionHealth {
         }
     }
 
-    fn record_result(&self, key: &SourceKey, status: ContinuousIngestStatus) {
+    fn record_result(
+        &self,
+        key: &SourceKey,
+        event: &CanonicalEventEnvelope,
+        result: &ContinuousIngestResult,
+    ) {
         let mut sources = self
             .sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !sources.contains_key(key) && sources.len() >= MAX_HEALTH_SOURCES {
-            if status == ContinuousIngestStatus::Persisted {
+            if result.status == ContinuousIngestStatus::Persisted {
                 self.last_event_committed_at_unix_ms
                     .store(unix_ms_now(), Ordering::Relaxed);
             }
             return;
         }
         let source = sources.entry(key.clone()).or_default();
-        match status {
+        match result.status {
             ContinuousIngestStatus::Persisted => {
                 let now = unix_ms_now();
                 source.last_event_committed_at_unix_ms = Some(now);
                 source.events_persisted_total = source.events_persisted_total.saturating_add(1);
                 self.last_event_committed_at_unix_ms
                     .store(now, Ordering::Relaxed);
+                if valid_attestation_event_id(event.event_id.as_str()) {
+                    source.last_persisted_canary_event_id =
+                        Some(event.event_id.as_str().to_owned());
+                    source.last_persisted_canary_receipt_status = Some("persisted");
+                    source.last_persisted_canary_incidents_opened =
+                        u64::try_from(result.opened_incidents).ok();
+                }
             }
             ContinuousIngestStatus::Duplicate => {
                 source.events_duplicate_total = source.events_duplicate_total.saturating_add(1);
@@ -933,6 +948,12 @@ fn source_id_for_key(key: &SourceKey) -> String {
         }
         _ => format!("uid:{}", key.0),
     }
+}
+
+fn valid_attestation_event_id(value: &str) -> bool {
+    value
+        .strip_prefix("evt_skynet_attest_")
+        .is_some_and(valid_hex_identity)
 }
 
 fn is_degrading_error(category: &str) -> bool {
@@ -1046,6 +1067,9 @@ fn source_status_json(
         "producer_reported_at_unix_ms": source.producer_reported_at_unix_ms,
         "producer_report_age_ms": source.producer_reported_at_unix_ms.map(|at| now.saturating_sub(at)),
         "transport_state": transport_state,
+        "last_persisted_canary_event_id": source.last_persisted_canary_event_id,
+        "last_persisted_canary_receipt_status": source.last_persisted_canary_receipt_status,
+        "last_persisted_canary_incidents_opened": source.last_persisted_canary_incidents_opened,
     });
     (value, has_report, degraded, has_report && !stale)
 }
@@ -1363,7 +1387,7 @@ fn commit_event_and_ack(
         config.candidate_limit,
     ) {
         Ok(result) => {
-            health.record_result(source_key, result.status);
+            health.record_result(source_key, event, &result);
             if result.correlation_truncated {
                 health.record_correlation_truncated();
             }

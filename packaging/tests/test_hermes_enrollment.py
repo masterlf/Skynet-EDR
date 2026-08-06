@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -5,6 +6,7 @@ import json
 import os
 import pwd
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -213,17 +215,15 @@ class HermesEnrollmentTests(unittest.TestCase):
                if require_payload_before_prepare else "") +
             "o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False,"
             "'daemon':{'healthy':False,'listener':True,'transport':'available','backlog':0,'degraded':False},"
-            "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':False},"
-            "'real_hook':{'correlated':False,'committed':False,'incident_opened':False}}\n"
+            "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':False,'generation':os.environ['SKYNET_EDR_GENERATION'],'runtime_nonce':'c'*64},"
+            "'real_hook':{'correlated':False,'committed':False,'incident_opened':False},"
+            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1}\n"
             "if sys.argv[1]=='enable':\n"
             f" o['plugin_enabled']={enabled!r}\n"
             " o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']\n"
             "elif sys.argv[1]=='disable': o['plugin_enabled']=False\n"
-            "elif sys.argv[1]=='restart':\n"
-            f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}\n"
-            "elif sys.argv[1]=='hook':\n"
-            f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}; o['real_hook']={{'correlated':True,'committed':True,'incident_opened':False}}\n"
-            "o['adapter_euid']=os.geteuid()\n"
+            "elif sys.argv[1]=='attest':\n"
+            f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}; o['real_hook']={{'correlated':True,'committed':True,'incident_opened':False,'event_id':os.environ['SKYNET_EDR_CANARY_EVENT_ID'],'receipt_status':'persisted'}}\n"
             "print(json.dumps(o))\n",
             encoding="utf-8",
         )
@@ -317,6 +317,89 @@ class HermesEnrollmentTests(unittest.TestCase):
         after = {p.relative_to(target): (p.stat().st_mtime_ns, p.read_bytes()) for p in target.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
 
+    def test_attestation_observation_schema_is_exact(self):
+        result, _ = self.run_cli("apply", "--adapter", self.make_adapter())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        valid = json.loads(self.obs_path.read_text(encoding="utf-8"))
+        extra = dict(valid, unexpected=True)
+        missing = dict(valid)
+        missing.pop("commit_sequence")
+        nested = json.loads(json.dumps(valid))
+        nested["producer"]["unexpected"] = True
+        for observation in (extra, missing, nested):
+            with self.subTest(keys=sorted(observation)):
+                self.obs_path.write_text(json.dumps(observation), encoding="utf-8")
+                result, output = self.run_cli("verify")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((output["state"], output["category"]), ("DRIFTED", "enablement"))
+
+    def test_hostile_attest_response_rejects_bool_int_aliases_at_every_field(self):
+        module = load_module()
+        generation = "b" * 64
+        event_id = "evt_skynet_attest_" + "d" * 64
+        env = {
+            "SKYNET_EDR_TARGET_UID": "1", "SKYNET_EDR_GENERATION": generation,
+            "SKYNET_EDR_ATTESTATION_TOKEN": "e" * 64,
+        }
+        valid = {
+            "plugin_enabled": True, "loaded_generation": generation, "process_fresh": True,
+            "daemon": {"healthy": True, "listener": True, "transport": "available",
+                       "backlog": 0, "degraded": False},
+            "producer": {"uid": 1, "role": "gateway", "fresh": True,
+                         "generation": generation, "runtime_nonce": "c" * 64},
+            "real_hook": {"correlated": True, "committed": True, "incident_opened": False,
+                          "event_id": event_id, "receipt_status": "persisted"},
+            "restart_blast_radius": "complete_user_manager",
+            "identities": {"user@1.service": [11, 101, 1001],
+                           "hermes-gateway.service": [21, 201, 2001],
+                           "skynet-edr.service": [31, 301, 3001]},
+            "commit_sequence": 1,
+        }
+        module.validate_attest_response(valid, env, event_id)
+
+        mutations = [
+            (("daemon", "backlog"), False), (("producer", "uid"), True),
+            (("commit_sequence",), True),
+            *((("identities", unit, index), True)
+              for unit in valid["identities"] for index in range(3)),
+            (("plugin_enabled",), 1), (("process_fresh",), 1),
+            (("daemon", "healthy"), 1), (("daemon", "listener"), 1),
+            (("daemon", "degraded"), 0), (("producer", "fresh"), 1),
+            (("real_hook", "correlated"), 1), (("real_hook", "committed"), 1),
+            (("real_hook", "incident_opened"), 0),
+        ]
+        for path, value in mutations:
+            candidate = json.loads(json.dumps(valid))
+            target = candidate
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            with self.subTest(path=path), self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+                module.validate_attest_response(candidate, env, event_id)
+
+        for forbidden_nonce in (env["SKYNET_EDR_GENERATION"], env["SKYNET_EDR_ATTESTATION_TOKEN"]):
+            candidate = json.loads(json.dumps(valid))
+            candidate["producer"]["runtime_nonce"] = forbidden_nonce
+            with self.subTest(forbidden_nonce=forbidden_nonce), \
+                    self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+                module.validate_attest_response(candidate, env, event_id)
+
+    def test_attestation_token_cannot_equal_parent_transaction_nonce(self):
+        module = load_module()
+        token = "a" * 64
+        env = {"SKYNET_EDR_TARGET_UID": "1000", "SKYNET_EDR_GENERATION": "b" * 64}
+        with mock.patch.object(module.time, "monotonic_ns", return_value=0), \
+                mock.patch.object(module.secrets, "token_hex", return_value=token), \
+                mock.patch.object(module.pwd, "getpwuid") as nss, \
+                mock.patch.object(module.subprocess, "run") as run:
+            with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+                module.run_adapter(
+                    Path("/adapter"), "attest", env, self.obs_path, deadline_ns=100,
+                    attestation_token=token, expected_event_id=module.canary_event_id(token),
+                )
+        nss.assert_not_called()
+        run.assert_not_called()
+
     def test_stale_unchanged_observation_cannot_enroll(self):
         generation = hashlib.sha256(
             json.dumps(self.manifest, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -370,6 +453,130 @@ class HermesEnrollmentTests(unittest.TestCase):
         result, output = self.run_cli("apply", "--adapter", self.make_adapter())
         self.assertEqual(result.returncode, 0, (result.stderr, output))
 
+    def test_attest_child_inherits_parent_deadline_and_late_result_is_never_persisted(self):
+        module = load_module()
+        adapter = Path(self.make_adapter())
+        env = module.adapter_env(
+            self.home, self.request["profile"], self.obs_path,
+            self.request["manifest_sha256"], os.getuid(),
+        )
+        token = "a" * 64
+        event_id = module.canary_event_id(token)
+        completed = SimpleNamespace(returncode=0, stdout=b'{}')
+        before = self.obs_path.read_bytes()
+        with (mock.patch.object(module.time, "monotonic_ns", side_effect=[0, 0, 0, 0, 100]),
+              mock.patch.object(module.subprocess, "run", return_value=completed) as run):
+            with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+                module.run_adapter(
+                    adapter, "attest", env, self.obs_path, deadline_ns=100,
+                    attestation_token=token, expected_event_id=event_id,
+                )
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(child_env["SKYNET_EDR_DEADLINE_NS"], "100")
+        self.assertEqual(child_env["SKYNET_EDR_ATTESTATION_TOKEN"], token)
+        self.assertEqual(child_env["SKYNET_EDR_CANARY_EVENT_ID"], event_id)
+        self.assertEqual(self.obs_path.read_bytes(), before)
+
+    def test_parent_deadline_guard_restores_signal_state_on_success_and_error(self):
+        module = load_module()
+        for failure in (False, True):
+            previous_handler = mock.Mock()
+            current_handler = {"value": previous_handler}
+            events = []
+            timer_calls = 0
+
+            def install(_signum, handler):
+                old = current_handler["value"]
+                current_handler["value"] = handler
+                events.append(("signal", handler))
+                return old
+
+            def set_timer(_which, delay, interval=0.0):
+                nonlocal timer_calls
+                timer_calls += 1
+                events.append(("timer", delay, interval))
+                if timer_calls == 1:
+                    return (0.5, 0.25)
+                if delay > 0:
+                    current_handler["value"](signal.SIGALRM, None)
+                return (0.0, 0.0)
+
+            monotonic = [0, 600_000_000] if failure else [0, 600_000_000, 600_000_000]
+            with self.subTest(failure=failure), \
+                    mock.patch.object(module.time, "monotonic_ns", side_effect=monotonic), \
+                    mock.patch.object(module.signal, "signal", side_effect=install), \
+                    mock.patch.object(module.signal, "setitimer", side_effect=set_timer):
+                with self.assertRaises(RuntimeError) if failure else contextlib.nullcontext():
+                    with module._deadline_guard(10_000_000_000):
+                        if failure:
+                            raise RuntimeError("boom")
+            self.assertEqual(events[-2], ("signal", previous_handler))
+            self.assertEqual(events[-1][0], "timer")
+            self.assertGreater(events[-1][1], 0.0)
+            previous_handler.assert_called_once_with(signal.SIGALRM, None)
+
+    def test_expired_parent_deadline_prevents_nss_and_adapter_start(self):
+        module = load_module()
+        token = "a" * 64
+        env = {"SKYNET_EDR_TARGET_UID": "1000", "SKYNET_EDR_GENERATION": "b" * 64}
+        with mock.patch.object(module.time, "monotonic_ns", return_value=100), \
+                mock.patch.object(module.pwd, "getpwuid") as nss, \
+                mock.patch.object(module.subprocess, "run") as run:
+            with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+                module.run_adapter(
+                    Path("/adapter"), "attest", env, self.obs_path, deadline_ns=100,
+                    attestation_token=token, expected_event_id=module.canary_event_id(token),
+                )
+        nss.assert_not_called()
+        run.assert_not_called()
+
+    def test_parent_kills_hanging_attest_child_within_shared_deadline(self):
+        module = load_module()
+        adapter = self.base / "hanging-adapter.py"
+        adapter.write_text("#!/usr/bin/python3\nimport time\ntime.sleep(5)\n", encoding="ascii")
+        adapter.chmod(0o755)
+        env = {"SKYNET_EDR_TARGET_UID": str(os.getuid()), "SKYNET_EDR_GENERATION": "b" * 64}
+        token = "a" * 64
+        deadline_ns = module.time.monotonic_ns() + 50_000_000
+        started = module.time.monotonic()
+        with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+            module.run_adapter(
+                adapter, "attest", env, self.obs_path, deadline_ns=deadline_ns,
+                attestation_token=token, expected_event_id=module.canary_event_id(token),
+            )
+        self.assertLess(module.time.monotonic() - started, 1.0)
+
+    def test_deadline_expiry_during_metadata_fsync_restores_previous_bytes(self):
+        module = load_module()
+        state = self.base / "metadata-state"
+        state.mkdir()
+        metadata = state / "enrollment.json"
+        metadata.write_bytes(b"previous-evidence")
+        with mock.patch.object(module.time, "monotonic_ns", side_effect=[0, 0, 0, 100]):
+            with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+                module.write_metadata(state, "b" * 64, 1000, "default", "c" * 64, deadline_ns=100)
+        self.assertEqual(metadata.read_bytes(), b"previous-evidence")
+
+    def test_failed_deadline_bounded_observation_fsync_restores_previous_evidence(self):
+        module = load_module()
+        adapter = Path(self.make_adapter())
+        env = module.adapter_env(
+            self.home, self.request["profile"], self.obs_path,
+            self.request["manifest_sha256"], os.getuid(),
+        )
+        token = "a" * 64
+        before = self.obs_path.read_bytes()
+        with mock.patch.object(
+            module, "fsync_dir", side_effect=[module.EnrollmentError("adapter_failure"), None]
+        ):
+            with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+                module.run_adapter(
+                    adapter, "attest", env, self.obs_path,
+                    deadline_ns=module.time.monotonic_ns() + module.ATTEST_BUDGET_NS,
+                    attestation_token=token, expected_event_id=module.canary_event_id(token),
+                )
+        self.assertEqual(self.obs_path.read_bytes(), before)
+
     def test_runtime_state_and_nonce_are_isolated_by_uid_and_profile(self):
         module = load_module()
         first = module.scoped_runtime_state(self.state, 1001, "work")
@@ -412,12 +619,12 @@ class HermesEnrollmentTests(unittest.TestCase):
         adapter.write_text(
             "import json,os,sys\n"
             f"open({str(action_log)!r},'a').write(json.dumps([sys.argv[1],os.geteuid()])+'\\n')\n"
-            "healthy=sys.argv[1] in {'restart','hook'}\n"
+            "healthy=sys.argv[1]=='attest'\n"
             "print(json.dumps({'plugin_enabled':sys.argv[1]!='disable','loaded_generation':os.environ['SKYNET_EDR_GENERATION'],"
             "'process_fresh':healthy,'daemon':{'healthy':healthy,'listener':True,'transport':'available','backlog':0,'degraded':False},"
-            "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':healthy},"
-            "'real_hook':{'correlated':sys.argv[1]=='hook','committed':sys.argv[1]=='hook','incident_opened':False},"
-            "'adapter_euid':os.geteuid()}))\n",
+            "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':healthy,'generation':os.environ['SKYNET_EDR_GENERATION'],'runtime_nonce':'c'*64},"
+            "'real_hook':{'correlated':sys.argv[1]=='attest','committed':sys.argv[1]=='attest','incident_opened':False,'event_id':os.environ.get('SKYNET_EDR_CANARY_EVENT_ID'),'receipt_status':'persisted' if sys.argv[1]=='attest' else None},"
+            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1}))\n",
             encoding="utf-8",
         )
         adapter.chmod(0o755)
@@ -426,12 +633,9 @@ class HermesEnrollmentTests(unittest.TestCase):
         installed = target_home / "plugins" / "skynet-edr"
         self.assertTrue(all(path.stat().st_uid == target.pw_uid for path in installed.rglob("*") if path.is_file()))
         self.assertEqual((target_home / "desktop-plugins" / "skynet-edr" / "plugin.js").stat().st_uid, target.pw_uid)
-        observation = json.loads(self.obs_path.read_text(encoding="utf-8"))
-        self.assertEqual(observation["adapter_euid"], 0)
         actions = {action: euid for action, euid in map(json.loads, action_log.read_text(encoding="utf-8").splitlines())}
         self.assertEqual(actions["enable"], target.pw_uid)
-        self.assertEqual(actions["restart"], 0)
-        self.assertEqual(actions["hook"], 0)
+        self.assertEqual(actions["attest"], 0)
 
     def test_enable_zero_without_readback_fails_closed_and_rolls_back(self):
         result, output = self.run_cli("apply", "--adapter", self.make_adapter(enabled=False))
@@ -440,7 +644,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertFalse((self.home / "plugins" / "skynet-edr").exists())
 
     def test_each_adapter_mutation_failure_restores_bytes_and_metadata(self):
-        for action in ("prepare", "enable", "restart", "hook"):
+        for action in ("prepare", "enable", "attest"):
             with self.subTest(action=action):
                 self.setUp()
                 result, output = self.run_cli("apply", "--adapter", self.make_adapter(fail_action=action))
@@ -591,7 +795,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         self._write_inputs()
         result, output = self.run_cli("verify")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(output["state"], "DEGRADED")
+        self.assertEqual((output["state"], output["category"]), ("DRIFTED", "enablement"))
 
     def test_unsupported_platform_and_hermes_version_fail_closed(self):
         for key, value in (("host", {"id": "debian", "version": "12", "arch": "x86_64", "init": "systemd"}),
@@ -633,9 +837,9 @@ class HermesEnrollmentTests(unittest.TestCase):
         cases = [
             (lambda: self.request["socket"].update(dac=False), "authorization"),
             (lambda: self.request["socket"].update(uid_authorized=False), "authorization"),
-            (lambda: self.obs["producer"].update(role="dashboard"), "producer_health"),
-            (lambda: self.obs["daemon"].update(backlog=1), "producer_health"),
-            (lambda: self.obs["daemon"].update(degraded=True), "producer_health"),
+            (lambda: self.obs["producer"].update(role="dashboard"), "enablement"),
+            (lambda: self.obs["daemon"].update(backlog=1), "enablement"),
+            (lambda: self.obs["daemon"].update(degraded=True), "enablement"),
         ]
         for mutate, category in cases:
             self.setUp()

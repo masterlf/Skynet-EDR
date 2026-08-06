@@ -1,7 +1,9 @@
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
+import signal
 import socket
 import tempfile
 import unittest
@@ -182,15 +184,22 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
 
     def _v3_source(self, **changes):
         source = {
+            "source_id": "uid:1000:gateway:" + "b" * 64 + ":" + "a" * 64,
             "authenticated_uid": 1000, "runtime_role": "gateway", "protocol_version": 3,
             "s3_eligible": True, "plugin_generation": "b" * 64,
             "runtime_instance_nonce": "a" * 64, "kernel_peer_pid": 22,
             "kernel_peer_start_ticks": 202, "producer_report_age_ms": 0,
             "transport_state": "available", "backlog_bytes": 0,
+            "instance_id": None, "producer_checkpoint_bytes": 0, "backlog_age_ms": None,
             "commit_sequence": 4, "events_persisted_total": 4,
             "events_duplicate_total": 0, "events_collision_total": 0,
             "events_malformed_total": 0, "events_dropped_total": 0,
-            "last_error_category": None,
+            "last_event_received_at_unix_ms": 100, "last_event_committed_at_unix_ms": 100,
+            "last_error_category": None, "last_error_at_unix_ms": None,
+            "last_error_age_ms": None, "producer_reported_at_unix_ms": 100,
+            "last_persisted_canary_event_id": None,
+            "last_persisted_canary_receipt_status": None,
+            "last_persisted_canary_incidents_opened": None,
         }
         source.update(changes)
         return source
@@ -208,44 +217,120 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation), self.assertRaises(self.module.AdapterError):
                 self.module._exact_source({"sources": [dict(valid, **mutation)]}, context, gateway)
-        for sources in ([], [valid, dict(valid)],
-                        [valid, self._v3_source(plugin_generation="c" * 64, kernel_peer_pid=99)]):
+        for sources in ([], [valid, dict(valid)]):
             with self.subTest(cardinality=len(sources)), self.assertRaises(self.module.AdapterError):
                 self.module._exact_source({"sources": sources}, context, gateway)
+        retained = [
+            self._v3_source(plugin_generation="c" * 64),
+            self._v3_source(kernel_peer_pid=99),
+            {"authenticated_uid": 1000, "runtime_role": "legacy", "protocol_version": 1},
+        ]
+        self.assertEqual(self.module._exact_source({"sources": retained + [valid]}, context, gateway), valid)
+
+    def test_exact_v3_source_rejects_unknown_missing_and_mistyped_schema(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        valid = self._v3_source()
+        invalid = [dict(valid, unknown=True), dict(valid, backlog_age_ms=0),
+                   dict(valid, last_error_category="storage", last_error_at_unix_ms=None,
+                        last_error_age_ms=None)]
+        for key in ("producer_checkpoint_bytes", "backlog_age_ms", "events_persisted_total"):
+            row = dict(valid)
+            row.pop(key)
+            invalid.append(row)
+        for key in ("authenticated_uid", "protocol_version", "kernel_peer_pid",
+                    "producer_checkpoint_bytes", "backlog_bytes", "commit_sequence",
+                    "events_persisted_total", "events_duplicate_total", "events_collision_total",
+                    "events_malformed_total", "events_dropped_total", "producer_report_age_ms"):
+            invalid.append(dict(valid, **{key: False}))
+        for row in invalid:
+            with self.subTest(row=row), self.assertRaises(self.module.AdapterError):
+                self.module._exact_source({"sources": [row]}, context, gateway)
+
+    def test_status_root_and_ingestion_schema_are_exact_and_typed(self):
+        ingestion = {
+            "state": "healthy", "role_identity_assurance": "authorized_uid_self_reported",
+            "listener_live": True, "transport_heartbeat_state": "fresh",
+            "hook_event_state": "fresh", "hook_event_freshness_affects_state": False,
+            "last_event_received_at_unix_ms": 1, "last_event_received_age_ms": 0,
+            "last_event_committed_at_unix_ms": 1, "last_event_committed_age_ms": 0,
+            "required_reported_roles": [{"runtime_role": "gateway", "state": "fresh"}],
+            "connections_accepted_total": 1, "connections_unauthorized_total": 0,
+            "connections_capacity_rejected_total": 0, "listener_errors_total": 0,
+            "peer_credential_errors_total": 0, "frames_received_total": 1,
+            "frames_oversize_total": 0, "frames_invalid_total": 0,
+            "frames_timeout_total": 0, "events_persisted_total": 1,
+            "events_duplicate_total": 0, "events_collision_total": 0,
+            "incident_integrity_collision_total": 0, "correlation_truncated_total": 0,
+            "storage_errors_total": 0, "sources": [self._v3_source()],
+        }
+        status = {
+            "product": "Skynet-EDR", "binary": "skynet-edr", "run_mode": "passive",
+            "server": "skynet-edr-mcp", "read_only": True, "tool_count": 6,
+            "incident_count": 0, "event_count": 1, "version": "0.4.1",
+            "ingestion": ingestion,
+        }
+        self.assertIs(self.module._validate_status_schema(status), ingestion)
+        invalid = [
+            dict(status, unknown=True),
+            dict(status, read_only=1),
+            dict(status, ingestion=dict(ingestion, unknown=True)),
+            dict(status, ingestion=dict(ingestion, listener_live=1)),
+            dict(status, ingestion=dict(ingestion, frames_received_total=True)),
+            dict(status, ingestion=dict(ingestion, required_reported_roles=[{"runtime_role": "gateway"}])),
+        ]
+        for candidate in invalid:
+            with self.subTest(candidate=candidate), self.assertRaises(self.module.AdapterError):
+                self.module._validate_status_schema(candidate)
 
     def test_generation_and_runtime_nonce_are_independent(self):
-        context = {"uid": 1000, "generation": "b" * 64}
+        context = {"uid": 1000, "generation": "b" * 64, "attestation_token": "c" * 64}
         gateway = self.module.ProcessIdentity(22, 202, 2002)
         with self.assertRaises(self.module.AdapterError):
             self.module._exact_source(
                 {"sources": [self._v3_source(runtime_instance_nonce="b" * 64)]}, context, gateway
             )
+        token_nonce = self._v3_source(
+            source_id="uid:1000:gateway:" + "b" * 64 + ":" + "c" * 64,
+            runtime_instance_nonce="c" * 64,
+        )
+        with self.assertRaisesRegex(self.module.AdapterError, "producer_health"):
+            self.module._exact_source({"sources": [token_nonce]}, context, gateway)
 
     def test_restart_epoch_requires_a_new_runtime_nonce_when_prior_v3_identity_is_known(self):
         context = {"uid": 1000, "generation": "b" * 64}
         gateway = self.module.ProcessIdentity(21, 201, 2001)
         prior = self._v3_source(
-            runtime_instance_nonce="c" * 64, kernel_peer_pid=21, kernel_peer_start_ticks=201
+            source_id="uid:1000:gateway:" + "b" * 64 + ":" + "c" * 64,
+            runtime_instance_nonce="c" * 64, kernel_peer_pid=21, kernel_peer_start_ticks=201,
         )
         self.assertEqual(
             self.module._previous_runtime_nonce({"ingestion": {"sources": [prior]}}, context, gateway),
             "c" * 64,
         )
-        self.assertEqual(
-            self.module._previous_runtime_nonce(
-                {"ingestion": {"sources": [dict(prior, plugin_generation="d" * 64)]}},
-                context,
-                gateway,
-            ),
-            "c" * 64,
-        )
+        unrelated = [
+            dict(prior, plugin_generation="d" * 64),
+            dict(prior, kernel_peer_pid=99),
+            dict(prior, kernel_peer_start_ticks=999),
+            dict(prior, protocol_version=2),
+            dict(prior, protocol_version=True),
+            dict(prior, authenticated_uid=True),
+            {"authenticated_uid": 1000, "runtime_role": "gateway", "protocol_version": 1},
+        ]
+        self.assertEqual(self.module._previous_runtime_nonce(
+            {"ingestion": {"sources": unrelated + [prior]}}, context, gateway
+        ), "c" * 64)
+        self.assertIsNone(self.module._previous_runtime_nonce(
+            {"ingestion": {"sources": unrelated}}, context, gateway
+        ))
         with self.assertRaisesRegex(self.module.AdapterError, "source_cardinality"):
             self.module._previous_runtime_nonce(
-                {"ingestion": {"sources": [prior, dict(prior)]}}, context, gateway
+                {"ingestion": {"sources": unrelated + [prior, dict(prior)]}}, context, gateway
             )
 
     def test_recorded_attestation_expires_with_original_deadline_and_boot(self):
-        context = {"uid": 1000, "profile": "default", "generation": "b" * 64}
+        context = {"uid": 1000, "profile": "default", "generation": "b" * 64,
+                   "deadline_ns": 101}
         scope = self.base / "scope"
         scope.mkdir()
         (scope / "snapshot.json").write_text(
@@ -265,8 +350,17 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
 
     def test_persisted_advancement_requires_same_source_without_retry_collision_or_error(self):
         baseline = self._v3_source()
-        advanced = self._v3_source(commit_sequence=5, events_persisted_total=5)
-        self.assertTrue(self.module._persisted_advanced(baseline, advanced))
+        token = "d" * 64
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        advanced = self._v3_source(
+            commit_sequence=5, events_persisted_total=5,
+            last_persisted_canary_event_id=event_id,
+            last_persisted_canary_receipt_status="persisted",
+            last_persisted_canary_incidents_opened=0,
+        )
+        self.assertTrue(self.module._persisted_advanced(baseline, advanced, event_id))
         for mutation in (
             {}, {"commit_sequence": 5, "events_persisted_total": 4},
             {"commit_sequence": 6, "events_persisted_total": 6},
@@ -278,7 +372,160 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             {"commit_sequence": 5, "events_persisted_total": 5, "runtime_instance_nonce": "c" * 64},
         ):
             with self.subTest(mutation=mutation):
-                self.assertFalse(self.module._persisted_advanced(baseline, dict(baseline, **mutation)))
+                self.assertFalse(self.module._persisted_advanced(baseline, dict(baseline, **mutation), event_id))
+        unrelated = dict(advanced, last_persisted_canary_event_id="evt_skynet_attest_" + "0" * 64)
+        self.assertFalse(self.module._persisted_advanced(baseline, unrelated, event_id))
+        self.assertFalse(self.module._persisted_advanced(
+            baseline, dict(advanced, last_persisted_canary_incidents_opened=1), event_id
+        ))
+
+    def test_canary_command_requires_exact_event_bound_ack(self):
+        token = "d" * 64
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        context = {"uid": os.getuid(), "account_gid": os.getgid(),
+                   "home": self.base / ".hermes", "profile": "default"}
+        expected = f"SKYNET_EDR_ATTEST_ACK_V1 {event_id}\n".encode("ascii")
+        fake_hermes = self.base / "fake-hermes"
+        fake_hermes.write_text(
+            "#!/usr/bin/python3\n"
+            "import sys\n"
+            "assert sys.argv[1:7] == ['chat','--max-turns','1','--toolsets','none','-q']\n"
+            "lines = sys.argv[7].splitlines()\n"
+            "parts = lines[0].split()\n"
+            "assert len(parts) == 3 and parts[0] == 'SKYNET_EDR_ATTEST_V1'\n"
+            "event_id = parts[1]\n"
+            "assert lines == [lines[0], f'Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text.']\n"
+            "print(f'SKYNET_EDR_ATTEST_ACK_V1 {event_id}')\n",
+            encoding="ascii",
+        )
+        fake_hermes.chmod(0o755)
+        with mock.patch.object(self.module, "HERMES", fake_hermes):
+            self.module._run_canary(
+                context, event_id, token, self.module.time.monotonic_ns() + 1_000_000_000
+            )
+
+        for output in (b"OK\n", expected.replace(event_id.encode(), b"evt_skynet_attest_" + b"0" * 64),
+                       expected.rstrip(b"\n"), expected + b"extra\n"):
+            with self.subTest(output=output), mock.patch.object(self.module, "_run", return_value=output):
+                with self.assertRaisesRegex(self.module.AdapterError, "hook_failure"):
+                    self.module._run_canary(context, event_id, token, 100)
+
+    def test_attest_context_rejects_expired_inherited_deadline_before_nss(self):
+        env = {
+            "SKYNET_EDR_TARGET_UID": "1000", "SKYNET_EDR_NONCE": "a" * 64,
+            "SKYNET_EDR_GENERATION": "b" * 64, "HERMES_HOME": "/home/alice/.hermes",
+            "HERMES_PROFILE": "default", "SKYNET_EDR_HOME_DEVICE": "1",
+            "SKYNET_EDR_HOME_INODE": "2", "SKYNET_EDR_DEADLINE_NS": "100",
+            "SKYNET_EDR_ATTESTATION_TOKEN": "c" * 64,
+            "SKYNET_EDR_CANARY_EVENT_ID": "evt_skynet_attest_" + "d" * 64,
+        }
+        with (mock.patch.object(self.module.time, "monotonic_ns", return_value=100),
+              mock.patch.object(self.module.pwd, "getpwuid") as nss):
+            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+                self.module.validate_context("attest", env, effective_uid=0)
+        nss.assert_not_called()
+
+    def test_attest_main_uses_fixed_deadline_field_before_context_and_restores_watchdog(self):
+        deadline = 10_000_000_000
+        environment = {
+            "SKYNET_EDR_DEADLINE_NS": str(deadline),
+            "SKYNET_EDR_ATTEST_DEADLINE_NS": "not-authoritative",
+        }
+        with mock.patch.object(self.module.sys, "argv", ["adapter", "attest"]), \
+                mock.patch.object(self.module.os, "environ", environment), \
+                mock.patch.object(self.module, "_deadline_watchdog") as watchdog, \
+                mock.patch.object(self.module, "validate_context", side_effect=self.module.AdapterError("deadline")) as validate, \
+                mock.patch.object(self.module, "emit", return_value=1):
+            self.assertEqual(self.module.main(), 1)
+        watchdog.assert_called_once_with(deadline)
+        validate.assert_called_once_with("attest", environment)
+
+    def test_adapter_deadline_watchdog_restores_signal_state_on_success_and_error(self):
+        for failure in (False, True):
+            previous_handler = mock.Mock()
+            current_handler = {"value": previous_handler}
+            events = []
+            timer_calls = 0
+
+            def install(_signum, handler):
+                old = current_handler["value"]
+                current_handler["value"] = handler
+                events.append(("signal", handler))
+                return old
+
+            def set_timer(_which, delay, interval=0.0):
+                nonlocal timer_calls
+                timer_calls += 1
+                events.append(("timer", delay, interval))
+                if timer_calls == 1:
+                    return (0.5, 0.25)
+                if delay > 0:
+                    current_handler["value"](signal.SIGALRM, None)
+                return (0.0, 0.0)
+
+            monotonic = [0, 600_000_000] if failure else [0, 600_000_000, 600_000_000]
+            with self.subTest(failure=failure), \
+                    mock.patch.object(self.module.time, "monotonic_ns", side_effect=monotonic), \
+                    mock.patch.object(self.module.signal, "signal", side_effect=install), \
+                    mock.patch.object(self.module.signal, "setitimer", side_effect=set_timer):
+                with self.assertRaises(RuntimeError) if failure else contextlib.nullcontext():
+                    with self.module._deadline_watchdog(10_000_000_000):
+                        if failure:
+                            raise RuntimeError("boom")
+            self.assertEqual(events[-2], ("signal", previous_handler))
+            self.assertEqual(events[-1][0], "timer")
+            self.assertGreater(events[-1][1], 0.0)
+            previous_handler.assert_called_once_with(signal.SIGALRM, None)
+
+    def test_record_attestation_does_not_write_when_snapshot_read_reaches_deadline(self):
+        context = {"uid": 1000, "profile": "default", "generation": "b" * 64}
+        snapshot_path = self.base / "scope" / "snapshot.json"
+        snapshot_path.parent.mkdir()
+        snapshot_path.write_text(json.dumps({"generation": "b" * 64}), encoding="ascii")
+        with mock.patch.object(self.module, "_scope", return_value=snapshot_path.parent), \
+                mock.patch.object(self.module.time, "monotonic_ns", side_effect=[0, 100]), \
+                mock.patch.object(self.module, "_atomic_write") as write:
+            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+                self.module._record_attestation(context, {}, 100, "00000000-0000-0000-0000-000000000000")
+        write.assert_not_called()
+
+    def test_attest_watchdog_interrupts_slow_nss_before_home_or_package_reads(self):
+        token = "c" * 64
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        deadline_ns = self.module.time.monotonic_ns() + 50_000_000
+        environment = {
+            "SKYNET_EDR_TARGET_UID": "1000", "SKYNET_EDR_NONCE": "a" * 64,
+            "SKYNET_EDR_GENERATION": "b" * 64, "HERMES_HOME": "/home/alice/.hermes",
+            "HERMES_PROFILE": "default", "SKYNET_EDR_HOME_DEVICE": "1",
+            "SKYNET_EDR_HOME_INODE": "2", "SKYNET_EDR_DEADLINE_NS": str(deadline_ns),
+            "SKYNET_EDR_ATTESTATION_TOKEN": token, "SKYNET_EDR_CANARY_EVENT_ID": event_id,
+        }
+
+        def slow_nss(_uid):
+            self.module.time.sleep(5)
+
+        started = self.module.time.monotonic()
+        with mock.patch.object(self.module.sys, "argv", ["adapter", "attest"]), \
+                mock.patch.object(self.module.os, "environ", environment), \
+                mock.patch.object(self.module.pwd, "getpwuid", side_effect=slow_nss) as nss, \
+                mock.patch.object(self.module.os, "open") as open_path, \
+                mock.patch.object(self.module, "emit", return_value=1):
+            self.assertEqual(self.module.main(), 1)
+        self.assertLess(self.module.time.monotonic() - started, 1.0)
+        nss.assert_called_once_with(1000)
+        open_path.assert_not_called()
+
+    def test_deadline_expiry_after_temp_fsync_prevents_atomic_replace(self):
+        target = self.base / "deadline-write"
+        with mock.patch.object(self.module.time, "monotonic_ns", side_effect=[0, 0, 0, 100]), \
+                mock.patch.object(self.module.os, "replace") as replace:
+            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+                self.module._atomic_write(target, b"safe", 0o600, deadline_ns=100)
+        replace.assert_not_called()
 
     def test_deadline_propagates_remaining_timeout_and_forbids_calls_at_expiry(self):
         clock = mock.Mock()
@@ -325,9 +572,15 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 self.module._boot_id(1)
         read.assert_not_called()
 
-    def test_authorized_restart_attests_all_epochs_and_discloses_account_wide_blast_radius(self):
+    def test_authorized_attest_attests_all_epochs_and_discloses_account_wide_blast_radius(self):
+        token = "d" * 64
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
-                   "generation": "b" * 64, "ingest_gid": 987}
+                   "generation": "b" * 64, "ingest_gid": 987,
+                   "deadline_ns": 15_000_001_000, "attestation_token": token,
+                   "canary_event_id": event_id}
         identities = [
             self.module.ProcessIdentity(11, 101, 1001), self.module.ProcessIdentity(21, 201, 2001),
             self.module.ProcessIdentity(31, 301, 3001), self.module.ProcessIdentity(12, 102, 1002),
@@ -338,9 +591,15 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             self.module.ProcessIdentity(32, 302, 3002),
         ]
         baseline = self._v3_source()
-        advanced = self._v3_source(commit_sequence=5, events_persisted_total=5)
+        advanced = self._v3_source(
+            commit_sequence=5, events_persisted_total=5,
+            last_persisted_canary_event_id=event_id,
+            last_persisted_canary_receipt_status="persisted",
+            last_persisted_canary_incidents_opened=0,
+        )
         status = {"ingestion": {"state": "healthy", "listener_live": True, "sources": [advanced]}}
         prior_status = {"ingestion": {"sources": [self._v3_source(
+            source_id="uid:1000:gateway:" + "b" * 64 + ":" + "c" * 64,
             runtime_instance_nonce="c" * 64, kernel_peer_pid=21, kernel_peer_start_ticks=201)]}}
         deadlines = []
         config = self.base / "config.toml"
@@ -353,6 +612,13 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             deadlines.append(deadline_ns)
             return identities.pop(0)
 
+        def command(argv, **_kwargs):
+            if argv[0] == str(self.module.HERMES):
+                prompt = argv[-1]
+                self.assertIn(f"SKYNET_EDR_ATTEST_V1 {event_id} {token}", prompt)
+                return f"SKYNET_EDR_ATTEST_ACK_V1 {event_id}\n".encode("ascii")
+            return b""
+
         with (mock.patch.object(self.module.time, "monotonic_ns", return_value=1_000),
               mock.patch.object(self.module, "_service_identity", side_effect=identity),
               mock.patch.object(self.module, "_old_identity_gone", return_value=True),
@@ -362,7 +628,8 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
               mock.patch.object(self.module, "_gateway_context_matches", return_value=True),
               mock.patch.object(self.module, "_wait_for_source", side_effect=[(status, baseline), (status, advanced)]),
               mock.patch.object(self.module, "_status", side_effect=[prior_status, status]),
-              mock.patch.object(self.module, "_run", return_value=b"") as run,
+              mock.patch.object(self.module, "_run", side_effect=command) as run,
+              mock.patch.object(self.module, "_atomic_write") as atomic_write,
               mock.patch.object(self.module, "_plugin_enabled", return_value=True),
               mock.patch.object(self.module, "_boot_id", return_value="00000000-0000-0000-0000-000000000000"),
               mock.patch.object(self.module, "_record_attestation") as record):
@@ -377,10 +644,62 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         record.assert_called_once_with(
             context, observation, 15_000_001_000, "00000000-0000-0000-0000-000000000000"
         )
+        expected_dropin = self.module.render_dropin(
+            [self.module.UNIT], context["generation"], context["home"], context["profile"]
+        ).encode("ascii")
+        self.assertEqual(atomic_write.call_args_list[-1].args[:3],
+                         (self.module.DROPIN, expected_dropin, 0o644))
+
+    def test_attestation_dropin_is_restored_when_restart_fails(self):
+        token = "d" * 64
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64, "deadline_ns": 15_000_000_000,
+                   "attestation_token": token,
+                   "canary_event_id": "evt_skynet_attest_" + hashlib.sha256(
+                       b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+                   ).hexdigest()}
+        with (mock.patch.object(self.module, "_restart_attestation",
+                                side_effect=self.module.AdapterError("deadline")),
+              mock.patch.object(self.module, "_atomic_write") as atomic_write):
+            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+                self.module._restart(context)
+        expected_dropin = self.module.render_dropin(
+            [self.module.UNIT], context["generation"], context["home"], context["profile"]
+        ).encode("ascii")
+        atomic_write.assert_called_once_with(self.module.DROPIN, expected_dropin, 0o644)
+
+    def test_expired_inner_dropin_cleanup_relies_on_outer_snapshot_rollback_evidence(self):
+        dropin = self.base / "50-skynet-edr.conf"
+        dropin.write_text("prior-dropin\n", encoding="ascii")
+        snapshot = self.module.snapshot_files({"dropin": dropin})
+        token = "d" * 64
+        tokenized = f"Environment=SKYNET_EDR_ATTESTATION_TOKEN={token}\n"
+        dropin.write_text(tokenized, encoding="ascii")
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64, "deadline_ns": 100,
+                   "attestation_token": token,
+                   "canary_event_id": "evt_skynet_attest_" + "e" * 64}
+        with mock.patch.object(self.module, "DROPIN", dropin), \
+                mock.patch.object(self.module, "_restart_attestation",
+                                  side_effect=self.module.AdapterError("hook_failure")), \
+                mock.patch.object(self.module, "_atomic_write",
+                                  side_effect=self.module.AdapterError("deadline")):
+            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+                self.module._restart(context)
+        self.assertEqual(dropin.read_text(encoding="ascii"), tokenized)
+
+        self.module.restore_files(snapshot, {"dropin": dropin})
+        self.assertEqual(dropin.read_text(encoding="ascii"), "prior-dropin\n")
+        self.assertNotIn(token, dropin.read_text(encoding="ascii"))
 
     def test_restart_fails_closed_when_any_required_epoch_is_unchanged(self):
+        token = "d" * 64
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
-                   "generation": "b" * 64}
+                   "generation": "b" * 64, "deadline_ns": 15_000_000_000,
+                   "attestation_token": token,
+                   "canary_event_id": "evt_skynet_attest_" + hashlib.sha256(
+                       b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+                   ).hexdigest()}
         before = [self.module.ProcessIdentity(11, 101, 1001), self.module.ProcessIdentity(21, 201, 2001),
                   self.module.ProcessIdentity(31, 301, 3001)]
         for unchanged in range(3):
@@ -392,7 +711,8 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             ), mock.patch.object(
                 self.module, "_service_identity", side_effect=before + after
             ), mock.patch.object(self.module, "_status", return_value={"ingestion": {"sources": []}}), \
-                    mock.patch.object(self.module, "_run", return_value=b""):
+                    mock.patch.object(self.module, "_run", return_value=b""), \
+                    mock.patch.object(self.module, "_atomic_write"):
                 with self.assertRaises(self.module.AdapterError) as error:
                     self.module._restart(context)
             self.assertEqual(error.exception.category, "identity_epoch")

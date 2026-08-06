@@ -818,6 +818,58 @@ fn v3_health_and_event_share_exact_source_and_only_persist_advances_commit_seque
 }
 
 #[test]
+fn persisted_attestation_projects_exact_safe_receipt_and_zero_incidents_on_same_source() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let db_path = temp_path("v3-attestation-proof.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("v3-attestation-proof.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    health.record_listener_started();
+    let report = v3_health("gateway", GENERATION, NONCE);
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&report).unwrap()),
+        &health,
+    );
+    let mut event: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).unwrap();
+    event["event_id"] = serde_json::json!(concat!(
+        "evt_skynet_attest_",
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    ));
+    event["event_type"] = serde_json::json!("agent.llm.call.requested");
+    event["severity"] = serde_json::json!("informational");
+    event["source"] = serde_json::json!({
+        "kind": "sensor", "sensor": "hermes-plugin", "integration": "hermes"
+    });
+    event["trust_level"] = serde_json::json!("sensor_observation");
+    event["attributes"] = serde_json::json!({
+        "hook": "pre_llm_call", "content_omitted": true,
+        "argument_count": 1, "keyword_count": 0, "message_count": 1
+    });
+    event["redaction"] = serde_json::json!({
+        "contains_sensitive_data": false, "redacted_fields": []
+    });
+    let envelope = v3_event("gateway", GENERATION, NONCE, &event);
+    let ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&envelope).unwrap()),
+        &health,
+    );
+    assert!(ack.contains(r#""status":"persisted""#), "{ack}");
+    let status = health.status_json(Duration::from_secs(30));
+    let source = &status["sources"][0];
+    assert_eq!(source["last_persisted_canary_event_id"], event["event_id"]);
+    assert_eq!(source["last_persisted_canary_receipt_status"], "persisted");
+    assert_eq!(source["last_persisted_canary_incidents_opened"], 0);
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
 fn v3_event_only_source_is_not_s3_eligible_before_exact_health() {
     const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

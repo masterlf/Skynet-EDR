@@ -19,6 +19,7 @@ import pwd
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -46,6 +47,15 @@ SYSTEM_ADAPTER = Path("/usr/libexec/skynet-edr/hermes-enrollment-adapter.py")
 MAX_PAYLOAD_FILE = 8 * 1024 * 1024
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 REVIEWED_UNITS = ["hermes-gateway.service"]
+ATTEST_BUDGET_NS = 15_000_000_000
+ATTEST_RESPONSE_KEYS = {
+    "plugin_enabled", "loaded_generation", "process_fresh", "daemon", "producer",
+    "real_hook", "restart_blast_radius", "identities", "commit_sequence",
+}
+ATTEST_OBSERVATION_KEYS = ATTEST_RESPONSE_KEYS | {
+    "target_uid", "observed_generation", "transaction_nonce",
+    "action", "effective_uid", "observed_at_ns",
+}
 
 
 class EnrollmentError(Exception):
@@ -259,11 +269,22 @@ def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict
     if reload_required:
         return "RELOAD_REQUIRED", "reload_boundary"
     obs = observe(observations)
+    if set(obs) != ATTEST_OBSERVATION_KEYS:
+        return "DRIFTED", "enablement"
     generation = canonical_generation(manifest)
+    try:
+        validate_attest_response(
+            {key: obs[key] for key in ATTEST_RESPONSE_KEYS},
+            {"SKYNET_EDR_TARGET_UID": str(request["uid"]),
+             "SKYNET_EDR_GENERATION": generation},
+            obs.get("real_hook", {}).get("event_id"),
+        )
+    except (EnrollmentError, AttributeError, TypeError):
+        return "DRIFTED", "enablement"
     observed_at = obs.get("observed_at_ns")
     now = time.time_ns()
     if (
-        obs.get("action") != "hook"
+        obs.get("action") != "attest"
         or obs.get("transaction_nonce") != enrolled.get("verified_nonce")
         or obs.get("observed_generation") != generation
         or obs.get("target_uid") != request["uid"]
@@ -318,12 +339,160 @@ def adapter_env(home: Path, profile: str, observations: Path, generation: str, u
     }
 
 
-def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: Path) -> dict[str, Any]:
+def canary_event_id(token: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise EnrollmentError("adapter_failure")
+    return "evt_skynet_attest_" + hashlib.sha256(
+        b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+    ).hexdigest()
+
+
+def validate_attest_response(response: dict[str, Any], env: dict[str, str], event_id: str) -> None:
+    daemon = response.get("daemon")
+    producer = response.get("producer")
+    hook = response.get("real_hook")
+    identities = response.get("identities")
+    expected_units = {"user@" + env["SKYNET_EDR_TARGET_UID"] + ".service",
+                      "hermes-gateway.service", "skynet-edr.service"}
+    identity_values_ok = (type(identities) is dict and set(identities) == expected_units
+                          and all(type(value) is list and len(value) == 3
+                                  and all(type(item) is int and item > 0 for item in value)
+                                  for value in identities.values()))
+    daemon_ok = (
+        type(daemon) is dict
+        and set(daemon) == {"healthy", "listener", "transport", "backlog", "degraded"}
+        and type(daemon.get("healthy")) is bool and daemon["healthy"] is True
+        and type(daemon.get("listener")) is bool and daemon["listener"] is True
+        and type(daemon.get("transport")) is str and daemon["transport"] == "available"
+        and type(daemon.get("backlog")) is int and daemon["backlog"] == 0
+        and type(daemon.get("degraded")) is bool and daemon["degraded"] is False
+    )
+    producer_ok = (
+        type(producer) is dict
+        and set(producer) == {"uid", "role", "fresh", "generation", "runtime_nonce"}
+        and type(producer.get("uid")) is int
+        and producer["uid"] == int(env["SKYNET_EDR_TARGET_UID"])
+        and type(producer.get("role")) is str and producer["role"] == "gateway"
+        and type(producer.get("fresh")) is bool and producer["fresh"] is True
+        and type(producer.get("generation")) is str
+        and producer["generation"] == env["SKYNET_EDR_GENERATION"]
+        and type(producer.get("runtime_nonce")) is str
+        and re.fullmatch(r"[0-9a-f]{64}", producer["runtime_nonce"]) is not None
+        and producer["runtime_nonce"] not in {
+            env["SKYNET_EDR_GENERATION"], env.get("SKYNET_EDR_ATTESTATION_TOKEN")
+        }
+    )
+    hook_ok = (
+        type(hook) is dict
+        and set(hook) == {"correlated", "committed", "incident_opened", "event_id", "receipt_status"}
+        and type(hook.get("correlated")) is bool and hook["correlated"] is True
+        and type(hook.get("committed")) is bool and hook["committed"] is True
+        and type(hook.get("incident_opened")) is bool and hook["incident_opened"] is False
+        and type(hook.get("event_id")) is str and hook["event_id"] == event_id
+        and type(hook.get("receipt_status")) is str and hook["receipt_status"] == "persisted"
+    )
+    if (type(event_id) is not str
+            or re.fullmatch(r"evt_skynet_attest_[0-9a-f]{64}", event_id) is None
+            or type(response) is not dict
+            or set(response) != ATTEST_RESPONSE_KEYS
+            or type(response.get("plugin_enabled")) is not bool or response["plugin_enabled"] is not True
+            or type(response.get("loaded_generation")) is not str
+            or response["loaded_generation"] != env["SKYNET_EDR_GENERATION"]
+            or type(response.get("process_fresh")) is not bool or response["process_fresh"] is not True
+            or not daemon_ok or not producer_ok or not hook_ok
+            or type(response.get("restart_blast_radius")) is not str
+            or response["restart_blast_radius"] != "complete_user_manager"
+            or not identity_values_ok
+            or type(response.get("commit_sequence")) is not int
+            or response["commit_sequence"] <= 0):
+        raise EnrollmentError("adapter_failure")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
+
+
+def _remaining_seconds(deadline_ns: int) -> float:
+    remaining = deadline_ns - time.monotonic_ns()
+    if remaining <= 0:
+        raise EnrollmentError("adapter_failure")
+    return remaining / 1_000_000_000
+
+
+@contextlib.contextmanager
+def _deadline_guard(deadline_ns: int):
+    def expired(_signum, _frame):
+        raise EnrollmentError("adapter_failure")
+
+    started_ns = time.monotonic_ns()
+    remaining_ns = deadline_ns - started_ns
+    if remaining_ns <= 0:
+        raise EnrollmentError("adapter_failure")
+    previous = signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining_ns / 1_000_000_000)
+    try:
+        yield
+        _remaining_seconds(deadline_ns)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        elapsed = max(0.0, (time.monotonic_ns() - started_ns) / 1_000_000_000)
+        previous_delay = max(1e-9, previous_timer[0] - elapsed) if previous_timer[0] > 0 else 0.0
+        signal.signal(signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, previous_delay, previous_timer[1])
+
+
+def run_attest_lane(adapter: Path, env: dict[str, str], observations: Path,
+                    state_root: Path, generation: str, uid: int, profile: str,
+                    request: dict[str, Any], home: Path, manifest: dict[str, Any],
+                    target_parent: Path) -> tuple[dict[str, Any], str, str]:
+    token = secrets.token_hex(32)
+    while token == generation:
+        token = secrets.token_hex(32)
+    event_id = canary_event_id(token)
+    deadline_ns = time.monotonic_ns() + ATTEST_BUDGET_NS
+    with _deadline_guard(deadline_ns):
+        attested = run_adapter(
+            adapter, "attest", env, observations, deadline_ns=deadline_ns,
+            attestation_token=token, expected_event_id=event_id,
+        )
+        _remaining_seconds(deadline_ns)
+        write_metadata(
+            state_root, generation, uid, profile, attested["transaction_nonce"],
+            deadline_ns=deadline_ns,
+        )
+        _remaining_seconds(deadline_ns)
+        final_state, final_category = assess(
+            request, home, state_root, manifest, observations, target_parent
+        )
+        _remaining_seconds(deadline_ns)
+    return attested, final_state, final_category
+
+
+def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: Path, *,
+                deadline_ns: int | None = None, attestation_token: str | None = None,
+                expected_event_id: str | None = None) -> dict[str, Any]:
+    if deadline_ns is not None:
+        _remaining_seconds(deadline_ns)
     nonce = secrets.token_hex(32)
     action_env = dict(env)
     action_env["SKYNET_EDR_NONCE"] = nonce
     action_env["SKYNET_EDR_ACTION"] = action
+    if deadline_ns is not None:
+        if (action != "attest" or attestation_token is None or expected_event_id is None
+                or expected_event_id != canary_event_id(attestation_token)
+                or attestation_token in {nonce, env["SKYNET_EDR_GENERATION"]}):
+            raise EnrollmentError("adapter_failure")
+        action_env["SKYNET_EDR_DEADLINE_NS"] = str(deadline_ns)
+        action_env["SKYNET_EDR_ATTESTATION_TOKEN"] = attestation_token
+        action_env["SKYNET_EDR_CANARY_EVENT_ID"] = expected_event_id
     target_uid = int(env["SKYNET_EDR_TARGET_UID"])
+    if deadline_ns is not None:
+        _remaining_seconds(deadline_ns)
     target_gid = pwd.getpwuid(target_uid).pw_gid
 
     def use_target_identity() -> None:
@@ -338,20 +507,33 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
     target_action = action in {"enable", "disable"}
     try:
         info = os.lstat(adapter)
+        if deadline_ns is not None:
+            _remaining_seconds(deadline_ns)
         if (adapter.is_symlink() or not stat.S_ISREG(info.st_mode) or not os.access(adapter, os.X_OK)
                 or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_uid != 0):
             raise OSError("invalid adapter")
         result = subprocess.run(
             ["/usr/bin/python3", str(adapter), action], env=action_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=30, check=False, preexec_fn=use_target_identity if target_action else None,
+            stderr=subprocess.DEVNULL,
+            timeout=30 if deadline_ns is None else _remaining_seconds(deadline_ns),
+            check=False, preexec_fn=use_target_identity if target_action else None,
         )
+        if deadline_ns is not None:
+            _remaining_seconds(deadline_ns)
         if len(result.stdout) > 65_536:
             raise OSError("oversized adapter response")
-        response = json.loads(result.stdout)
+        response = json.loads(result.stdout, object_pairs_hook=_unique_json_object)
+        if deadline_ns is not None:
+            _remaining_seconds(deadline_ns)
     except (OSError, KeyError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         raise EnrollmentError("adapter_failure") from exc
     if result.returncode != 0 or not isinstance(response, dict):
         raise EnrollmentError("adapter_failure")
+    if action == "attest":
+        if expected_event_id is None or deadline_ns is None:
+            raise EnrollmentError("adapter_failure")
+        validate_attest_response(response, action_env, expected_event_id)
+        _remaining_seconds(deadline_ns)
     response.update({
         "transaction_nonce": nonce,
         "action": action,
@@ -360,16 +542,34 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
         "effective_uid": target_uid if target_action else os.geteuid(),
         "observed_at_ns": time.time_ns(),
     })
+    if deadline_ns is not None:
+        _remaining_seconds(deadline_ns)
+    previous_observation = snapshot_optional_regular(observations)
+    if deadline_ns is not None:
+        _remaining_seconds(deadline_ns)
     observations.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".observation.", dir=observations.parent)
+    replaced = False
     try:
         os.fchmod(fd, 0o600)
         os.write(fd, json.dumps(response, sort_keys=True).encode("ascii"))
         os.fsync(fd)
         os.close(fd)
         fd = -1
+        if deadline_ns is not None:
+            _remaining_seconds(deadline_ns)
         os.replace(temporary, observations)
+        replaced = True
         fsync_dir(observations.parent)
+        if deadline_ns is not None:
+            _remaining_seconds(deadline_ns)
+    except Exception:
+        if replaced:
+            try:
+                restore_optional_regular(observations, previous_observation)
+            except Exception as rollback_error:
+                raise EnrollmentError("rollback") from rollback_error
+        raise
     finally:
         if fd >= 0:
             os.close(fd)
@@ -615,9 +815,16 @@ def copy_generation(source: Path, stage: Path, manifest: dict[str, Any], uid: in
 
 
 def write_metadata(state_root: Path, generation: str, uid: int, profile: str, verified_nonce: str | None,
-                   *, reload_required: bool = False) -> None:
+                   *, reload_required: bool = False, deadline_ns: int | None = None) -> None:
+    if deadline_ns is not None:
+        _remaining_seconds(deadline_ns)
+    metadata_path = state_root / "enrollment.json"
+    previous = snapshot_optional_regular(metadata_path)
+    if deadline_ns is not None:
+        _remaining_seconds(deadline_ns)
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".enrollment.", dir=state_root)
+    replaced = False
     try:
         os.fchmod(fd, 0o600)
         data = json.dumps({"schema": 1, "generation": generation, "uid": uid, "profile": profile,
@@ -627,8 +834,20 @@ def write_metadata(state_root: Path, generation: str, uid: int, profile: str, ve
         os.fsync(fd)
         os.close(fd)
         fd = -1
-        os.replace(temporary, state_root / "enrollment.json")
+        if deadline_ns is not None:
+            _remaining_seconds(deadline_ns)
+        os.replace(temporary, metadata_path)
+        replaced = True
         fsync_dir(state_root)
+        if deadline_ns is not None:
+            _remaining_seconds(deadline_ns)
+    except Exception:
+        if replaced:
+            try:
+                restore_metadata(state_root, previous[1] if previous[0] else None)
+            except Exception as rollback_error:
+                raise EnrollmentError("rollback") from rollback_error
+        raise
     finally:
         if fd >= 0:
             os.close(fd)
@@ -771,11 +990,9 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
                 return emit(state, category, noop=True)
             env = adapter_env(home, profile, observations, generation, uid)
             try:
-                run_adapter(adapter, "restart", env, observations)
-                hooked = run_adapter(adapter, "hook", env, observations)
-                write_metadata(state_root, generation, uid, profile, hooked["transaction_nonce"])
-                final_state, final_category = assess(
-                    request, home, state_root, manifest, observations, opened
+                _, final_state, final_category = run_attest_lane(
+                    adapter, env, observations, state_root, generation, uid, profile,
+                    request, home, manifest, opened,
                 )
             except EnrollmentError as exc:
                 return emit(exc.state, exc.category)
@@ -793,7 +1010,6 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         if prior.exists():
             shutil.rmtree(prior)
         committed = False
-        host_prepared = False
         host_prepare_attempted = False
         enable_attempted = False
         try:
@@ -810,7 +1026,6 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
             write_metadata(state_root, generation, uid, profile, None)
             host_prepare_attempted = True
             run_adapter(adapter, "prepare", adapter_env(home, profile, observations, generation, uid), observations)
-            host_prepared = True
             env = adapter_env(home, profile, observations, generation, uid)
             enable_attempted = True
             enabled = run_adapter(adapter, "enable", env, observations)
@@ -819,10 +1034,10 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
             if request.get("restart_authorized") is not True:
                 write_metadata(state_root, generation, uid, profile, None, reload_required=True)
                 return emit("RELOAD_REQUIRED", "reload_boundary")
-            run_adapter(adapter, "restart", env, observations)
-            hooked = run_adapter(adapter, "hook", env, observations)
-            write_metadata(state_root, generation, uid, profile, hooked["transaction_nonce"])
-            final_state, final_category = assess(request, home, state_root, manifest, observations, opened)
+            _, final_state, final_category = run_attest_lane(
+                adapter, env, observations, state_root, generation, uid, profile,
+                request, home, manifest, opened,
+            )
             if final_state != "ENROLLED":
                 raise EnrollmentError(final_category, final_state)
             return emit(final_state, final_category)

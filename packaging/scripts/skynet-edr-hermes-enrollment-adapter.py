@@ -9,6 +9,7 @@ bounded sanitized JSON object, and never forwards child diagnostics.
 from __future__ import annotations
 
 import base64
+import contextlib
 import grp
 import hashlib
 import json
@@ -16,15 +17,17 @@ import os
 import pwd
 import re
 import shlex
+import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
+
+import tomllib
 
 CONFIG = Path("/etc/skynet-edr/config.toml")
 STATE_ROOT = Path("/var/lib/skynet-edr-hermes-enrollment/adapter")
@@ -41,6 +44,36 @@ MAX_OUTPUT = 65_536
 ATTEST_BUDGET_NS = 15_000_000_000
 POLL_SECONDS = 0.2
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+CANARY_EVENT_ID = re.compile(r"^evt_skynet_attest_[0-9a-f]{64}$")
+V3_SOURCE_KEYS = {
+    "source_id", "authenticated_uid", "runtime_role", "protocol_version", "s3_eligible",
+    "instance_id", "plugin_generation", "runtime_instance_nonce", "kernel_peer_pid",
+    "kernel_peer_start_ticks", "commit_sequence", "events_persisted_total",
+    "last_event_received_at_unix_ms", "last_event_committed_at_unix_ms",
+    "producer_checkpoint_bytes", "backlog_bytes", "backlog_age_ms", "events_malformed_total",
+    "events_dropped_total", "events_duplicate_total", "events_collision_total",
+    "last_error_category", "last_error_at_unix_ms", "last_error_age_ms",
+    "producer_reported_at_unix_ms", "producer_report_age_ms", "transport_state",
+    "last_persisted_canary_event_id", "last_persisted_canary_receipt_status",
+    "last_persisted_canary_incidents_opened",
+}
+STATUS_KEYS = {
+    "product", "binary", "run_mode", "server", "read_only", "tool_count",
+    "incident_count", "event_count", "version", "ingestion",
+}
+INGESTION_STATUS_KEYS = {
+    "state", "role_identity_assurance", "listener_live", "transport_heartbeat_state",
+    "hook_event_state", "hook_event_freshness_affects_state",
+    "last_event_received_at_unix_ms", "last_event_received_age_ms",
+    "last_event_committed_at_unix_ms", "last_event_committed_age_ms",
+    "required_reported_roles", "connections_accepted_total",
+    "connections_unauthorized_total", "connections_capacity_rejected_total",
+    "listener_errors_total", "peer_credential_errors_total", "frames_received_total",
+    "frames_oversize_total", "frames_invalid_total", "frames_timeout_total",
+    "events_persisted_total", "events_duplicate_total", "events_collision_total",
+    "incident_integrity_collision_total", "correlation_truncated_total",
+    "storage_errors_total", "sources",
+}
 BOOT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SAFE_PROFILE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 SAFE_HOME = re.compile(r"^/[A-Za-z0-9_./@-]{1,4095}$")
@@ -58,6 +91,29 @@ class AdapterError(Exception):
     def __init__(self, category: str) -> None:
         super().__init__(category)
         self.category = category
+
+
+@contextlib.contextmanager
+def _deadline_watchdog(deadline_ns: int):
+    started_ns = time.monotonic_ns()
+    remaining = deadline_ns - started_ns
+    if remaining <= 0:
+        raise AdapterError("deadline")
+
+    def expired(_signum: int, _frame: Any) -> None:
+        raise AdapterError("deadline")
+
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining / 1_000_000_000)
+    try:
+        yield
+        _check_deadline(deadline_ns)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        elapsed = max(0.0, (time.monotonic_ns() - started_ns) / 1_000_000_000)
+        previous_delay = max(1e-9, previous_timer[0] - elapsed) if previous_timer[0] > 0 else 0.0
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, previous_delay, previous_timer[1])
 
 
 class ProcessIdentity(NamedTuple):
@@ -87,10 +143,10 @@ def parse_bounded_json(data: bytes) -> Any:
 
 
 def validate_context(action: str, env: dict[str, str], *, effective_uid: int | None = None) -> dict[str, Any]:
-    if action not in {"prepare", "rollback", "enable", "disable", "restart", "hook"}:
+    if action not in {"prepare", "rollback", "enable", "disable", "attest"}:
         raise AdapterError("invalid_action")
     effective_uid = os.geteuid() if effective_uid is None else effective_uid
-    privileged = action in {"prepare", "rollback", "restart", "hook"}
+    privileged = action in {"prepare", "rollback", "attest"}
     if privileged and effective_uid != 0:
         raise AdapterError("identity")
     try:
@@ -108,6 +164,27 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
         raise AdapterError("identity")
     if not HEX64.fullmatch(nonce) or not HEX64.fullmatch(generation):
         raise AdapterError("invalid_context")
+    deadline_ns = None
+    attestation_token = None
+    canary_event_id = None
+    if action == "attest":
+        try:
+            deadline_text = env["SKYNET_EDR_DEADLINE_NS"]
+            deadline_ns = int(deadline_text)
+            attestation_token = env["SKYNET_EDR_ATTESTATION_TOKEN"]
+            canary_event_id = env["SKYNET_EDR_CANARY_EVENT_ID"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AdapterError("invalid_context") from exc
+        if str(deadline_ns) != deadline_text or deadline_ns <= 0 or time.monotonic_ns() >= deadline_ns:
+            raise AdapterError("deadline")
+        expected_event_id = ""
+        if type(attestation_token) is str and HEX64.fullmatch(attestation_token):
+            expected_event_id = "evt_skynet_attest_" + hashlib.sha256(
+                b"skynet-edr-attestation-v1\0" + attestation_token.encode("ascii")
+            ).hexdigest()
+        if (attestation_token in {nonce, generation} or canary_event_id != expected_event_id
+                or CANARY_EVENT_ID.fullmatch(canary_event_id or "") is None):
+            raise AdapterError("invalid_context")
     home = Path(home_text)
     if (not home.is_absolute() or ".." in home.parts or home == Path("/")
             or not SAFE_HOME.fullmatch(home_text)):
@@ -134,7 +211,7 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
         os.close(home_fd)
         raise AdapterError("untrusted_path")
     ingest_gid = None
-    if action == "restart":
+    if action == "attest":
         try:
             ingest_gid = grp.getgrnam(GROUP).gr_gid
         except KeyError as exc:
@@ -142,7 +219,9 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
     return {"uid": uid, "account": account.pw_name, "account_gid": account.pw_gid,
             "ingest_gid": ingest_gid,
             "home": home, "profile": profile,
-            "nonce": nonce, "generation": generation, "action": action, "home_fd": home_fd}
+            "nonce": nonce, "generation": generation, "action": action, "home_fd": home_fd,
+            "deadline_ns": deadline_ns, "attestation_token": attestation_token,
+            "canary_event_id": canary_event_id}
 
 
 def _toml_ingest(text: str) -> dict[str, Any]:
@@ -208,14 +287,20 @@ def rewrite_ingest_toml(text: str, uid: int, *, enabled: bool) -> str:
     return updated
 
 
-def render_dropin(units: list[str], generation: str, home: Path, profile: str) -> str:
+def render_dropin(units: list[str], generation: str, home: Path, profile: str,
+                  attestation_token: str | None = None) -> str:
     if units != [UNIT]:
         raise AdapterError("unit_scope")
     if profile != "default" or home.name != ".hermes":
         raise AdapterError("unsupported_contract")
+    if attestation_token is not None and not HEX64.fullmatch(attestation_token):
+        raise AdapterError("invalid_context")
+    token_line = (f"Environment=SKYNET_EDR_ATTESTATION_TOKEN={attestation_token}\n"
+                  if attestation_token is not None else "")
     return ("[Service]\n"
             "Environment=HERMES_RUNTIME_ROLE=gateway\n"
             f"Environment=SKYNET_EDR_PLUGIN_GENERATION={generation}\n"
+            f"{token_line}"
             "Environment=HERMES_HOME=%h/.hermes\n"
             "Environment=HERMES_PROFILE=default\n"
             "Environment=PYTHONDONTWRITEBYTECODE=1\n")
@@ -275,21 +360,36 @@ def snapshot_files(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
     return snapshot
 
 
-def _atomic_write(path: Path, data: bytes, mode: int, uid: int = 0, gid: int = 0) -> None:
+def _atomic_write(path: Path, data: bytes, mode: int, uid: int = 0, gid: int = 0, *,
+                  deadline_ns: int | None = None) -> None:
+    if deadline_ns is not None:
+        _check_deadline(deadline_ns)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    if deadline_ns is not None:
+        _check_deadline(deadline_ns)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
+        if deadline_ns is not None:
+            _check_deadline(deadline_ns)
         os.fchmod(fd, mode)
         if os.geteuid() == 0:
             os.fchown(fd, uid, gid)
         os.write(fd, data)
         os.fsync(fd)
+        if deadline_ns is not None:
+            _check_deadline(deadline_ns)
         os.close(fd)
         fd = -1
+        if deadline_ns is not None:
+            _check_deadline(deadline_ns)
         os.replace(temporary, path)
+        if deadline_ns is not None:
+            _check_deadline(deadline_ns)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
+            if deadline_ns is not None:
+                _check_deadline(deadline_ns)
         finally:
             os.close(directory)
     finally:
@@ -399,11 +499,14 @@ def _run(argv: list[str], *, env: dict[str, str], target: dict[str, Any] | None 
 
 
 def _minimal_env(context: dict[str, Any]) -> dict[str, str]:
-    return {"HOME": str(context["home"].parent), "HERMES_HOME": str(context["home"]),
+    environment = {"HOME": str(context["home"].parent), "HERMES_HOME": str(context["home"]),
             "HERMES_PROFILE": context["profile"], "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
             "XDG_RUNTIME_DIR": f"/run/user/{context['uid']}",
             "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{context['uid']}/bus"}
+    if context.get("attestation_token") is not None:
+        environment["SKYNET_EDR_ATTESTATION_TOKEN"] = context["attestation_token"]
+    return environment
 
 
 def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> bool:
@@ -471,7 +574,53 @@ def _status(deadline_ns: int | None = None) -> dict[str, Any]:
     value = parse_bounded_json(body)
     if type(value) is not dict:
         raise AdapterError("readback_failure")
+    _validate_status_schema(value)
     return value
+
+
+def _validate_status_schema(status: dict[str, Any]) -> dict[str, Any]:
+    if set(status) != STATUS_KEYS:
+        raise AdapterError("readback_failure")
+    ingestion = status.get("ingestion")
+    if type(ingestion) is not dict or set(ingestion) != INGESTION_STATUS_KEYS:
+        raise AdapterError("readback_failure")
+    root_counts = ("tool_count", "incident_count", "event_count")
+    ingestion_counts = (
+        "connections_accepted_total", "connections_unauthorized_total",
+        "connections_capacity_rejected_total", "listener_errors_total",
+        "peer_credential_errors_total", "frames_received_total", "frames_oversize_total",
+        "frames_invalid_total", "frames_timeout_total", "events_persisted_total",
+        "events_duplicate_total", "events_collision_total", "incident_integrity_collision_total",
+        "correlation_truncated_total", "storage_errors_total",
+    )
+    optional_times = (
+        "last_event_received_at_unix_ms", "last_event_received_age_ms",
+        "last_event_committed_at_unix_ms", "last_event_committed_age_ms",
+    )
+    required = ingestion.get("required_reported_roles")
+    if (status.get("product") != "Skynet-EDR" or status.get("binary") != "skynet-edr"
+            or status.get("run_mode") != "passive" or status.get("server") != "skynet-edr-mcp"
+            or status.get("read_only") is not True
+            or type(status.get("version")) is not str or not status["version"]
+            or any(type(status.get(key)) is not int or status[key] < 0 for key in root_counts)
+            or ingestion.get("state") not in {"healthy", "degraded"}
+            or ingestion.get("role_identity_assurance") != "authorized_uid_self_reported"
+            or type(ingestion.get("listener_live")) is not bool
+            or ingestion.get("transport_heartbeat_state") not in {"fresh", "stale", "not_observed"}
+            or ingestion.get("hook_event_state") not in {"fresh", "stale", "not_observed"}
+            or ingestion.get("hook_event_freshness_affects_state") is not False
+            or any(value is not None and (type(value) is not int or value < 0)
+                   for value in (ingestion.get(key) for key in optional_times))
+            or any(type(ingestion.get(key)) is not int or ingestion[key] < 0
+                   for key in ingestion_counts)
+            or type(required) is not list or len(required) != 1
+            or type(required[0]) is not dict
+            or set(required[0]) != {"runtime_role", "state"}
+            or required[0].get("runtime_role") != "gateway"
+            or required[0].get("state") not in {"fresh", "stale", "absent"}
+            or type(ingestion.get("sources")) is not list):
+        raise AdapterError("readback_failure")
+    return ingestion
 
 
 def _source_identity(source: dict[str, Any]) -> tuple[Any, ...]:
@@ -487,26 +636,56 @@ def _exact_source(ingestion: dict[str, Any], context: dict[str, Any],
     if type(sources) is not list:
         raise AdapterError("source_cardinality")
     matches = [source for source in sources if type(source) is dict
+               and type(source.get("authenticated_uid")) is int
                and source.get("authenticated_uid") == context["uid"]
-               and source.get("runtime_role") == "gateway"]
+               and source.get("runtime_role") == "gateway"
+               and type(source.get("protocol_version")) is int
+               and source.get("protocol_version") == 3
+               and source.get("plugin_generation") == context["generation"]
+               and type(source.get("kernel_peer_pid")) is int
+               and source.get("kernel_peer_pid") == gateway.main_pid
+               and type(source.get("kernel_peer_start_ticks")) is int
+               and source.get("kernel_peer_start_ticks") == gateway.proc_start_ticks]
     if len(matches) != 1:
         raise AdapterError("source_missing" if not matches else "source_cardinality")
     source = matches[0]
+    if set(source) != V3_SOURCE_KEYS:
+        raise AdapterError("producer_health")
     nonce = source.get("runtime_instance_nonce")
     age = source.get("producer_report_age_ms")
-    if (source.get("protocol_version") != 3 or source.get("s3_eligible") is not True
-            or source.get("plugin_generation") != context["generation"]
-            or source.get("kernel_peer_pid") != gateway.main_pid
-            or source.get("kernel_peer_start_ticks") != gateway.proc_start_ticks
+    integer_fields = ("authenticated_uid", "protocol_version", "kernel_peer_pid",
+                      "kernel_peer_start_ticks", "commit_sequence", "events_persisted_total",
+                      "producer_checkpoint_bytes", "backlog_bytes", "events_malformed_total",
+                      "events_dropped_total", "events_duplicate_total", "events_collision_total",
+                      "producer_reported_at_unix_ms", "producer_report_age_ms")
+    timestamps = ("last_event_received_at_unix_ms", "last_event_committed_at_unix_ms")
+    canary_values = (source.get("last_persisted_canary_event_id"),
+                     source.get("last_persisted_canary_receipt_status"),
+                     source.get("last_persisted_canary_incidents_opened"))
+    canary_valid = (canary_values == (None, None, None)
+                    or (type(canary_values[0]) is str
+                        and CANARY_EVENT_ID.fullmatch(canary_values[0]) is not None
+                        and canary_values[1] == "persisted"
+                        and type(canary_values[2]) is int and canary_values[2] >= 0))
+    source_id = f"uid:{context['uid']}:gateway:{context['generation']}:{nonce}"
+    if (source.get("source_id") != source_id or source.get("s3_eligible") is not True
+            or source.get("instance_id") is not None
             or type(nonce) is not str or not HEX64.fullmatch(nonce)
-            or nonce == context["generation"]
-            or type(age) is not int or isinstance(age, bool) or not 0 <= age <= 30_000
-            or source.get("transport_state") != "available" or source.get("backlog_bytes") != 0):
+            or nonce in {context["generation"], context.get("attestation_token")}
+            or any(type(source.get(field)) is not int or source[field] < 0 for field in integer_fields)
+            or any(value is not None and (type(value) is not int or value < 0)
+                   for value in (source.get(field) for field in timestamps))
+            or type(age) is not int or not 0 <= age <= 30_000
+            or source.get("transport_state") != "available"
+            or source.get("backlog_bytes") != 0 or source.get("backlog_age_ms") is not None
+            or (source.get("last_error_category"), source.get("last_error_at_unix_ms"),
+                source.get("last_error_age_ms")) != (None, None, None)
+            or not canary_valid):
         raise AdapterError("producer_health")
     return source
 
 
-def _persisted_advanced(before: dict[str, Any], after: dict[str, Any]) -> bool:
+def _persisted_advanced(before: dict[str, Any], after: dict[str, Any], event_id: str) -> bool:
     before_sequence = before.get("commit_sequence")
     before_persisted = before.get("events_persisted_total")
     after_sequence = after.get("commit_sequence")
@@ -516,38 +695,35 @@ def _persisted_advanced(before: dict[str, Any], after: dict[str, Any]) -> bool:
                       "events_duplicate_total", "events_collision_total")
     if not all(type(value) is int and value >= 0 for value in integers):
         return False
-    assert isinstance(before_sequence, int) and isinstance(before_persisted, int)
-    assert isinstance(after_sequence, int) and isinstance(after_persisted, int)
     return (all(type(before.get(field)) is int and type(after.get(field)) is int
                     and before[field] == 0 and after[field] == 0 for field in failure_fields)
             and before.get("last_error_category") is None
             and after.get("last_error_category") is None
+            and after.get("last_persisted_canary_event_id") == event_id
+            and after.get("last_persisted_canary_receipt_status") == "persisted"
+            and after.get("last_persisted_canary_incidents_opened") == 0
             and _source_identity(before) == _source_identity(after)
-            and after_sequence - before_sequence == 1
-            and after_persisted - before_persisted == 1)
+            and cast(int, after_sequence) - cast(int, before_sequence) == 1
+            and cast(int, after_persisted) - cast(int, before_persisted) == 1)
 
 
 def _previous_runtime_nonce(status: dict[str, Any], context: dict[str, Any],
                             gateway: ProcessIdentity) -> str | None:
     ingestion = status.get("ingestion")
-    sources = ingestion.get("sources") if type(ingestion) is dict else None
-    if type(sources) is not list:
+    if type(ingestion) is not dict or type(ingestion.get("sources")) is not list:
         return None
-    candidates = [source for source in sources if type(source) is dict
-                  and source.get("authenticated_uid") == context["uid"]
-                  and source.get("runtime_role") == "gateway"]
-    if len(candidates) > 1:
-        raise AdapterError("source_cardinality")
-    if not candidates:
+    try:
+        source = _exact_source(ingestion, context, gateway)
+    except AdapterError as exc:
+        if exc.category == "source_missing":
+            return None
+        raise
+    nonce = source["runtime_instance_nonce"]
+    if nonce == context.get("attestation_token"):
+        raise AdapterError("producer_health")
+    if type(nonce) is not str:
         return None
-    source = candidates[0]
-    nonce = source.get("runtime_instance_nonce")
-    if (source.get("protocol_version") == 3
-            and source.get("kernel_peer_pid") == gateway.main_pid
-            and source.get("kernel_peer_start_ticks") == gateway.proc_start_ticks
-            and type(nonce) is str and HEX64.fullmatch(nonce)):
-        return nonce
-    return None
+    return nonce
 
 
 def _proc_start_ticks(pid: int, deadline_ns: int) -> int:
@@ -640,13 +816,16 @@ def _gateway_context_matches(context: dict[str, Any], deadline_ns: int | None = 
         values = set(shlex.split(raw.decode("utf-8")))
     except (UnicodeError, ValueError):
         return False
-    return {
+    expected = {
         f"HERMES_HOME={context['home']}",
         f"HERMES_PROFILE={context['profile']}",
         "HERMES_RUNTIME_ROLE=gateway",
         "PYTHONDONTWRITEBYTECODE=1",
         f"SKYNET_EDR_PLUGIN_GENERATION={context['generation']}",
-    }.issubset(values)
+    }
+    if context.get("attestation_token") is not None:
+        expected.add(f"SKYNET_EDR_ATTESTATION_TOKEN={context['attestation_token']}")
+    return expected.issubset(values)
 
 
 def _boot_id(deadline_ns: int | None = None) -> str:
@@ -675,27 +854,51 @@ def _boot_id(deadline_ns: int | None = None) -> str:
 
 def _record_attestation(context: dict[str, Any], observation: dict[str, Any],
                         deadline_ns: int, boot_id: str) -> None:
+    _check_deadline(deadline_ns)
     snapshot_path = _scope(context) / "snapshot.json"
     _safe_regular(snapshot_path)
-    snapshot = parse_bounded_json(snapshot_path.read_bytes())
+    _check_deadline(deadline_ns)
+    snapshot_bytes = snapshot_path.read_bytes()
+    _check_deadline(deadline_ns)
+    snapshot = parse_bounded_json(snapshot_bytes)
+    _check_deadline(deadline_ns)
     if type(snapshot) is not dict or snapshot.get("generation") != context["generation"]:
         raise AdapterError("readback_failure")
     snapshot["attestation"] = {
         "boot_id": boot_id, "deadline_ns": deadline_ns, "observation": observation,
     }
-    _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
+    try:
+        _atomic_write(
+            snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600,
+            deadline_ns=deadline_ns,
+        )
+    except Exception:
+        try:
+            _atomic_write(snapshot_path, snapshot_bytes, 0o600)
+        except Exception as rollback_error:
+            raise AdapterError("rollback") from rollback_error
+        raise
+    _check_deadline(deadline_ns)
 
 
 def _attestation(context: dict[str, Any]) -> dict[str, Any]:
+    deadline_ns = context.get("deadline_ns")
+    if type(deadline_ns) is not int:
+        raise AdapterError("invalid_context")
+    _check_deadline(deadline_ns)
     snapshot_path = _scope(context) / "snapshot.json"
     _safe_regular(snapshot_path)
-    snapshot = parse_bounded_json(snapshot_path.read_bytes())
+    _check_deadline(deadline_ns)
+    snapshot_bytes = snapshot_path.read_bytes()
+    _check_deadline(deadline_ns)
+    snapshot = parse_bounded_json(snapshot_bytes)
+    _check_deadline(deadline_ns)
     if type(snapshot) is not dict or snapshot.get("generation") != context["generation"]:
         raise AdapterError("readback_failure")
     attestation = snapshot.get("attestation")
-    deadline_ns = attestation.get("deadline_ns") if type(attestation) is dict else None
+    recorded_deadline_ns = attestation.get("deadline_ns") if type(attestation) is dict else None
     if (type(attestation) is not dict or set(attestation) != {"boot_id", "deadline_ns", "observation"}
-            or type(deadline_ns) is not int):
+            or recorded_deadline_ns != deadline_ns):
         raise AdapterError("readback_failure")
     current_boot_id = _boot_id(deadline_ns)
     _check_deadline(deadline_ns)
@@ -891,8 +1094,37 @@ def _wait_for_source(context: dict[str, Any], gateway: ProcessIdentity,
         _bounded_sleep(deadline_ns)
 
 
-def _restart(context: dict[str, Any]) -> dict[str, Any]:
-    deadline_ns = time.monotonic_ns() + ATTEST_BUDGET_NS
+def _run_canary(context: dict[str, Any], event_id: str, token: str, deadline_ns: int) -> None:
+    marker = f"SKYNET_EDR_ATTEST_V1 {event_id} {token}"
+    expected_ack = f"SKYNET_EDR_ATTEST_ACK_V1 {event_id}\n".encode("ascii")
+    prompt = (
+        f"{marker}\n"
+        f"Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text."
+    )
+    output = _run(
+        [str(HERMES), "chat", "--max-turns", "1", "--toolsets", "none", "-q", prompt],
+        env=_minimal_env(context), target=context, deadline_ns=deadline_ns,
+    )
+    if output != expected_ack:
+        raise AdapterError("hook_failure")
+
+
+def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
+    deadline_ns = context.get("deadline_ns")
+    if type(deadline_ns) is not int:
+        deadline_ns = time.monotonic_ns() + ATTEST_BUDGET_NS
+    event_id = context.get("canary_event_id")
+    token = context.get("attestation_token")
+    if type(event_id) is not str or CANARY_EVENT_ID.fullmatch(event_id) is None or type(token) is not str:
+        raise AdapterError("invalid_context")
+    _check_deadline(deadline_ns)
+    _atomic_write(
+        DROPIN,
+        render_dropin([UNIT], context["generation"], context["home"], context["profile"], token).encode("ascii"),
+        0o644,
+        deadline_ns=deadline_ns,
+    )
+    _check_deadline(deadline_ns)
     manager_unit = f"user@{context['uid']}.service"
     units = (manager_unit, UNIT, DAEMON_UNIT)
     before = {unit: _service_identity(context, unit, deadline_ns) for unit in units}
@@ -930,12 +1162,10 @@ def _restart(context: dict[str, Any]) -> dict[str, Any]:
     ingestion = status.get("ingestion", {})
     if (ingestion.get("listener_live") is not True or ingestion.get("state") != "healthy"):
         raise AdapterError("producer_health")
-    _run([str(HERMES), "chat", "--max-turns", "1", "--toolsets", "none", "-q",
-          "Enrollment health check: reply exactly OK and perform no tool calls."],
-         env=_minimal_env(context), target=context, deadline_ns=deadline_ns)
+    _run_canary(context, event_id, token, deadline_ns)
     while True:
         status, source = _wait_for_source(context, after[UNIT], deadline_ns)
-        if _persisted_advanced(baseline, source):
+        if _persisted_advanced(baseline, source, event_id):
             break
         if (source.get("events_duplicate_total") != baseline.get("events_duplicate_total")
                 or source.get("events_collision_total") != baseline.get("events_collision_total")
@@ -955,7 +1185,7 @@ def _restart(context: dict[str, Any]) -> dict[str, Any]:
         raise AdapterError("readback_failure")
     final_source = _exact_source(final_ingestion, context, final[UNIT])
     if (_source_identity(final_source) != _source_identity(source)
-            or not _persisted_advanced(baseline, final_source)):
+            or not _persisted_advanced(baseline, final_source, event_id)):
         raise AdapterError("source_identity")
     if {unit: _service_identity(context, unit, deadline_ns) for unit in units} != final:
         raise AdapterError("identity_epoch")
@@ -969,27 +1199,35 @@ def _restart(context: dict[str, Any]) -> dict[str, Any]:
         "producer": {"uid": context["uid"], "role": "gateway", "fresh": True,
                      "generation": context["generation"],
                      "runtime_nonce": source["runtime_instance_nonce"]},
-        "real_hook": {"correlated": True, "committed": True, "incident_opened": False},
+        "real_hook": {"correlated": True, "committed": True, "incident_opened": False,
+                      "event_id": event_id, "receipt_status": "persisted"},
         "restart_blast_radius": "complete_user_manager",
         "identities": {unit: [identity.main_pid, identity.proc_start_ticks,
                                 identity.exec_start_monotonic_us]
                        for unit, identity in final.items()},
         "commit_sequence": source["commit_sequence"],
     }
-    boot_id = _boot_id(deadline_ns)
-    _check_deadline(deadline_ns)
-    _record_attestation(context, observation, deadline_ns, boot_id)
     _check_deadline(deadline_ns)
     return observation
 
 
-def _hook(context: dict[str, Any]) -> dict[str, Any]:
-    observation = _attestation(context)
-    if (observation.get("loaded_generation") != context["generation"]
-            or observation.get("process_fresh") is not True
-            or observation.get("real_hook") != {
-                "correlated": True, "committed": True, "incident_opened": False}):
-        raise AdapterError("hook_failure")
+def _restart(context: dict[str, Any]) -> dict[str, Any]:
+    deadline_ns = context.get("deadline_ns")
+    token_free_dropin = render_dropin(
+        [UNIT], context["generation"], context["home"], context["profile"]
+    ).encode("ascii")
+    try:
+        observation = _restart_attestation(context)
+    except Exception:
+        _atomic_write(DROPIN, token_free_dropin, 0o644)
+        raise
+    if type(deadline_ns) is not int:
+        raise AdapterError("invalid_context")
+    _atomic_write(DROPIN, token_free_dropin, 0o644, deadline_ns=deadline_ns)
+    boot_id = _boot_id(deadline_ns)
+    _check_deadline(deadline_ns)
+    _record_attestation(context, observation, deadline_ns, boot_id)
+    _check_deadline(deadline_ns)
     return observation
 
 
@@ -1007,12 +1245,11 @@ def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
             raise AdapterError("readback_failure")
         return {"plugin_enabled": enabled, "loaded_generation": context["generation"] if enabled else None,
                 "process_fresh": False}
-    if action == "restart":
+    if action == "attest":
         _safe_regular(SYSTEMCTL)
         _safe_regular(HERMES)
         return _restart(context)
-    _safe_regular(HERMES)
-    return _hook(context)
+    raise AdapterError("invalid_action")
 
 
 def emit(value: dict[str, Any], *, ok: bool) -> int:
@@ -1026,7 +1263,15 @@ def emit(value: dict[str, Any], *, ok: bool) -> int:
 def main() -> int:
     action = sys.argv[1] if len(sys.argv) == 2 else ""
     try:
-        context = validate_context(action, dict(os.environ))
+        environment = dict(os.environ)
+        if action == "attest":
+            raw_deadline = environment.get("SKYNET_EDR_DEADLINE_NS", "")
+            if not raw_deadline.isascii() or not raw_deadline.isdigit():
+                raise AdapterError("invalid_context")
+            with _deadline_watchdog(int(raw_deadline)):
+                context = validate_context(action, environment)
+                return emit(execute(action, context), ok=True)
+        context = validate_context(action, environment)
         return emit(execute(action, context), ok=True)
     except Exception:
         return emit({}, ok=False)

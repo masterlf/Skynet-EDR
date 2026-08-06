@@ -1788,6 +1788,45 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(event["attributes"]["message_count"], 1)
         self.assertEqual(event["provenance"]["trace_id"], "hermes-local-test-session")
 
+    def test_exact_attestation_marker_emits_one_dedicated_event_with_fixed_id(self):
+        token = "a" * 64
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        os.environ["SKYNET_EDR_ATTESTATION_TOKEN"] = token
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        prompt = (
+            f"SKYNET_EDR_ATTEST_V1 {event_id} {token}\n"
+            f"Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text."
+        )
+        with patch.object(self.plugin, "_write_event") as write:
+            ctx.hooks["pre_llm_call"]([{"role": "user", "content": prompt}])
+        write.assert_called_once()
+        self.assertEqual(write.call_args.kwargs["event_id"], event_id)
+        self.assertEqual(write.call_args.kwargs["event_type"], "agent.llm.call.requested")
+        self.assertNotIn(token, json.dumps(write.call_args.kwargs))
+
+    def test_near_attestation_markers_use_normal_hook_without_fixed_event_id(self):
+        token = "a" * 64
+        os.environ["SKYNET_EDR_ATTESTATION_TOKEN"] = token
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        cases = [
+            f"SKYNET_EDR_ATTEST_V1 {event_id} {token}",
+            f"SKYNET_EDR_ATTEST_V1 evt_skynet_attest_{'0' * 64} {token}",
+            f" SKYNET_EDR_ATTEST_V1 evt_skynet_attest_{'0' * 64} {token}",
+            f"SKYNET_EDR_ATTEST_V1 evt_skynet_attest_{'0' * 64} {'b' * 64}",
+        ]
+        for marker in cases:
+            with self.subTest(marker=marker), patch.object(self.plugin, "_write_event") as write:
+                ctx.hooks["pre_llm_call"]([{"role": "user", "content": marker}])
+                self.assertEqual(write.call_count, 1)
+                self.assertNotIn("event_id", write.call_args.kwargs)
+
     def test_exact_dict_hostile_string_keys_are_bounded_and_opaque(self):
         touched = []
 
