@@ -356,6 +356,78 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             ):
                 self.assertFalse(self.module._gateway_context_matches(context))
 
+    def test_manager_environment_import_uses_exact_names_without_values_in_argv(self):
+        token = "d" * 64
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64, "attestation_token": token}
+        with mock.patch.object(self.module, "_run", return_value=b"") as run:
+            self.module._import_manager_environment(context, 1234)
+        expected_names = (
+            "HERMES_HOME", "HERMES_PROFILE", "HERMES_RUNTIME_ROLE", "PYTHONDONTWRITEBYTECODE",
+            "SKYNET_EDR_PLUGIN_GENERATION", "SKYNET_EDR_ATTESTATION_TOKEN",
+        )
+        argv = run.call_args.args[0]
+        self.assertEqual(argv, [str(self.module.SYSTEMCTL), "--user", "import-environment", *expected_names])
+        self.assertFalse(any(token in argument or "=" in argument for argument in argv))
+        self.assertEqual(run.call_args.kwargs["deadline_ns"], 1234)
+        self.assertIs(run.call_args.kwargs["target"], context)
+        self.assertEqual(
+            {name: run.call_args.kwargs["env"][name] for name in expected_names},
+            {"HERMES_HOME": "/home/alice/.hermes", "HERMES_PROFILE": "default",
+             "HERMES_RUNTIME_ROLE": "gateway", "PYTHONDONTWRITEBYTECODE": "1",
+             "SKYNET_EDR_PLUGIN_GENERATION": "b" * 64,
+             "SKYNET_EDR_ATTESTATION_TOKEN": token},
+        )
+
+    def test_manager_environment_cleanup_unsets_restarts_and_rejects_residue(self):
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64}
+        names = list(self.module.MANAGED_MANAGER_ENVIRONMENT)
+        with mock.patch.object(self.module, "_run", side_effect=[b"", b"", b"", b"OTHER=value\n"]) as run:
+            self.module._clear_manager_environment(context)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            [str(self.module.SYSTEMCTL), "--user", "unset-environment", *names],
+            [str(self.module.SYSTEMCTL), "--user", "restart", self.module.UNIT],
+            [str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT],
+            [str(self.module.SYSTEMCTL), "--user", "show-environment"],
+        ])
+        with mock.patch.object(
+            self.module, "_run", side_effect=[b"", b"", b"", b"HERMES_PROFILE=hostile\n"]
+        ):
+            with self.assertRaisesRegex(self.module.AdapterError, "rollback"):
+                self.module._clear_manager_environment(context)
+
+    def test_manager_environment_command_failures_fail_closed(self):
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64, "attestation_token": "d" * 64}
+        with mock.patch.object(self.module, "_run", side_effect=self.module.AdapterError("command_failure")):
+            with self.assertRaisesRegex(self.module.AdapterError, "command_failure"):
+                self.module._import_manager_environment(context, 1234)
+        for successful_calls in range(4):
+            side_effect = [b""] * successful_calls + [self.module.AdapterError("command_failure")]
+            with self.subTest(successful_calls=successful_calls), \
+                    mock.patch.object(self.module, "_run", side_effect=side_effect):
+                with self.assertRaisesRegex(self.module.AdapterError, "rollback"):
+                    self.module._clear_manager_environment(context)
+
+    def test_manager_attestation_token_cleanup_unsets_only_token_without_restart(self):
+        token = "d" * 64
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64, "attestation_token": token}
+        with mock.patch.object(self.module, "_run", side_effect=[b"", b"OTHER=value\n"]) as run:
+            self.module._clear_manager_attestation_token(context, 1234)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            [str(self.module.SYSTEMCTL), "--user", "unset-environment",
+             "SKYNET_EDR_ATTESTATION_TOKEN"],
+            [str(self.module.SYSTEMCTL), "--user", "show-environment"],
+        ])
+        self.assertTrue(all(call.kwargs["deadline_ns"] == 1234 for call in run.call_args_list))
+        with mock.patch.object(
+            self.module, "_run", side_effect=[b"", b"SKYNET_EDR_ATTESTATION_TOKEN=stale\n"]
+        ):
+            with self.assertRaisesRegex(self.module.AdapterError, "readback_failure"):
+                self.module._clear_manager_attestation_token(context, 1234)
+
     def _v3_source(self, **changes):
         source = {
             "source_id": "uid:1000:gateway:" + "b" * 64 + ":" + "a" * 64,
@@ -960,6 +1032,20 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                       [call.args[0] for call in run.call_args_list])
         self.assertIn([str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT],
                       [call.args[0] for call in run.call_args_list])
+        systemctl_calls = [call for call in run.call_args_list if call.args[0][0] == str(self.module.SYSTEMCTL)]
+        self.assertEqual([call.args[0] for call in systemctl_calls[:4]], [
+            [str(self.module.SYSTEMCTL), "restart", "user@1000.service"],
+            [str(self.module.SYSTEMCTL), "--user", "import-environment",
+             *self.module.MANAGED_MANAGER_ENVIRONMENT],
+            [str(self.module.SYSTEMCTL), "--user", "restart", self.module.UNIT],
+            [str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT],
+        ])
+        self.assertEqual([call.args[0] for call in systemctl_calls[-2:]], [
+            [str(self.module.SYSTEMCTL), "--user", "unset-environment",
+             "SKYNET_EDR_ATTESTATION_TOKEN"],
+            [str(self.module.SYSTEMCTL), "--user", "show-environment"],
+        ])
+        self.assertTrue(all(call.kwargs["deadline_ns"] == 15_000_001_000 for call in run.call_args_list))
         record.assert_called_once_with(
             context, observation, 15_000_001_000, "00000000-0000-0000-0000-000000000000"
         )
@@ -984,13 +1070,15 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                    ).hexdigest()}
         with (mock.patch.object(self.module, "_restart_attestation",
                                 side_effect=self.module.AdapterError("deadline")),
-              mock.patch.object(self.module, "_atomic_write") as atomic_write):
+              mock.patch.object(self.module, "_atomic_write") as atomic_write,
+              mock.patch.object(self.module, "_clear_manager_environment") as clear_environment):
             with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
                 self.module._restart(context)
         expected_dropin = self.module.render_dropin(
             [self.module.UNIT], context["generation"], context["home"], context["profile"]
         ).encode("ascii")
         atomic_write.assert_called_once_with(self.module.DROPIN, expected_dropin, 0o644)
+        clear_environment.assert_called_once_with(context)
 
     def test_expired_inner_dropin_cleanup_relies_on_outer_snapshot_rollback_evidence(self):
         dropin = self.base / "50-skynet-edr.conf"
@@ -1007,8 +1095,9 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 mock.patch.object(self.module, "_restart_attestation",
                                   side_effect=self.module.AdapterError("hook_failure")), \
                 mock.patch.object(self.module, "_atomic_write",
-                                  side_effect=self.module.AdapterError("deadline")):
-            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+                                  side_effect=self.module.AdapterError("deadline")), \
+                mock.patch.object(self.module, "_clear_manager_environment"):
+            with self.assertRaisesRegex(self.module.AdapterError, "rollback"):
                 self.module._restart(context)
         self.assertEqual(dropin.read_text(encoding="ascii"), tokenized)
 

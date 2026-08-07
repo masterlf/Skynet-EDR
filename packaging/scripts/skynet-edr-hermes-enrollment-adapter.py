@@ -40,6 +40,14 @@ GPASSWD = Path("/usr/bin/gpasswd")
 GROUP = "skynet-edr-ingest"
 UNIT = "hermes-gateway.service"
 DAEMON_UNIT = "skynet-edr.service"
+MANAGED_MANAGER_ENVIRONMENT = (
+    "HERMES_HOME",
+    "HERMES_PROFILE",
+    "HERMES_RUNTIME_ROLE",
+    "PYTHONDONTWRITEBYTECODE",
+    "SKYNET_EDR_PLUGIN_GENERATION",
+    "SKYNET_EDR_ATTESTATION_TOKEN",
+)
 MAX_OUTPUT = 65_536
 ATTEST_BUDGET_NS = 15_000_000_000
 POLL_SECONDS = 0.2
@@ -577,6 +585,78 @@ def _minimal_env(context: dict[str, Any]) -> dict[str, str]:
     if context.get("attestation_token") is not None:
         environment["SKYNET_EDR_ATTESTATION_TOKEN"] = context["attestation_token"]
     return environment
+
+
+def _import_manager_environment(context: dict[str, Any], deadline_ns: int) -> None:
+    environment = _minimal_env(context)
+    environment.update({
+        "HERMES_RUNTIME_ROLE": "gateway",
+        "SKYNET_EDR_PLUGIN_GENERATION": context["generation"],
+    })
+    if set(MANAGED_MANAGER_ENVIRONMENT) - environment.keys():
+        raise AdapterError("invalid_context")
+    _run(
+        [str(SYSTEMCTL), "--user", "import-environment", *MANAGED_MANAGER_ENVIRONMENT],
+        env=environment,
+        target=context,
+        deadline_ns=deadline_ns,
+    )
+
+
+def _clear_manager_environment(context: dict[str, Any]) -> None:
+    environment = _minimal_env(context)
+    try:
+        _run(
+            [str(SYSTEMCTL), "--user", "unset-environment", *MANAGED_MANAGER_ENVIRONMENT],
+            env=environment,
+            target=context,
+        )
+        _run([str(SYSTEMCTL), "--user", "restart", UNIT], env=environment, target=context)
+        _run(
+            [str(SYSTEMCTL), "restart", DAEMON_UNIT],
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        )
+        shown = _run(
+            [str(SYSTEMCTL), "--user", "show-environment"],
+            env=environment,
+            target=context,
+        )
+        names: set[str] = set()
+        for line in shown.splitlines():
+            try:
+                name, _value = line.decode("utf-8").split("=", 1)
+            except (UnicodeError, ValueError) as exc:
+                raise AdapterError("rollback") from exc
+            names.add(name)
+        if names.intersection(MANAGED_MANAGER_ENVIRONMENT):
+            raise AdapterError("rollback")
+    except AdapterError as exc:
+        if exc.category == "rollback":
+            raise
+        raise AdapterError("rollback") from exc
+
+
+def _clear_manager_attestation_token(context: dict[str, Any], deadline_ns: int) -> None:
+    environment = _minimal_env(context)
+    _run(
+        [str(SYSTEMCTL), "--user", "unset-environment", "SKYNET_EDR_ATTESTATION_TOKEN"],
+        env=environment,
+        target=context,
+        deadline_ns=deadline_ns,
+    )
+    shown = _run(
+        [str(SYSTEMCTL), "--user", "show-environment"],
+        env=environment,
+        target=context,
+        deadline_ns=deadline_ns,
+    )
+    for line in shown.splitlines():
+        try:
+            name, _value = line.decode("utf-8").split("=", 1)
+        except (UnicodeError, ValueError) as exc:
+            raise AdapterError("readback_failure") from exc
+        if name == "SKYNET_EDR_ATTESTATION_TOKEN":
+            raise AdapterError("readback_failure")
 
 
 def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> bool:
@@ -1148,6 +1228,7 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
         if _plugin_enabled(context) is not snapshot["plugin_enabled"]:
             raise AdapterError("rollback")
     _run([str(SYSTEMCTL), "--user", "daemon-reload"], env=_minimal_env(context), target=context)
+    _clear_manager_environment(context)
     if other_scopes:
         _write_managed()
     else:
@@ -1223,6 +1304,9 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
     )
     _run([str(SYSTEMCTL), "restart", manager_unit],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
+    _import_manager_environment(context, deadline_ns)
+    _run([str(SYSTEMCTL), "--user", "restart", UNIT],
+         env=_minimal_env(context), target=context, deadline_ns=deadline_ns)
     _run([str(SYSTEMCTL), "restart", DAEMON_UNIT],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
     after = {unit: _service_identity(context, unit, deadline_ns) for unit in units}
@@ -1308,17 +1392,28 @@ def _restart(context: dict[str, Any]) -> dict[str, Any]:
     ).encode("ascii")
     try:
         observation = _restart_attestation(context)
+        if type(deadline_ns) is not int:
+            raise AdapterError("invalid_context")
+        _clear_manager_attestation_token(context, deadline_ns)
+        _atomic_write(DROPIN, token_free_dropin, 0o644, deadline_ns=deadline_ns)
+        boot_id = _boot_id(deadline_ns)
+        _check_deadline(deadline_ns)
+        _record_attestation(context, observation, deadline_ns, boot_id)
+        _check_deadline(deadline_ns)
+        return observation
     except Exception:
-        _atomic_write(DROPIN, token_free_dropin, 0o644)
+        cleanup_error: Exception | None = None
+        try:
+            _atomic_write(DROPIN, token_free_dropin, 0o644)
+        except Exception as exc:
+            cleanup_error = exc
+        try:
+            _clear_manager_environment(context)
+        except Exception as exc:
+            cleanup_error = exc
+        if cleanup_error is not None:
+            raise AdapterError("rollback") from cleanup_error
         raise
-    if type(deadline_ns) is not int:
-        raise AdapterError("invalid_context")
-    _atomic_write(DROPIN, token_free_dropin, 0o644, deadline_ns=deadline_ns)
-    boot_id = _boot_id(deadline_ns)
-    _check_deadline(deadline_ns)
-    _record_attestation(context, observation, deadline_ns, boot_id)
-    _check_deadline(deadline_ns)
-    return observation
 
 
 def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
