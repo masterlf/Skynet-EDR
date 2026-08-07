@@ -60,7 +60,7 @@ function canonicalDetail(id = 'risk-1') {
 const canonicalStatus = {
   product: 'Skynet-EDR',
   binary: 'skynet-edr',
-  version: '0.4.1',
+  version: '0.5.0',
   run_mode: 'passive',
   server: 'skynet-edr-mcp',
   read_only: true,
@@ -997,7 +997,7 @@ test('header uses semantic host badge tones for engine and mode status', async (
   assert.equal(findNode(checkingTree, (node) => textOf(node) === 'Mode unavailable', 'checking mode indicator').props.tone, 'outline');
   await harness.flushEffects();
   const tree = harness.render();
-  assert.match(textOf(tree), /EDR 0\.4\.1/);
+  assert.match(textOf(tree), /EDR 0\.5\.0/);
   const online = findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator');
   assert.equal(online.props.tone, 'success');
   assert.equal(online.props.className, undefined);
@@ -1105,7 +1105,7 @@ test('a failed latest status poll marks the engine offline while telemetry data 
   assert.equal(offline.props.style.backgroundColor, 'transparent');
   assert.match(textOf(tree), /EDR version unavailable/);
   assert.match(textOf(tree), /Mode unavailable/);
-  assert.doesNotMatch(textOf(tree), /EDR 0\.4\.1|Passive mode/);
+  assert.doesNotMatch(textOf(tree), /EDR 0\.5\.0|Passive mode/);
   assert.match(textOf(tree), /Telemetry disabled/);
   assert.doesNotMatch(textOf(tree), /private failure/);
 });

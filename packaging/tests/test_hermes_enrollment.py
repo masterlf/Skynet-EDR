@@ -38,10 +38,10 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.source = self.base / "payload"
         self.source.mkdir()
         files = {
-            "plugin.yaml": b'name: skynet-edr\nversion: "0.4.1"\n',
-            "__init__.py": b'PLUGIN_VERSION = "0.4.1"\n',
+            "plugin.yaml": b'name: skynet-edr\nversion: "0.5.0"\n',
+            "__init__.py": b'PLUGIN_VERSION = "0.5.0"\n',
             "README.md": b"safe\n",
-            "dashboard/manifest.json": b'{"version":"0.4.1"}\n',
+            "dashboard/manifest.json": b'{"version":"0.5.0"}\n',
             "dashboard/plugin.js": b"safe\n",
             "dashboard/plugin_api.py": b"safe\n",
             "desktop/plugin.js": b"safe\n",
@@ -67,7 +67,7 @@ class HermesEnrollmentTests(unittest.TestCase):
             "profile": "fixture-profile",
             "host": {"id": "ubuntu", "version": "24.04", "arch": "x86_64", "init": "systemd"},
             "hermes_version": "0.19.0",
-            "payload_version": "0.4.1",
+            "payload_version": "0.5.0",
             "manifest": self.manifest,
             "fixture": True,
             "socket": {"dac": True, "uid_authorized": True},
@@ -124,7 +124,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         package_manifest = self.base / "manifest.json"
         package_manifest.write_text(json.dumps({
             "schema": 1,
-            "payload_version": "0.4.1",
+            "payload_version": "0.5.0",
             "generation": self.request["manifest_sha256"],
             "files": self.manifest,
         }), encoding="utf-8")
@@ -161,7 +161,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         package_manifest = self.base / "manifest.json"
         package_manifest.write_text(json.dumps({
             "schema": 1,
-            "payload_version": "0.4.1",
+            "payload_version": "0.5.0",
             "generation": self.request["manifest_sha256"],
             "files": self.manifest,
         }), encoding="utf-8")

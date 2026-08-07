@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-06
+
+- Added fail-closed, transactional Hermes 0.19.0 enrollment for the exact Ubuntu 24.04 amd64/systemd/default-profile compatibility cell, including package-owned payload validation and exact producer attestation.
+- Added private root-owned enrollment state, non-destructive quarantine, durable manual-recovery evidence, and fail-closed drift handling without automatic purge.
+- Bound successful enrollment to fresh process identities, protocol-v3 producer health, independent runtime nonces, and an exact persisted harmless canary receipt.
+- Documented the account-wide systemd user-manager restart blast radius, the S3 trust boundary, and the mandatory exact-release-SHA disposable clean-host promotion gate.
+
 ## 0.4.1 - 2026-07-30
 
 - Hardened authenticated continuous ingestion with exact per-event projection, pseudonymized correlation identities, transactional bounded EXFIL/MALWARE correlation, trigger-anchored linear two-step sequence evaluation, and collision-safe acknowledgements.

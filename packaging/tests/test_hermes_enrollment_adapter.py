@@ -33,6 +33,162 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
 
+    @staticmethod
+    def _path_info(file_type, *, uid=0, nlink=1, mode=0o755):
+        return SimpleNamespace(st_mode=file_type | mode, st_uid=uid, st_nlink=nlink)
+
+    def test_fixed_hermes_launcher_accepts_direct_regular_and_root_symlink_chains(self):
+        regular = self._path_info(self.module.stat.S_IFREG)
+        symlink = self._path_info(self.module.stat.S_IFLNK)
+        directory = self._path_info(self.module.stat.S_IFDIR)
+        paths = {
+            Path("/usr"): directory,
+            Path("/usr/bin"): directory,
+            Path("/usr/bin/hermes"): regular,
+            Path("/opt"): directory,
+            Path("/opt/hermes"): directory,
+            Path("/opt/hermes/bin"): directory,
+            Path("/opt/hermes/bin/hermes"): regular,
+            Path("/srv"): directory,
+            Path("/srv/hermes"): directory,
+            Path("/srv/hermes/current"): symlink,
+        }
+
+        def lstat(path):
+            try:
+                return paths[Path(path)]
+            except KeyError as exc:
+                raise FileNotFoundError(path) from exc
+
+        with mock.patch.object(self.module.os, "lstat", side_effect=lstat), \
+                mock.patch.object(self.module.os, "readlink") as readlink:
+            self.assertEqual(
+                self.module._resolve_hermes_launcher(Path("/usr/bin/hermes")),
+                Path("/usr/bin/hermes"),
+            )
+            paths[Path("/usr/bin/hermes")] = symlink
+            readlink.side_effect = ["/opt/hermes/bin/hermes"]
+            self.assertEqual(
+                self.module._resolve_hermes_launcher(Path("/usr/bin/hermes")),
+                Path("/opt/hermes/bin/hermes"),
+            )
+            readlink.side_effect = ["/srv/hermes/current", "/opt/hermes/bin/hermes"]
+            self.assertEqual(
+                self.module._resolve_hermes_launcher(Path("/usr/bin/hermes")),
+                Path("/opt/hermes/bin/hermes"),
+            )
+
+    def test_fixed_hermes_launcher_rejects_untrusted_or_ambiguous_chains(self):
+        regular = self._path_info(self.module.stat.S_IFREG)
+        symlink = self._path_info(self.module.stat.S_IFLNK)
+        directory = self._path_info(self.module.stat.S_IFDIR)
+
+        def resolve(paths, links, entry=Path("/usr/bin/hermes")):
+            def lstat(path):
+                try:
+                    return paths[Path(path)]
+                except KeyError as exc:
+                    raise FileNotFoundError(path) from exc
+
+            with mock.patch.object(self.module.os, "lstat", side_effect=lstat), \
+                    mock.patch.object(self.module.os, "readlink", side_effect=lambda path: links[Path(path)]):
+                return self.module._resolve_hermes_launcher(entry)
+
+        trusted = {Path("/usr"): directory, Path("/usr/bin"): directory}
+        final = Path("/opt/hermes/bin/hermes")
+        final_parents = {
+            Path("/opt"): directory,
+            Path("/opt/hermes"): directory,
+            Path("/opt/hermes/bin"): directory,
+        }
+        cases = {
+            "relative_escape": (
+                trusted | {Path("/usr/bin/hermes"): symlink},
+                {Path("/usr/bin/hermes"): "../lib/hermes"},
+            ),
+            "cycle": (
+                trusted | {Path("/usr/bin/hermes"): symlink, Path("/opt"): directory,
+                           Path("/opt/hermes"): symlink},
+                {Path("/usr/bin/hermes"): "/opt/hermes", Path("/opt/hermes"): "/usr/bin/hermes"},
+            ),
+            "non_root_symlink": (
+                trusted | {Path("/usr/bin/hermes"): self._path_info(self.module.stat.S_IFLNK, uid=1000)},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "multiply_linked_symlink": (
+                trusted | {Path("/usr/bin/hermes"): self._path_info(self.module.stat.S_IFLNK, nlink=2)},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "writable_parent": (
+                trusted | {Path("/usr/bin/hermes"): symlink, Path("/opt"): directory,
+                           Path("/opt/hermes"): self._path_info(self.module.stat.S_IFDIR, mode=0o775),
+                           Path("/opt/hermes/bin"): directory, final: regular},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "writable_final": (
+                trusted | final_parents | {Path("/usr/bin/hermes"): symlink,
+                                           final: self._path_info(self.module.stat.S_IFREG, mode=0o775)},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "non_root_final": (
+                trusted | final_parents | {Path("/usr/bin/hermes"): symlink,
+                                           final: self._path_info(self.module.stat.S_IFREG, uid=1000)},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "multiply_linked_final": (
+                trusted | final_parents | {Path("/usr/bin/hermes"): symlink,
+                                           final: self._path_info(self.module.stat.S_IFREG, nlink=2)},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "non_regular_final": (
+                trusted | final_parents | {Path("/usr/bin/hermes"): symlink, final: directory},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "non_executable_final": (
+                trusted | final_parents | {Path("/usr/bin/hermes"): symlink,
+                                           final: self._path_info(self.module.stat.S_IFREG, mode=0o644)},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "missing_target": (
+                trusted | final_parents | {Path("/usr/bin/hermes"): symlink},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+            "missing_parent": (
+                trusted | {Path("/usr/bin/hermes"): symlink, final: regular},
+                {Path("/usr/bin/hermes"): str(final)},
+            ),
+        }
+        for name, (paths, links) in cases.items():
+            with self.subTest(name=name), self.assertRaises(self.module.AdapterError):
+                resolve(paths, links)
+
+        chain = {Path("/usr/bin/hermes"): symlink}
+        links = {}
+        parents = dict(trusted)
+        current = Path("/usr/bin/hermes")
+        for index in range(9):
+            target = Path(f"/opt/h{index}")
+            links[current] = str(target)
+            chain[target] = symlink
+            parents[Path("/opt")] = directory
+            current = target
+        with self.assertRaises(self.module.AdapterError):
+            resolve(parents | chain, links)
+
+        with self.assertRaises(self.module.AdapterError):
+            resolve({}, {}, Path("usr/bin/hermes"))
+
+    def test_execute_uses_resolved_hermes_target_for_mutation_and_readback(self):
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64}
+        resolved = Path("/opt/hermes/bin/hermes")
+        payloads = [b"", json.dumps([{"name": "skynet-edr", "status": "enabled"}]).encode()]
+        with mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=resolved), \
+                mock.patch.object(self.module, "_run", side_effect=payloads) as run:
+            result = self.module.execute("enable", context)
+        self.assertTrue(result["plugin_enabled"])
+        self.assertEqual([call.args[0][0] for call in run.call_args_list], [str(resolved), str(resolved)])
+
     def test_privileged_actions_require_root_and_target_never_allows_uid_zero(self):
         env = {
             "SKYNET_EDR_TARGET_UID": "1000",
@@ -401,6 +557,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             encoding="ascii",
         )
         fake_hermes.chmod(0o755)
+        context["_hermes_launcher"] = fake_hermes
         with mock.patch.object(self.module, "HERMES", fake_hermes):
             self.module._run_canary(
                 context, event_id, token, self.module.time.monotonic_ns() + 1_000_000_000
@@ -580,7 +737,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
                    "generation": "b" * 64, "ingest_gid": 987,
                    "deadline_ns": 15_000_001_000, "attestation_token": token,
-                   "canary_event_id": event_id}
+                   "canary_event_id": event_id, "_hermes_launcher": self.module.HERMES}
         identities = [
             self.module.ProcessIdentity(11, 101, 1001), self.module.ProcessIdentity(21, 201, 2001),
             self.module.ProcessIdentity(31, 301, 3001), self.module.ProcessIdentity(12, 102, 1002),
@@ -718,7 +875,8 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             self.assertEqual(error.exception.category, "identity_epoch")
 
     def test_real_hermes_019_plugin_status_is_parsed_strictly(self):
-        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "work"}
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "work",
+                   "_hermes_launcher": self.module.HERMES}
         cases = (("enabled", True), ("not enabled", False))
         for status, expected in cases:
             payload = json.dumps([{"name": "skynet-edr", "status": status, "version": "0.4.1"}]).encode()

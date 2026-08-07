@@ -155,7 +155,7 @@ def validate_request(request: dict[str, Any], source: Path) -> tuple[int, Path, 
         raise EnrollmentError("unsupported_contract")
     if request.get("host") != SUPPORTED_HOST or request.get("hermes_version") not in SUPPORTED_HERMES:
         raise EnrollmentError("unsupported_contract")
-    if request.get("payload_version") != "0.4.1":
+    if request.get("payload_version") != "0.5.0":
         raise EnrollmentError("unsupported_contract")
     socket = request.get("socket")
     if not isinstance(socket, dict) or socket.get("dac") is not True or socket.get("uid_authorized") is not True:
@@ -181,7 +181,7 @@ def validate_request(request: dict[str, Any], source: Path) -> tuple[int, Path, 
                 or manifest_info.st_mode & 0o022):
             raise EnrollmentError("payload_identity")
         package_manifest = load_json(SYSTEM_MANIFEST, "payload_identity")
-        if package_manifest.get("schema") != 1 or package_manifest.get("payload_version") != "0.4.1":
+        if package_manifest.get("schema") != 1 or package_manifest.get("payload_version") != "0.5.0":
             raise EnrollmentError("payload_identity")
         manifest = package_manifest.get("files")
         expected_generation = package_manifest.get("generation")
@@ -246,7 +246,7 @@ def validate_tree(root: Path, manifest: dict[str, Any], *, installed_owner: int 
         dashboard = json.loads((root / "dashboard/manifest.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise EnrollmentError("payload_identity") from exc
-    if 'version: "0.4.1"' not in plugin_yaml or 'PLUGIN_VERSION = "0.4.1"' not in init_py or dashboard.get("version") != "0.4.1":
+    if 'version: "0.5.0"' not in plugin_yaml or 'PLUGIN_VERSION = "0.5.0"' not in init_py or dashboard.get("version") != "0.5.0":
         raise EnrollmentError("payload_identity")
 
 

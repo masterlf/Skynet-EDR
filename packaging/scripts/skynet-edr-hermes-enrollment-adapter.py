@@ -329,17 +329,70 @@ def _safe_regular(path: Path, *, may_be_absent: bool = False) -> None:
         raise AdapterError("untrusted_path")
 
 
-def _trusted_parent(path: Path) -> None:
+def _trusted_parent(path: Path, *, require_existing: bool = False) -> None:
     current = Path("/")
     for component in path.parent.parts[1:]:
         current /= component
         try:
             info = os.lstat(current)
         except FileNotFoundError:
+            if require_existing:
+                raise AdapterError("missing_prerequisite")
             break
         if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
                 or info.st_uid != 0 or info.st_mode & 0o022):
             raise AdapterError("untrusted_path")
+
+
+def _resolve_hermes_launcher(entry: Path) -> Path:
+    normalized_entry = Path(os.path.normpath(str(entry)))
+    if not entry.is_absolute() or normalized_entry != entry:
+        raise AdapterError("untrusted_path")
+    current = entry
+    visited: set[Path] = set()
+    symlink_count = 0
+    while True:
+        if current in visited:
+            raise AdapterError("untrusted_path")
+        visited.add(current)
+        _trusted_parent(current, require_existing=True)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError as exc:
+            raise AdapterError("missing_prerequisite") from exc
+        if stat.S_ISLNK(info.st_mode):
+            if info.st_uid != 0 or info.st_nlink != 1:
+                raise AdapterError("untrusted_path")
+            symlink_count += 1
+            if symlink_count > 8:
+                raise AdapterError("untrusted_path")
+            try:
+                raw_target = os.readlink(current)
+            except OSError as exc:
+                raise AdapterError("untrusted_path") from exc
+            target = Path(raw_target)
+            if not target.is_absolute():
+                if ".." in target.parts:
+                    raise AdapterError("untrusted_path")
+                target = current.parent / target
+            current = Path(os.path.normpath(str(target)))
+            if not current.is_absolute():
+                raise AdapterError("untrusted_path")
+            continue
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                or info.st_mode & 0o022 or not info.st_mode & 0o111):
+            raise AdapterError("untrusted_path")
+        return current
+
+
+def _hermes_launcher(context: dict[str, Any]) -> Path:
+    launcher = context.get("_hermes_launcher")
+    if launcher is None:
+        launcher = _resolve_hermes_launcher(HERMES)
+        context["_hermes_launcher"] = launcher
+    if not isinstance(launcher, Path):
+        raise AdapterError("untrusted_path")
+    return launcher
 
 
 def snapshot_files(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
@@ -511,7 +564,7 @@ def _minimal_env(context: dict[str, Any]) -> dict[str, str]:
 
 def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> bool:
     target = context if os.geteuid() == 0 else None
-    value = parse_bounded_json(_run([str(HERMES), "plugins", "list", "--json"],
+    value = parse_bounded_json(_run([str(_hermes_launcher(context)), "plugins", "list", "--json"],
                                     env=_minimal_env(context), target=target, deadline_ns=deadline_ns))
     if type(value) is dict:
         value = value.get("plugins")
@@ -915,7 +968,8 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
     _trusted_parent(DROPIN)
     _trusted_parent(STATE_ROOT)
     _safe_regular(CONFIG)
-    for command in (HERMES, SYSTEMCTL, USERMOD):
+    _hermes_launcher(context)
+    for command in (SYSTEMCTL, USERMOD):
         _safe_regular(command)
     try:
         group = grp.getgrnam(GROUP)
@@ -1050,7 +1104,7 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
     enabled = _plugin_enabled(context)
     if enabled is not snapshot["plugin_enabled"]:
         desired_action = "enable" if snapshot["plugin_enabled"] else "disable"
-        _run([str(HERMES), "plugins", desired_action, "skynet-edr"],
+        _run([str(_hermes_launcher(context)), "plugins", desired_action, "skynet-edr"],
              env=_minimal_env(context), target=context)
         if _plugin_enabled(context) is not snapshot["plugin_enabled"]:
             raise AdapterError("rollback")
@@ -1099,7 +1153,7 @@ def _run_canary(context: dict[str, Any], event_id: str, token: str, deadline_ns:
         f"Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text."
     )
     output = _run(
-        [str(HERMES), "chat", "--max-turns", "1", "--toolsets", "none", "-q", prompt],
+        [str(_hermes_launcher(context)), "chat", "--max-turns", "1", "--toolsets", "none", "-q", prompt],
         env=_minimal_env(context), target=context, deadline_ns=deadline_ns,
     )
     if output != expected_ack:
@@ -1229,14 +1283,14 @@ def _restart(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
+    context["_hermes_launcher"] = _resolve_hermes_launcher(HERMES)
     if action == "prepare":
         return prepare(context)
     if action == "rollback":
         return rollback(context)
     if action in {"enable", "disable"}:
-        _safe_regular(HERMES)
         desired = action == "enable"
-        _run([str(HERMES), "plugins", action, "skynet-edr"], env=_minimal_env(context))
+        _run([str(_hermes_launcher(context)), "plugins", action, "skynet-edr"], env=_minimal_env(context))
         enabled = _plugin_enabled(context)
         if enabled is not desired:
             raise AdapterError("readback_failure")
@@ -1244,7 +1298,6 @@ def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
                 "process_fresh": False}
     if action == "attest":
         _safe_regular(SYSTEMCTL)
-        _safe_regular(HERMES)
         return _restart(context)
     raise AdapterError("invalid_action")
 
