@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import socket
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -807,6 +808,68 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 self.module._bounded_sleep(15_000_000_000, 0.5)
         sleep.assert_called_once_with(0.1)
 
+    def test_wait_for_socket_ready_retries_missing_with_inherited_deadline(self):
+        ready = SimpleNamespace(st_mode=stat.S_IFSOCK | 0o660, st_gid=987)
+        with mock.patch.object(self.module.time, "monotonic_ns", return_value=0), mock.patch.object(
+            self.module.os, "lstat", side_effect=[FileNotFoundError(), FileNotFoundError(), ready]
+        ) as lstat, mock.patch.object(self.module, "_bounded_sleep") as sleep:
+            self.assertIs(self.module._wait_for_socket_ready(Path("/run/ingest.sock"), 987, 1234), True)
+        self.assertEqual(lstat.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(1234), mock.call(1234)])
+
+    def test_wait_for_socket_ready_accepts_exact_socket_without_sleep(self):
+        ready = SimpleNamespace(st_mode=stat.S_IFSOCK | 0o660, st_gid=987)
+        with mock.patch.object(self.module.time, "monotonic_ns", return_value=0), \
+                mock.patch.object(self.module.os, "lstat", return_value=ready), \
+                mock.patch.object(self.module, "_bounded_sleep") as sleep:
+            self.assertIs(self.module._wait_for_socket_ready(Path("/run/ingest.sock"), 987, 1234), True)
+        sleep.assert_not_called()
+
+    def test_wait_for_socket_ready_retries_socket_until_exact_dac_and_gid(self):
+        candidates = [
+            SimpleNamespace(st_mode=stat.S_IFSOCK | 0o600, st_gid=987),
+            SimpleNamespace(st_mode=stat.S_IFSOCK | 0o660, st_gid=986),
+            SimpleNamespace(st_mode=stat.S_IFSOCK | 0o660, st_gid=987),
+        ]
+        with mock.patch.object(self.module.time, "monotonic_ns", return_value=0), \
+                mock.patch.object(self.module.os, "lstat", side_effect=candidates), \
+                mock.patch.object(self.module, "_bounded_sleep") as sleep:
+            self.assertIs(self.module._wait_for_socket_ready(Path("/run/ingest.sock"), 987, 1234), True)
+        self.assertEqual(sleep.call_args_list, [mock.call(1234), mock.call(1234)])
+
+    def test_wait_for_socket_ready_persistent_missing_raises_deadline(self):
+        with mock.patch.object(self.module.time, "monotonic_ns", side_effect=[0, 0, 1234]), \
+                mock.patch.object(self.module.os, "lstat", side_effect=FileNotFoundError()), \
+                mock.patch.object(self.module.time, "sleep") as sleep:
+            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+                self.module._wait_for_socket_ready(Path("/run/ingest.sock"), 987, 1234)
+        sleep.assert_called_once_with(0.000001234)
+
+    def test_wait_for_socket_ready_rejects_non_socket_objects_without_sleep(self):
+        candidates = (
+            SimpleNamespace(st_mode=stat.S_IFREG | 0o660, st_gid=987),
+            SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_gid=987),
+            SimpleNamespace(st_mode=stat.S_IFDIR | 0o660, st_gid=987),
+        )
+        for candidate in candidates:
+            with self.subTest(mode=candidate.st_mode), \
+                    mock.patch.object(self.module.time, "monotonic_ns", return_value=0), \
+                    mock.patch.object(self.module.os, "lstat", return_value=candidate), \
+                    mock.patch.object(self.module, "_bounded_sleep") as sleep:
+                with self.assertRaisesRegex(self.module.AdapterError, "readback_failure"):
+                    self.module._wait_for_socket_ready(Path("/run/ingest.sock"), 987, 1234)
+            sleep.assert_not_called()
+
+    def test_wait_for_socket_ready_rejects_permission_and_other_os_errors_without_sleep(self):
+        for failure in (PermissionError(), OSError("io")):
+            with self.subTest(failure=type(failure)), \
+                    mock.patch.object(self.module.time, "monotonic_ns", return_value=0), \
+                    mock.patch.object(self.module.os, "lstat", side_effect=failure), \
+                    mock.patch.object(self.module, "_bounded_sleep") as sleep:
+                with self.assertRaisesRegex(self.module.AdapterError, "readback_failure"):
+                    self.module._wait_for_socket_ready(Path("/run/ingest.sock"), 987, 1234)
+            sleep.assert_not_called()
+
     def test_proc_reads_do_not_start_after_deadline_expires_during_open(self):
         for function in (self.module._proc_start_ticks, self.module._process_groups):
             with (self.subTest(function=function.__name__),
@@ -878,7 +941,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         with (mock.patch.object(self.module.time, "monotonic_ns", return_value=1_000),
               mock.patch.object(self.module, "_service_identity", side_effect=identity),
               mock.patch.object(self.module, "_old_identity_gone", return_value=True),
-              mock.patch.object(self.module.os, "lstat", return_value=SimpleNamespace(st_gid=987, st_mode=0o140660)),
+              mock.patch.object(self.module, "_wait_for_socket_ready", return_value=True) as socket_ready,
               mock.patch.object(self.module, "CONFIG", config),
               mock.patch.object(self.module, "_process_groups", return_value={987}),
               mock.patch.object(self.module, "_gateway_context_matches", return_value=True),
@@ -909,6 +972,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             status_readback.call_args_list,
             [mock.call(15_000_001_000, allow_disabled=True), mock.call(15_000_001_000)],
         )
+        socket_ready.assert_called_once_with(self.module.SOCKET, 987, 15_000_001_000)
 
     def test_attestation_dropin_is_restored_when_restart_fails(self):
         token = "d" * 64

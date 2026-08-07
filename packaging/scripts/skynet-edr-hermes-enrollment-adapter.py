@@ -528,6 +528,23 @@ def _bounded_sleep(deadline_ns: int, cap: float = POLL_SECONDS) -> None:
     _check_deadline(deadline_ns)
 
 
+def _wait_for_socket_ready(path: Path, expected_gid: int, deadline_ns: int) -> bool:
+    while True:
+        _check_deadline(deadline_ns)
+        try:
+            socket_info = os.lstat(path)
+        except FileNotFoundError:
+            _bounded_sleep(deadline_ns)
+            continue
+        except OSError as exc:
+            raise AdapterError("readback_failure") from exc
+        if not stat.S_ISSOCK(socket_info.st_mode):
+            raise AdapterError("readback_failure")
+        if stat.S_IMODE(socket_info.st_mode) == 0o660 and socket_info.st_gid == expected_gid:
+            return True
+        _bounded_sleep(deadline_ns)
+
+
 def _run(argv: list[str], *, env: dict[str, str], target: dict[str, Any] | None = None,
          deadline_ns: int | None = None, operation_cap: float = 30.0) -> bytes:
     def drop_identity() -> None:
@@ -1216,16 +1233,14 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
 
     _check_deadline(deadline_ns)
     try:
-        socket_info = os.lstat(SOCKET)
         config_text = CONFIG.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise AdapterError("readback_failure") from exc
     _check_deadline(deadline_ns)
     ingest = _toml_ingest(config_text)
     ingest_gid = context["ingest_gid"]
-    dac = (stat.S_ISSOCK(socket_info.st_mode) and stat.S_IMODE(socket_info.st_mode) == 0o660)
-    if (socket_info.st_gid != ingest_gid
-            or not authorization_ok(dac=dac, configured_uids=ingest["allowed_uids"], target_uid=context["uid"])
+    exact_dac = _wait_for_socket_ready(SOCKET, ingest_gid, deadline_ns)
+    if (not authorization_ok(dac=exact_dac, configured_uids=ingest["allowed_uids"], target_uid=context["uid"])
             or ingest_gid not in _process_groups(after[manager_unit].main_pid, deadline_ns)
             or ingest_gid not in _process_groups(after[UNIT].main_pid, deadline_ns)
             or not _gateway_context_matches(context, deadline_ns)):
