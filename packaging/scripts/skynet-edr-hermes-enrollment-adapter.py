@@ -50,6 +50,7 @@ MANAGED_MANAGER_ENVIRONMENT = (
 )
 MAX_OUTPUT = 65_536
 ATTEST_BUDGET_NS = 15_000_000_000
+CLEANUP_BUDGET_NS = 15_000_000_000
 POLL_SECONDS = 0.2
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 CANARY_EVENT_ID = re.compile(r"^evt_skynet_attest_[0-9a-f]{64}$")
@@ -603,23 +604,29 @@ def _import_manager_environment(context: dict[str, Any], deadline_ns: int) -> No
     )
 
 
-def _clear_manager_environment(context: dict[str, Any]) -> None:
+def _clear_manager_environment(context: dict[str, Any], deadline_ns: int | None = None) -> None:
+    if deadline_ns is None:
+        deadline_ns = time.monotonic_ns() + CLEANUP_BUDGET_NS
     environment = _minimal_env(context)
     try:
         _run(
             [str(SYSTEMCTL), "--user", "unset-environment", *MANAGED_MANAGER_ENVIRONMENT],
             env=environment,
             target=context,
+            deadline_ns=deadline_ns,
         )
-        _run([str(SYSTEMCTL), "--user", "restart", UNIT], env=environment, target=context)
+        _run([str(SYSTEMCTL), "--user", "restart", UNIT], env=environment, target=context,
+             deadline_ns=deadline_ns)
         _run(
             [str(SYSTEMCTL), "restart", DAEMON_UNIT],
             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+            deadline_ns=deadline_ns,
         )
         shown = _run(
             [str(SYSTEMCTL), "--user", "show-environment"],
             env=environment,
             target=context,
+            deadline_ns=deadline_ns,
         )
         names: set[str] = set()
         for line in shown.splitlines():
@@ -1390,30 +1397,34 @@ def _restart(context: dict[str, Any]) -> dict[str, Any]:
     token_free_dropin = render_dropin(
         [UNIT], context["generation"], context["home"], context["profile"]
     ).encode("ascii")
+    observation = _restart_attestation(context)
+    if type(deadline_ns) is not int:
+        raise AdapterError("invalid_context")
+    _clear_manager_attestation_token(context, deadline_ns)
+    _atomic_write(DROPIN, token_free_dropin, 0o644, deadline_ns=deadline_ns)
+    boot_id = _boot_id(deadline_ns)
+    _check_deadline(deadline_ns)
+    _record_attestation(context, observation, deadline_ns, boot_id)
+    _check_deadline(deadline_ns)
+    return observation
+
+
+def _cleanup_failed_attestation(context: dict[str, Any]) -> None:
+    deadline_ns = time.monotonic_ns() + CLEANUP_BUDGET_NS
+    token_free_dropin = render_dropin(
+        [UNIT], context["generation"], context["home"], context["profile"]
+    ).encode("ascii")
+    cleanup_error: Exception | None = None
     try:
-        observation = _restart_attestation(context)
-        if type(deadline_ns) is not int:
-            raise AdapterError("invalid_context")
-        _clear_manager_attestation_token(context, deadline_ns)
         _atomic_write(DROPIN, token_free_dropin, 0o644, deadline_ns=deadline_ns)
-        boot_id = _boot_id(deadline_ns)
-        _check_deadline(deadline_ns)
-        _record_attestation(context, observation, deadline_ns, boot_id)
-        _check_deadline(deadline_ns)
-        return observation
-    except Exception:
-        cleanup_error: Exception | None = None
-        try:
-            _atomic_write(DROPIN, token_free_dropin, 0o644)
-        except Exception as exc:
-            cleanup_error = exc
-        try:
-            _clear_manager_environment(context)
-        except Exception as exc:
-            cleanup_error = exc
-        if cleanup_error is not None:
-            raise AdapterError("rollback") from cleanup_error
-        raise
+    except Exception as exc:
+        cleanup_error = exc
+    try:
+        _clear_manager_environment(context, deadline_ns)
+    except Exception as exc:
+        cleanup_error = exc
+    if cleanup_error is not None:
+        raise AdapterError("rollback") from cleanup_error
 
 
 def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -1452,9 +1463,19 @@ def main() -> int:
             raw_deadline = environment.get("SKYNET_EDR_DEADLINE_NS", "")
             if not raw_deadline.isascii() or not raw_deadline.isdigit():
                 raise AdapterError("invalid_context")
-            with _deadline_watchdog(int(raw_deadline)):
-                context = validate_context(action, environment)
-                return emit(execute(action, context), ok=True)
+            context: dict[str, Any] | None = None
+            try:
+                with _deadline_watchdog(int(raw_deadline)):
+                    context = validate_context(action, environment)
+                    result = execute(action, context)
+            except Exception:
+                if context is not None:
+                    try:
+                        _cleanup_failed_attestation(context)
+                    except Exception:
+                        pass
+                return emit({}, ok=False)
+            return emit(result, ok=True)
         context = validate_context(action, environment)
         return emit(execute(action, context), ok=True)
     except Exception:

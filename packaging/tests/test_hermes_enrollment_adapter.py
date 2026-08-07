@@ -391,6 +391,8 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             [str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT],
             [str(self.module.SYSTEMCTL), "--user", "show-environment"],
         ])
+        cleanup_deadlines = {call.kwargs["deadline_ns"] for call in run.call_args_list}
+        self.assertEqual(len(cleanup_deadlines), 1)
         with mock.patch.object(
             self.module, "_run", side_effect=[b"", b"", b"", b"HERMES_PROFILE=hostile\n"]
         ):
@@ -771,6 +773,38 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         watchdog.assert_called_once_with(deadline)
         validate.assert_called_once_with("attest", environment)
 
+    def test_attest_main_runs_failure_cleanup_only_after_watchdog_exit(self):
+        deadline = 10_000_000_000
+        environment = {"SKYNET_EDR_DEADLINE_NS": str(deadline)}
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64}
+        events = []
+
+        @contextlib.contextmanager
+        def watchdog(_deadline):
+            events.append("watchdog_enter")
+            try:
+                yield
+            finally:
+                events.append("watchdog_exit")
+
+        def execute(_action, _context):
+            events.append("execute")
+            raise self.module.AdapterError("deadline")
+
+        def cleanup(_context):
+            events.append("cleanup")
+
+        with mock.patch.object(self.module.sys, "argv", ["adapter", "attest"]), \
+                mock.patch.object(self.module.os, "environ", environment), \
+                mock.patch.object(self.module, "_deadline_watchdog", side_effect=watchdog), \
+                mock.patch.object(self.module, "validate_context", return_value=context), \
+                mock.patch.object(self.module, "execute", side_effect=execute), \
+                mock.patch.object(self.module, "_cleanup_failed_attestation", side_effect=cleanup), \
+                mock.patch.object(self.module, "emit", return_value=1):
+            self.assertEqual(self.module.main(), 1)
+        self.assertEqual(events, ["watchdog_enter", "execute", "watchdog_exit", "cleanup"])
+
     def test_adapter_deadline_watchdog_restores_signal_state_on_success_and_error(self):
         for failure in (False, True):
             previous_handler = mock.Mock()
@@ -1060,7 +1094,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         )
         socket_ready.assert_called_once_with(self.module.SOCKET, 987, 15_000_001_000)
 
-    def test_attestation_dropin_is_restored_when_restart_fails(self):
+    def test_failed_attestation_cleanup_restores_dropin_and_manager_environment(self):
         token = "d" * 64
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
                    "generation": "b" * 64, "deadline_ns": 15_000_000_000,
@@ -1068,17 +1102,18 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                    "canary_event_id": "evt_skynet_attest_" + hashlib.sha256(
                        b"skynet-edr-attestation-v1\0" + token.encode("ascii")
                    ).hexdigest()}
-        with (mock.patch.object(self.module, "_restart_attestation",
-                                side_effect=self.module.AdapterError("deadline")),
+        with (mock.patch.object(self.module.time, "monotonic_ns", return_value=100),
               mock.patch.object(self.module, "_atomic_write") as atomic_write,
               mock.patch.object(self.module, "_clear_manager_environment") as clear_environment):
-            with self.assertRaisesRegex(self.module.AdapterError, "deadline"):
-                self.module._restart(context)
+            self.module._cleanup_failed_attestation(context)
         expected_dropin = self.module.render_dropin(
             [self.module.UNIT], context["generation"], context["home"], context["profile"]
         ).encode("ascii")
-        atomic_write.assert_called_once_with(self.module.DROPIN, expected_dropin, 0o644)
-        clear_environment.assert_called_once_with(context)
+        cleanup_deadline = 100 + self.module.CLEANUP_BUDGET_NS
+        atomic_write.assert_called_once_with(
+            self.module.DROPIN, expected_dropin, 0o644, deadline_ns=cleanup_deadline
+        )
+        clear_environment.assert_called_once_with(context, cleanup_deadline)
 
     def test_expired_inner_dropin_cleanup_relies_on_outer_snapshot_rollback_evidence(self):
         dropin = self.base / "50-skynet-edr.conf"
@@ -1092,13 +1127,12 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                    "attestation_token": token,
                    "canary_event_id": "evt_skynet_attest_" + "e" * 64}
         with mock.patch.object(self.module, "DROPIN", dropin), \
-                mock.patch.object(self.module, "_restart_attestation",
-                                  side_effect=self.module.AdapterError("hook_failure")), \
+                mock.patch.object(self.module.time, "monotonic_ns", return_value=100), \
                 mock.patch.object(self.module, "_atomic_write",
                                   side_effect=self.module.AdapterError("deadline")), \
                 mock.patch.object(self.module, "_clear_manager_environment"):
             with self.assertRaisesRegex(self.module.AdapterError, "rollback"):
-                self.module._restart(context)
+                self.module._cleanup_failed_attestation(context)
         self.assertEqual(dropin.read_text(encoding="ascii"), tokenized)
 
         self.module.restore_files(snapshot, {"dropin": dropin})
