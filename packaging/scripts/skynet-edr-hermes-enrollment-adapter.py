@@ -102,6 +102,27 @@ class AdapterError(Exception):
         self.category = category
 
 
+def _notify_parent_cleanup() -> None:
+    raw_fd = os.environ.pop("SKYNET_EDR_CLEANUP_FD", "")
+    if not raw_fd.isascii() or not raw_fd.isdigit():
+        return
+    fd = int(raw_fd)
+    if fd < 3:
+        return
+    try:
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            return
+        if os.write(fd, b"C") != 1:
+            return
+    except OSError:
+        return
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 @contextlib.contextmanager
 def _deadline_watchdog(deadline_ns: int):
     started_ns = time.monotonic_ns()
@@ -110,6 +131,7 @@ def _deadline_watchdog(deadline_ns: int):
         raise AdapterError("deadline")
 
     def expired(_signum: int, _frame: Any) -> None:
+        _notify_parent_cleanup()
         raise AdapterError("deadline")
 
     previous_handler = signal.signal(signal.SIGALRM, expired)
@@ -1470,6 +1492,7 @@ def main() -> int:
                     result = execute(action, context)
             except Exception:
                 if context is not None:
+                    _notify_parent_cleanup()
                     try:
                         _cleanup_failed_attestation(context)
                     except Exception:

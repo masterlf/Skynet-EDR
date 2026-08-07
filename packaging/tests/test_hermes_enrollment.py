@@ -520,20 +520,84 @@ class HermesEnrollmentTests(unittest.TestCase):
         )
         token = "a" * 64
         event_id = module.canary_event_id(token)
-        completed = SimpleNamespace(returncode=0, stdout=b'{}')
+        process = mock.Mock(returncode=0)
+        process.communicate.return_value = (b"{}", None)
         before = self.obs_path.read_bytes()
         with (mock.patch.object(module.time, "monotonic_ns", side_effect=[0, 0, 0, 0, 100]),
-              mock.patch.object(module.subprocess, "run", return_value=completed) as run):
+              mock.patch.object(module.subprocess, "Popen", return_value=process) as popen):
             with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
                 module.run_adapter(
                     adapter, "attest", env, self.obs_path, deadline_ns=100,
                     attestation_token=token, expected_event_id=event_id,
                 )
-        child_env = run.call_args.kwargs["env"]
+        child_env = popen.call_args.kwargs["env"]
         self.assertEqual(child_env["SKYNET_EDR_DEADLINE_NS"], "100")
         self.assertEqual(child_env["SKYNET_EDR_ATTESTATION_TOKEN"], token)
         self.assertEqual(child_env["SKYNET_EDR_CANARY_EVENT_ID"], event_id)
+        self.assertEqual(process.communicate.call_args.kwargs["timeout"], 100 / 1_000_000_000)
+        self.assertEqual(child_env["SKYNET_EDR_CLEANUP_FD"],
+                         str(popen.call_args.kwargs["pass_fds"][0]))
         self.assertEqual(self.obs_path.read_bytes(), before)
+
+    def test_attest_lane_uses_cleanup_grace_only_for_adapter_process_lifetime(self):
+        module = load_module()
+        token = "a" * 64
+        attested = {"transaction_nonce": "c" * 64}
+        guards = []
+
+        @contextlib.contextmanager
+        def deadline_guard(deadline_ns):
+            guards.append(deadline_ns)
+            yield
+
+        with mock.patch.object(module.time, "monotonic_ns", return_value=0), \
+                mock.patch.object(module.secrets, "token_hex", return_value=token), \
+                mock.patch.object(module, "_deadline_guard", side_effect=deadline_guard), \
+                mock.patch.object(module, "run_adapter", return_value=attested) as run_adapter, \
+                mock.patch.object(module, "write_metadata"), \
+                mock.patch.object(module, "assess", return_value=("ENROLLED", "healthy")):
+            result = module.run_attest_lane(
+                Path("/adapter"), {"SKYNET_EDR_GENERATION": "b" * 64}, self.obs_path,
+                self.base / "state", "b" * 64, os.getuid(), "default", {}, self.home,
+                self.manifest, self.base,
+            )
+        self.assertEqual(result, (attested, "ENROLLED", "healthy"))
+        self.assertEqual(guards, [
+            module.ATTEST_BUDGET_NS + module.ADAPTER_CLEANUP_GRACE_NS,
+            module.ATTEST_BUDGET_NS,
+        ])
+        self.assertEqual(run_adapter.call_args.kwargs["deadline_ns"], module.ATTEST_BUDGET_NS)
+
+    def test_parent_attest_process_lifetime_allows_post_deadline_cleanup_marker(self):
+        module = load_module()
+        adapter = self.base / "slow-cleanup-adapter.py"
+        marker = self.base / "cleanup-complete"
+        adapter.write_text(
+            "import os,time\n"
+            "from pathlib import Path\n"
+            "deadline=int(os.environ['SKYNET_EDR_DEADLINE_NS'])\n"
+            "while time.monotonic_ns() <= deadline: time.sleep(0.005)\n"
+            "cleanup_fd=int(os.environ['SKYNET_EDR_CLEANUP_FD'])\n"
+            "os.write(cleanup_fd,b'C'); os.close(cleanup_fd)\n"
+            "time.sleep(0.05)\n"
+            "Path(os.environ['TEST_CLEANUP_MARKER']).write_text('complete', encoding='ascii')\n"
+            "raise SystemExit(1)\n",
+            encoding="ascii",
+        )
+        adapter.chmod(0o755)
+        env = module.adapter_env(
+            self.home, self.request["profile"], self.obs_path,
+            self.request["manifest_sha256"], os.getuid(),
+        )
+        env["TEST_CLEANUP_MARKER"] = str(marker)
+        token = "a" * 64
+        deadline_ns = module.time.monotonic_ns() + 200_000_000
+        with self.assertRaisesRegex(module.EnrollmentError, "adapter_failure"):
+            module.run_adapter(
+                adapter, "attest", env, self.obs_path, deadline_ns=deadline_ns,
+                attestation_token=token, expected_event_id=module.canary_event_id(token),
+            )
+        self.assertEqual(marker.read_text(encoding="ascii"), "complete")
 
     def test_parent_deadline_guard_restores_signal_state_on_success_and_error(self):
         module = load_module()

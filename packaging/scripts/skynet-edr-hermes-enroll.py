@@ -19,6 +19,7 @@ import json
 import os
 import pwd
 import re
+import select
 import secrets
 import shutil
 import signal
@@ -50,6 +51,7 @@ MAX_PAYLOAD_FILE = 8 * 1024 * 1024
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 REVIEWED_UNITS = ["hermes-gateway.service"]
 ATTEST_BUDGET_NS = 15_000_000_000
+ADAPTER_CLEANUP_GRACE_NS = 15_000_000_000
 JOURNAL_KEYS = {"schema", "transaction_nonce", "operation", "target", "objects", "phase", "result", "manual_recovery"}
 JOURNAL_OBJECT_KEYS = {"source_parent", "source_name", "source_identity", "quarantine_parent", "quarantine_name", "quarantine_identity"}
 IDENTITY_KEYS = {"dev", "ino", "type", "mode", "uid", "gid", "nlink", "size", "tree_sha256"}
@@ -713,11 +715,14 @@ def run_attest_lane(adapter: Path, env: dict[str, str], observations: Path,
         token = secrets.token_hex(32)
     event_id = canary_event_id(token)
     deadline_ns = time.monotonic_ns() + ATTEST_BUDGET_NS
-    with _deadline_guard(deadline_ns):
+    adapter_process_deadline_ns = deadline_ns + ADAPTER_CLEANUP_GRACE_NS
+    with _deadline_guard(adapter_process_deadline_ns):
         attested = run_adapter(
             adapter, "attest", env, observations, deadline_ns=deadline_ns,
             attestation_token=token, expected_event_id=event_id,
         )
+    _remaining_seconds(deadline_ns)
+    with _deadline_guard(deadline_ns):
         _remaining_seconds(deadline_ns)
         write_metadata(
             state_root, generation, uid, profile, attested["transaction_nonce"],
@@ -770,12 +775,48 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
         if (adapter.is_symlink() or not stat.S_ISREG(info.st_mode) or not os.access(adapter, os.X_OK)
                 or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_uid != 0):
             raise OSError("invalid adapter")
-        result = subprocess.run(
-            ["/usr/bin/python3", str(adapter), action], env=action_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=30 if deadline_ns is None else _remaining_seconds(deadline_ns),
-            check=False, preexec_fn=use_target_identity if target_action else None,
-        )
+        command = ["/usr/bin/python3", str(adapter), action]
+        if deadline_ns is None:
+            result = subprocess.run(
+                command, env=action_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, timeout=30, check=False,
+                preexec_fn=use_target_identity if target_action else None,
+            )
+        else:
+            cleanup_read_fd, cleanup_write_fd = os.pipe2(os.O_CLOEXEC)
+            try:
+                action_env["SKYNET_EDR_CLEANUP_FD"] = str(cleanup_write_fd)
+                try:
+                    process = subprocess.Popen(
+                        command, env=action_env, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        pass_fds=(cleanup_write_fd,),
+                    )
+                finally:
+                    os.close(cleanup_write_fd)
+                try:
+                    try:
+                        stdout, _ = process.communicate(timeout=_remaining_seconds(deadline_ns))
+                    except subprocess.TimeoutExpired:
+                        process_deadline_ns = deadline_ns + ADAPTER_CLEANUP_GRACE_NS
+                        handshake_seconds = min(0.25, _remaining_seconds(process_deadline_ns))
+                        ready, _, _ = select.select([cleanup_read_fd], [], [], handshake_seconds)
+                        marker = os.read(cleanup_read_fd, 2) if ready else b""
+                        if marker != b"C":
+                            process.kill()
+                            process.communicate()
+                            raise
+                        stdout, _ = process.communicate(
+                            timeout=_remaining_seconds(process_deadline_ns)
+                        )
+                except Exception:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+                    raise
+                result = subprocess.CompletedProcess(command, process.returncode, stdout)
+            finally:
+                os.close(cleanup_read_fd)
         if deadline_ns is not None:
             _remaining_seconds(deadline_ns)
         if len(result.stdout) > 65_536:
