@@ -122,6 +122,8 @@ _worker_lock = threading.Lock()
 _worker_started = False
 _worker_stop = threading.Event()
 _worker_thread: threading.Thread | None = None
+_startup_canary_lock = threading.Lock()
+_startup_canary_attempted = False
 _transport_counters = {
     "queue_drops": 0,
     "socket_failures": 0,
@@ -141,6 +143,43 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_tool_call", _safe_hook(_post_tool_call))
     if _enabled():
         _ensure_worker()
+        _queue_startup_canary_once()
+
+
+def _queue_startup_canary_once() -> None:
+    """Queue one token-free enrollment canary for this producer process."""
+    global _startup_canary_attempted
+    with _startup_canary_lock:
+        if _startup_canary_attempted:
+            return
+        _startup_canary_attempted = True
+        token = os.environ.get("SKYNET_EDR_ATTESTATION_TOKEN", "")
+        if _ATTESTATION_TOKEN_RE.fullmatch(token) is None:
+            return
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        if _ATTESTATION_EVENT_ID_RE.fullmatch(event_id) is None:
+            return
+        try:
+            _write_event(
+                event_id=event_id,
+                event_type="agent.telemetry.attestation",
+                source_kind="sensor",
+                trust_level="sensor_observation",
+                severity="informational",
+                title="Skynet-EDR enrollment attestation canary",
+                attributes={
+                    "hook": "register",
+                    "producer_bound": True,
+                    "content_omitted": True,
+                    "argument_count": 0,
+                    "keyword_count": 0,
+                    "message_count": 0,
+                },
+            )
+        except Exception:  # pragma: no cover - registration remains fail-closed
+            _setup_logging().error("startup_canary_failed category=queue_failure")
 
 
 def _safe_hook(handler):

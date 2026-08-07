@@ -181,6 +181,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_CHECKPOINT_PATH", None)
         os.environ.pop("SKYNET_EDR_PLUGIN_GENERATION", None)
         os.environ.pop("SKYNET_EDR_RUNTIME_INSTANCE_NONCE", None)
+        os.environ.pop("SKYNET_EDR_ATTESTATION_TOKEN", None)
         os.environ["SKYNET_EDR_INGEST_SOCKET"] = str(self.state_dir / "missing-ingest.sock")
         self.plugin = load_plugin()
         logger = logging.getLogger("skynet_edr_hermes_plugin")
@@ -210,6 +211,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         os.environ.pop("SKYNET_EDR_PLUGIN_GENERATION", None)
         os.environ.pop("SKYNET_EDR_RUNTIME_INSTANCE_NONCE", None)
         os.environ.pop("SKYNET_EDR_INGEST_SOCKET", None)
+        os.environ.pop("SKYNET_EDR_ATTESTATION_TOKEN", None)
 
     def read_events(self):
         self.plugin._event_queue.join()
@@ -1788,24 +1790,47 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(event["attributes"]["message_count"], 1)
         self.assertEqual(event["provenance"]["trace_id"], "hermes-local-test-session")
 
-    def test_exact_attestation_marker_emits_one_dedicated_event_with_fixed_id(self):
+    def test_register_queues_one_producer_bound_attestation_canary_per_process(self):
         token = "a" * 64
         event_id = "evt_skynet_attest_" + hashlib.sha256(
             b"skynet-edr-attestation-v1\0" + token.encode("ascii")
         ).hexdigest()
         os.environ["SKYNET_EDR_ATTESTATION_TOKEN"] = token
         ctx = FakeContext()
-        self.plugin.register(ctx)
-        prompt = (
-            f"SKYNET_EDR_ATTEST_V1 {event_id} {token}\n"
-            f"Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text."
-        )
-        with patch.object(self.plugin, "_write_event") as write:
-            ctx.hooks["pre_llm_call"]([{"role": "user", "content": prompt}])
+        calls = []
+        with patch.object(self.plugin, "_ensure_worker", side_effect=lambda: calls.append("worker")), \
+                patch.object(self.plugin, "_write_event", side_effect=lambda **_kwargs: calls.append("event")) as write:
+            self.plugin.register(ctx)
+            self.plugin.register(ctx)
         write.assert_called_once()
+        self.assertEqual(calls[:2], ["worker", "event"])
         self.assertEqual(write.call_args.kwargs["event_id"], event_id)
-        self.assertEqual(write.call_args.kwargs["event_type"], "agent.llm.call.requested")
+        self.assertEqual(write.call_args.kwargs["event_type"], "agent.telemetry.attestation")
+        self.assertEqual(write.call_args.kwargs["severity"], "informational")
+        self.assertEqual(write.call_args.kwargs["attributes"]["producer_bound"], True)
         self.assertNotIn(token, json.dumps(write.call_args.kwargs))
+
+    def test_register_startup_canary_fails_dark_without_exact_token_or_when_disabled(self):
+        for token, enabled, worker_calls in (
+            (None, "1", 1),
+            ("A" * 64, "1", 1),
+            ("a" * 63, "1", 1),
+            ("g" * 64, "1", 1),
+            ("a" * 64, "0", 0),
+        ):
+            plugin = load_plugin()
+            environment = {"SKYNET_EDR_HERMES_PLUGIN_ENABLED": enabled}
+            if token is not None:
+                environment["SKYNET_EDR_ATTESTATION_TOKEN"] = token
+            with self.subTest(token=token, enabled=enabled), patch.dict(
+                os.environ, environment, clear=True
+            ), patch.object(plugin, "_ensure_worker") as worker, patch.object(
+                plugin, "_write_event"
+            ) as write:
+                plugin.register(FakeContext())
+                plugin.register(FakeContext())
+            self.assertEqual(worker.call_count, worker_calls * 2)
+            write.assert_not_called()
 
     def test_near_attestation_markers_use_normal_hook_without_fixed_event_id(self):
         token = "a" * 64

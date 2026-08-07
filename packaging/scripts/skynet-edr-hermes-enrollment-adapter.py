@@ -832,10 +832,18 @@ def _source_identity(source: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _exact_source(ingestion: dict[str, Any], context: dict[str, Any],
-                  gateway: ProcessIdentity) -> dict[str, Any]:
+                  gateway: ProcessIdentity, *, reject_competing: bool = True) -> dict[str, Any]:
     sources = ingestion.get("sources")
     if type(sources) is not list:
         raise AdapterError("source_cardinality")
+    competing = [source for source in sources if type(source) is dict
+                 and type(source.get("authenticated_uid")) is int
+                 and source.get("authenticated_uid") == context["uid"]
+                 and type(source.get("protocol_version")) is int
+                 and source.get("protocol_version") == 3
+                 and source.get("plugin_generation") == context["generation"]]
+    if reject_competing and len(competing) != 1:
+        raise AdapterError("source_missing" if not competing else "source_cardinality")
     matches = [source for source in sources if type(source) is dict
                and type(source.get("authenticated_uid")) is int
                and source.get("authenticated_uid") == context["uid"]
@@ -908,13 +916,39 @@ def _persisted_advanced(before: dict[str, Any], after: dict[str, Any], event_id:
             and cast(int, after_persisted) - cast(int, before_persisted) == 1)
 
 
+def _startup_canary_baseline(source: dict[str, Any], event_id: str) -> dict[str, Any]:
+    """Return the observable baseline, including safe replay-before-read handling."""
+    receipt = (
+        source.get("last_persisted_canary_event_id"),
+        source.get("last_persisted_canary_receipt_status"),
+        source.get("last_persisted_canary_incidents_opened"),
+    )
+    if receipt == (None, None, None):
+        return source
+    failure_fields = ("events_malformed_total", "events_dropped_total",
+                      "events_duplicate_total", "events_collision_total")
+    if (receipt != (event_id, "persisted", 0)
+            or source.get("commit_sequence") != 1
+            or source.get("events_persisted_total") != 1
+            or any(source.get(field) != 0 for field in failure_fields)
+            or source.get("last_error_category") is not None):
+        raise AdapterError("hook_failure")
+    baseline = dict(source)
+    baseline["commit_sequence"] = 0
+    baseline["events_persisted_total"] = 0
+    baseline["last_persisted_canary_event_id"] = None
+    baseline["last_persisted_canary_receipt_status"] = None
+    baseline["last_persisted_canary_incidents_opened"] = None
+    return baseline
+
+
 def _previous_runtime_nonce(status: dict[str, Any], context: dict[str, Any],
                             gateway: ProcessIdentity) -> str | None:
     ingestion = status.get("ingestion")
     if type(ingestion) is not dict or type(ingestion.get("sources")) is not list:
         return None
     try:
-        source = _exact_source(ingestion, context, gateway)
+        source = _exact_source(ingestion, context, gateway, reject_competing=False)
     except AdapterError as exc:
         if exc.category == "source_missing":
             return None
@@ -1294,21 +1328,6 @@ def _wait_for_source(context: dict[str, Any], gateway: ProcessIdentity,
         _bounded_sleep(deadline_ns)
 
 
-def _run_canary(context: dict[str, Any], event_id: str, token: str, deadline_ns: int) -> None:
-    marker = f"SKYNET_EDR_ATTEST_V1 {event_id} {token}"
-    expected_ack = f"SKYNET_EDR_ATTEST_ACK_V1 {event_id}\n".encode("ascii")
-    prompt = (
-        f"{marker}\n"
-        f"Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text."
-    )
-    output = _run(
-        [str(_hermes_launcher(context)), "chat", "--max-turns", "1", "--toolsets", "none", "-q", prompt],
-        env=_minimal_env(context), target=context, deadline_ns=deadline_ns,
-    )
-    if output != expected_ack:
-        raise AdapterError("hook_failure")
-
-
 def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
     deadline_ns = context.get("deadline_ns")
     if type(deadline_ns) is not int:
@@ -1331,6 +1350,8 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
     previous_nonce = _previous_runtime_nonce(
         _status(deadline_ns, allow_disabled=True), context, before[UNIT]
     )
+    _run([str(SYSTEMCTL), "stop", DAEMON_UNIT],
+         env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
     _run([str(SYSTEMCTL), "restart", manager_unit],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
     _import_manager_environment(context, deadline_ns)
@@ -1359,15 +1380,14 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
             or not _gateway_context_matches(context, deadline_ns)):
         raise AdapterError("readback_failure")
 
-    status, baseline = _wait_for_source(context, after[UNIT], deadline_ns)
+    status, source = _wait_for_source(context, after[UNIT], deadline_ns)
+    baseline = _startup_canary_baseline(source, event_id)
     if previous_nonce is not None and baseline["runtime_instance_nonce"] == previous_nonce:
         raise AdapterError("source_identity")
     ingestion = status.get("ingestion", {})
     if (ingestion.get("listener_live") is not True or ingestion.get("state") != "healthy"):
         raise AdapterError("producer_health")
-    _run_canary(context, event_id, token, deadline_ns)
     while True:
-        status, source = _wait_for_source(context, after[UNIT], deadline_ns)
         if _persisted_advanced(baseline, source, event_id):
             break
         if (source.get("events_duplicate_total") != baseline.get("events_duplicate_total")
@@ -1375,6 +1395,7 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
                 or source.get("last_error_category") != baseline.get("last_error_category")):
             raise AdapterError("hook_failure")
         _bounded_sleep(deadline_ns)
+        status, source = _wait_for_source(context, after[UNIT], deadline_ns)
 
     if not _plugin_enabled(context, deadline_ns):
         raise AdapterError("readback_failure")

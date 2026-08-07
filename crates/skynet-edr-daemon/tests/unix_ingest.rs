@@ -839,15 +839,15 @@ fn persisted_attestation_projects_exact_safe_receipt_and_zero_incidents_on_same_
         "evt_skynet_attest_",
         "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     ));
-    event["event_type"] = serde_json::json!("agent.llm.call.requested");
+    event["event_type"] = serde_json::json!("agent.telemetry.attestation");
     event["severity"] = serde_json::json!("informational");
     event["source"] = serde_json::json!({
         "kind": "sensor", "sensor": "hermes-plugin", "integration": "hermes"
     });
     event["trust_level"] = serde_json::json!("sensor_observation");
     event["attributes"] = serde_json::json!({
-        "hook": "pre_llm_call", "content_omitted": true,
-        "argument_count": 1, "keyword_count": 0, "message_count": 1
+        "hook": "register", "producer_bound": true, "content_omitted": true,
+        "argument_count": 0, "keyword_count": 0, "message_count": 0
     });
     event["redaction"] = serde_json::json!({
         "contains_sensitive_data": false, "redacted_fields": []

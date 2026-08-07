@@ -470,10 +470,16 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 self.module._exact_source({"sources": sources}, context, gateway)
         retained = [
             self._v3_source(plugin_generation="c" * 64),
-            self._v3_source(kernel_peer_pid=99),
             {"authenticated_uid": 1000, "runtime_role": "legacy", "protocol_version": 1},
         ]
         self.assertEqual(self.module._exact_source({"sources": retained + [valid]}, context, gateway), valid)
+        transient_cli = self._v3_source(
+            source_id="uid:1000:unknown:" + "b" * 64 + ":" + "c" * 64,
+            runtime_role="unknown", runtime_instance_nonce="c" * 64,
+            kernel_peer_pid=99, kernel_peer_start_ticks=999,
+        )
+        with self.assertRaisesRegex(self.module.AdapterError, "source_cardinality"):
+            self.module._exact_source({"sources": [transient_cli, valid]}, context, gateway)
 
     def test_exact_v3_source_rejects_unknown_missing_and_mistyped_schema(self):
         context = {"uid": 1000, "generation": "b" * 64}
@@ -709,39 +715,31 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             baseline, dict(advanced, last_persisted_canary_incidents_opened=1), event_id
         ))
 
-    def test_canary_command_requires_exact_event_bound_ack(self):
-        token = "d" * 64
-        event_id = "evt_skynet_attest_" + hashlib.sha256(
-            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
-        ).hexdigest()
-        context = {"uid": os.getuid(), "account_gid": os.getgid(),
-                   "home": self.base / ".hermes", "profile": "default"}
-        expected = f"SKYNET_EDR_ATTEST_ACK_V1 {event_id}\n".encode("ascii")
-        fake_hermes = self.base / "fake-hermes"
-        fake_hermes.write_text(
-            "#!/usr/bin/python3\n"
-            "import sys\n"
-            "assert sys.argv[1:7] == ['chat','--max-turns','1','--toolsets','none','-q']\n"
-            "lines = sys.argv[7].splitlines()\n"
-            "parts = lines[0].split()\n"
-            "assert len(parts) == 3 and parts[0] == 'SKYNET_EDR_ATTEST_V1'\n"
-            "event_id = parts[1]\n"
-            "assert lines == [lines[0], f'Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text.']\n"
-            "print(f'SKYNET_EDR_ATTEST_ACK_V1 {event_id}')\n",
-            encoding="ascii",
+    def test_startup_canary_already_replayed_requires_clean_first_persisted_event(self):
+        event_id = "evt_skynet_attest_" + "e" * 64
+        replayed = self._v3_source(
+            commit_sequence=1, events_persisted_total=1,
+            last_persisted_canary_event_id=event_id,
+            last_persisted_canary_receipt_status="persisted",
+            last_persisted_canary_incidents_opened=0,
         )
-        fake_hermes.chmod(0o755)
-        context["_hermes_launcher"] = fake_hermes
-        with mock.patch.object(self.module, "HERMES", fake_hermes):
-            self.module._run_canary(
-                context, event_id, token, self.module.time.monotonic_ns() + 1_000_000_000
-            )
+        baseline = self.module._startup_canary_baseline(replayed, event_id)
+        self.assertTrue(self.module._persisted_advanced(baseline, replayed, event_id))
+        for mutation in (
+            {"commit_sequence": 2, "events_persisted_total": 2},
+            {"events_duplicate_total": 1},
+            {"last_persisted_canary_receipt_status": "duplicate"},
+            {"last_persisted_canary_incidents_opened": 1},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                    self.module.AdapterError, "hook_failure"):
+                self.module._startup_canary_baseline(dict(replayed, **mutation), event_id)
 
-        for output in (b"OK\n", expected.replace(event_id.encode(), b"evt_skynet_attest_" + b"0" * 64),
-                       expected.rstrip(b"\n"), expected + b"extra\n"):
-            with self.subTest(output=output), mock.patch.object(self.module, "_run", return_value=output):
-                with self.assertRaisesRegex(self.module.AdapterError, "hook_failure"):
-                    self.module._run_canary(context, event_id, token, 100)
+    def test_adapter_contains_no_chat_canary_subprocess(self):
+        source = (ROOT / "packaging" / "scripts" /
+                  "skynet-edr-hermes-enrollment-adapter.py").read_text(encoding="utf-8")
+        self.assertNotIn('"chat"', source)
+        self.assertNotIn("_run_canary", source)
 
     def test_attest_context_rejects_expired_inherited_deadline_before_nss(self):
         env = {
@@ -1039,9 +1037,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
 
         def command(argv, **_kwargs):
             if argv[0] == str(self.module.HERMES):
-                prompt = argv[-1]
-                self.assertIn(f"SKYNET_EDR_ATTEST_V1 {event_id} {token}", prompt)
-                return f"SKYNET_EDR_ATTEST_ACK_V1 {event_id}\n".encode("ascii")
+                self.fail("attestation must not invoke a Hermes chat/inference subprocess")
             return b""
 
         with (mock.patch.object(self.module.time, "monotonic_ns", return_value=1_000),
@@ -1067,7 +1063,8 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         self.assertIn([str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT],
                       [call.args[0] for call in run.call_args_list])
         systemctl_calls = [call for call in run.call_args_list if call.args[0][0] == str(self.module.SYSTEMCTL)]
-        self.assertEqual([call.args[0] for call in systemctl_calls[:4]], [
+        self.assertEqual([call.args[0] for call in systemctl_calls[:5]], [
+            [str(self.module.SYSTEMCTL), "stop", self.module.DAEMON_UNIT],
             [str(self.module.SYSTEMCTL), "restart", "user@1000.service"],
             [str(self.module.SYSTEMCTL), "--user", "import-environment",
              *self.module.MANAGED_MANAGER_ENVIRONMENT],
