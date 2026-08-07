@@ -50,6 +50,7 @@ class HermesEnrollmentTests(unittest.TestCase):
             path = self.source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+            path.chmod(0o644)
         self.manifest = {
             rel: {
                 "sha256": hashlib.sha256(data).hexdigest(),

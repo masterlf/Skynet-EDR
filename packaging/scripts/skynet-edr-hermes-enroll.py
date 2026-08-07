@@ -1419,6 +1419,7 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
         transaction_fd = -1
         quarantine_root_fd = -1
         private_state_fd = -1
+        bindings: dict[str, tuple[int, int]] = {}
         try:
             state_info = os.lstat(state_root)
             private_state_fd = open_private_state_directory(state_root, state_info.st_dev)
@@ -1447,7 +1448,6 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
                     or transaction_info.st_dev != os.fstat(quarantine_root_fd).st_dev):
                 raise EnrollmentError("unsupported_layout", "MANUAL_RECOVERY_REQUIRED")
             if journal["phase"] == "QUARANTINED" and journal["result"] == "QUARANTINED":
-                bindings: dict[str, tuple[int, int]] = {}
                 for key in journal["objects"]:
                     if key == "backend" and plugins_parent is not None:
                         source_fd = os.open(plugins_parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -1482,7 +1482,6 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
                     raise EnrollmentError("rollback", "MANUAL_RECOVERY_REQUIRED")
                 journal["phase"] = "ADAPTER_RESTORED"
                 write_quarantine_journal(journal_path, journal)
-            bindings: dict[str, tuple[int, int]] = {}
             if plugins_parent is not None:
                 # opened_user_directory already pins and validates this proc-fd path.
                 plugin_fd = os.open(plugins_parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -1519,7 +1518,7 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
             return emit("MANUAL_RECOVERY_REQUIRED", category)
         finally:
             # Closing descriptors is not deletion; quarantined objects and the journal survive.
-            for value in list(locals().get("bindings", {}).values()):
+            for value in list(bindings.values()):
                 fd = value[0]
                 if fd != private_state_fd:
                     try:

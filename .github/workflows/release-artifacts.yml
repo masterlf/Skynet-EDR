@@ -41,7 +41,7 @@ jobs:
           sudo install -m 0755 nfpm /usr/local/bin/nfpm
           nfpm --version
       - name: Validate packaging baseline
-        run: packaging/scripts/validate-packaging.sh
+        run: sudo -n env "PATH=$PATH" packaging/scripts/validate-packaging.sh
       - name: Build package artifacts
         run: |
           rm -rf dist

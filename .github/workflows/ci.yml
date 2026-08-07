@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate packaging metadata
-        run: packaging/scripts/validate-packaging.sh
+        run: sudo -n env "PATH=$PATH" packaging/scripts/validate-packaging.sh
   rust:
     name: Rust quality gate
     runs-on: ubuntu-latest
@@ -79,7 +79,15 @@ jobs:
       - name: Prime locked Rust dependencies
         run: cargo fetch --locked
       - name: Run offline S2 validation
-        run: packaging/scripts/validate-s2.sh --output "${RUNNER_TEMP}/skynet-edr-s2-report"
+        run: |
+          root_parent="$(sudo -n mktemp -d /var/lib/skynet-edr-s2.XXXXXX)"
+          trap 'sudo -n rm -rf -- "$root_parent"' EXIT
+          sudo -n env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" \
+            packaging/scripts/validate-s2.sh --output "$root_parent/report"
+          sudo -n mv -- "$root_parent/report" "${RUNNER_TEMP}/skynet-edr-s2-report"
+          sudo -n chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/skynet-edr-s2-report"
+          sudo -n rmdir -- "$root_parent"
+          trap - EXIT
       - name: Upload S2 validation report
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
