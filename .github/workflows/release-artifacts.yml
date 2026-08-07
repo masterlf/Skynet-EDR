@@ -42,7 +42,7 @@ jobs:
           nfpm --version
       - name: Validate packaging baseline
         run: >-
-          sudo -n env "HOME=$HOME" "PATH=$PATH"
+          sudo -n env "HOME=/root" "PATH=$PATH"
           "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
           "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
           packaging/scripts/validate-packaging.sh
