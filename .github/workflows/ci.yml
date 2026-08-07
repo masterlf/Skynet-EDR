@@ -19,7 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate packaging metadata
-        run: sudo -n env "PATH=$PATH" packaging/scripts/validate-packaging.sh
+        run: >-
+          sudo -n env "HOME=$HOME" "PATH=$PATH"
+          "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
+          "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+          packaging/scripts/validate-packaging.sh
   rust:
     name: Rust quality gate
     runs-on: ubuntu-latest
@@ -82,7 +86,9 @@ jobs:
         run: |
           root_parent="$(sudo -n mktemp -d /var/lib/skynet-edr-s2.XXXXXX)"
           trap 'sudo -n rm -rf -- "$root_parent"' EXIT
-          sudo -n env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" \
+          sudo -n env "HOME=$HOME" "PATH=$PATH" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
             packaging/scripts/validate-s2.sh --output "$root_parent/report"
           sudo -n mv -- "$root_parent/report" "${RUNNER_TEMP}/skynet-edr-s2-report"
           sudo -n chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/skynet-edr-s2-report"
