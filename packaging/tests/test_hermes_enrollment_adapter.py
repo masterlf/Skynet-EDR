@@ -37,6 +37,23 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
     def _path_info(file_type, *, uid=0, nlink=1, mode=0o755):
         return SimpleNamespace(st_mode=file_type | mode, st_uid=uid, st_nlink=nlink)
 
+    def _status_payload(self, ingestion):
+        return {
+            "product": "Skynet-EDR", "binary": "skynet-edr", "run_mode": "passive",
+            "server": "skynet-edr-mcp", "read_only": True, "tool_count": 6,
+            "incident_count": 0, "event_count": 1, "version": "0.5.0",
+            "ingestion": ingestion,
+        }
+
+    def _status_readback(self, status, **kwargs):
+        body = json.dumps(status, separators=(",", ":")).encode("ascii")
+        response = b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.recv.side_effect = [response, b""]
+        with mock.patch.object(self.module.socket, "socket", return_value=client):
+            return self.module._status(**kwargs)
+
     def test_fixed_hermes_launcher_accepts_direct_regular_and_root_symlink_chains(self):
         regular = self._path_info(self.module.stat.S_IFREG)
         symlink = self._path_info(self.module.stat.S_IFLNK)
@@ -439,6 +456,88 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaises(self.module.AdapterError):
                 self.module._validate_status_schema(candidate)
 
+    def test_status_disabled_schema_is_exact_and_only_accepted_by_explicit_opt_in(self):
+        disabled_ingestion = {
+            "state": "disabled", "role_identity_assurance": "authorized_uid_self_reported",
+            "listener_live": False, "sources": [],
+        }
+        disabled = self._status_payload(disabled_ingestion)
+        with self.assertRaisesRegex(self.module.AdapterError, "readback_failure"):
+            self._status_readback(disabled)
+        self.assertEqual(
+            self._status_readback(disabled, allow_disabled=True),
+            disabled,
+        )
+
+        full_ingestion = {
+            "state": "healthy", "role_identity_assurance": "authorized_uid_self_reported",
+            "listener_live": True, "transport_heartbeat_state": "fresh",
+            "hook_event_state": "fresh", "hook_event_freshness_affects_state": False,
+            "last_event_received_at_unix_ms": 1, "last_event_received_age_ms": 0,
+            "last_event_committed_at_unix_ms": 1, "last_event_committed_age_ms": 0,
+            "required_reported_roles": [{"runtime_role": "gateway", "state": "fresh"}],
+            "connections_accepted_total": 1, "connections_unauthorized_total": 0,
+            "connections_capacity_rejected_total": 0, "listener_errors_total": 0,
+            "peer_credential_errors_total": 0, "frames_received_total": 1,
+            "frames_oversize_total": 0, "frames_invalid_total": 0,
+            "frames_timeout_total": 0, "events_persisted_total": 1,
+            "events_duplicate_total": 0, "events_collision_total": 0,
+            "incident_integrity_collision_total": 0, "correlation_truncated_total": 0,
+            "storage_errors_total": 0, "sources": [self._v3_source()],
+        }
+        full = self._status_payload(full_ingestion)
+        self.assertEqual(self._status_readback(full, allow_disabled=True), full)
+        with self.assertRaisesRegex(self.module.AdapterError, "readback_failure"):
+            self._status_readback(
+                dict(full, ingestion={"state": "healthy", "sources": []}),
+                allow_disabled=True,
+            )
+
+    def test_disabled_status_schema_rejects_every_root_and_ingestion_mutation(self):
+        ingestion = {
+            "state": "disabled", "role_identity_assurance": "authorized_uid_self_reported",
+            "listener_live": False, "sources": [],
+        }
+        status = self._status_payload(ingestion)
+        self.assertIs(self.module._validate_disabled_status_schema(status), ingestion)
+
+        invalid: list[dict] = [dict(status, unknown=True)]
+        for key in self.module.STATUS_KEYS:
+            candidate = dict(status)
+            candidate.pop(key)
+            invalid.append(candidate)
+        for key, values in {
+            "product": ("Other", False), "binary": ("other", False),
+            "run_mode": ("active", False), "server": ("other", False),
+            "read_only": (False, 1), "version": ("", False),
+        }.items():
+            invalid.extend(dict(status, **{key: value}) for value in values)
+        for key in ("tool_count", "incident_count", "event_count"):
+            invalid.extend(dict(status, **{key: value}) for value in (True, -1, 1.5))
+        invalid.extend([
+            dict(status, ingestion=[]),
+            dict(status, ingestion=dict(ingestion, unknown=True)),
+        ])
+        for missing in ingestion:
+            invalid.append(dict(
+                status,
+                ingestion={key: value for key, value in ingestion.items() if key != missing},
+            ))
+        invalid.extend(
+            dict(status, ingestion=dict(ingestion, **mutation))
+            for mutation in (
+                {"state": "degraded"}, {"state": False},
+                {"role_identity_assurance": "unknown"},
+                {"role_identity_assurance": False},
+                {"listener_live": 0}, {"listener_live": True},
+                {"sources": [self._v3_source()]}, {"sources": ()},
+            )
+        )
+        for candidate in invalid:
+            with self.subTest(candidate=candidate), self.assertRaisesRegex(
+                    self.module.AdapterError, "readback_failure"):
+                self.module._validate_disabled_status_schema(candidate)
+
     def test_generation_and_runtime_nonce_are_independent(self):
         context = {"uid": 1000, "generation": "b" * 64, "attestation_token": "c" * 64}
         gateway = self.module.ProcessIdentity(22, 202, 2002)
@@ -784,7 +883,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
               mock.patch.object(self.module, "_process_groups", return_value={987}),
               mock.patch.object(self.module, "_gateway_context_matches", return_value=True),
               mock.patch.object(self.module, "_wait_for_source", side_effect=[(status, baseline), (status, advanced)]),
-              mock.patch.object(self.module, "_status", side_effect=[prior_status, status]),
+              mock.patch.object(self.module, "_status", side_effect=[prior_status, status]) as status_readback,
               mock.patch.object(self.module, "_run", side_effect=command) as run,
               mock.patch.object(self.module, "_atomic_write") as atomic_write,
               mock.patch.object(self.module, "_plugin_enabled", return_value=True),
@@ -806,6 +905,10 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         ).encode("ascii")
         self.assertEqual(atomic_write.call_args_list[-1].args[:3],
                          (self.module.DROPIN, expected_dropin, 0o644))
+        self.assertEqual(
+            status_readback.call_args_list,
+            [mock.call(15_000_001_000, allow_disabled=True), mock.call(15_000_001_000)],
+        )
 
     def test_attestation_dropin_is_restored_when_restart_fails(self):
         token = "d" * 64

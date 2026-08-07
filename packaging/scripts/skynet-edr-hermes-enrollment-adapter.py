@@ -581,7 +581,7 @@ def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> 
     raise AdapterError("readback_failure")
 
 
-def _status(deadline_ns: int | None = None) -> dict[str, Any]:
+def _status(deadline_ns: int | None = None, *, allow_disabled: bool = False) -> dict[str, Any]:
     if deadline_ns is None:
         deadline_ns = time.monotonic_ns() + 3_000_000_000
     response = bytearray()
@@ -627,17 +627,44 @@ def _status(deadline_ns: int | None = None) -> dict[str, Any]:
     value = parse_bounded_json(body)
     if type(value) is not dict:
         raise AdapterError("readback_failure")
-    _validate_status_schema(value)
+    ingestion = value.get("ingestion")
+    if allow_disabled and type(ingestion) is dict and ingestion.get("state") == "disabled":
+        _validate_disabled_status_schema(value)
+    else:
+        _validate_status_schema(value)
     return value
 
 
-def _validate_status_schema(status: dict[str, Any]) -> dict[str, Any]:
+def _validate_status_root(status: dict[str, Any]) -> dict[str, Any]:
     if set(status) != STATUS_KEYS:
         raise AdapterError("readback_failure")
     ingestion = status.get("ingestion")
-    if type(ingestion) is not dict or set(ingestion) != INGESTION_STATUS_KEYS:
-        raise AdapterError("readback_failure")
     root_counts = ("tool_count", "incident_count", "event_count")
+    if (type(ingestion) is not dict
+            or status.get("product") != "Skynet-EDR" or status.get("binary") != "skynet-edr"
+            or status.get("run_mode") != "passive" or status.get("server") != "skynet-edr-mcp"
+            or status.get("read_only") is not True
+            or type(status.get("version")) is not str or not status["version"]
+            or any(type(status.get(key)) is not int or status[key] < 0 for key in root_counts)):
+        raise AdapterError("readback_failure")
+    return ingestion
+
+
+def _validate_disabled_status_schema(status: dict[str, Any]) -> dict[str, Any]:
+    ingestion = _validate_status_root(status)
+    if (set(ingestion) != {"state", "role_identity_assurance", "listener_live", "sources"}
+            or ingestion.get("state") != "disabled"
+            or ingestion.get("role_identity_assurance") != "authorized_uid_self_reported"
+            or ingestion.get("listener_live") is not False
+            or type(ingestion.get("sources")) is not list or ingestion["sources"]):
+        raise AdapterError("readback_failure")
+    return ingestion
+
+
+def _validate_status_schema(status: dict[str, Any]) -> dict[str, Any]:
+    ingestion = _validate_status_root(status)
+    if set(ingestion) != INGESTION_STATUS_KEYS:
+        raise AdapterError("readback_failure")
     ingestion_counts = (
         "connections_accepted_total", "connections_unauthorized_total",
         "connections_capacity_rejected_total", "listener_errors_total",
@@ -651,12 +678,7 @@ def _validate_status_schema(status: dict[str, Any]) -> dict[str, Any]:
         "last_event_committed_at_unix_ms", "last_event_committed_age_ms",
     )
     required = ingestion.get("required_reported_roles")
-    if (status.get("product") != "Skynet-EDR" or status.get("binary") != "skynet-edr"
-            or status.get("run_mode") != "passive" or status.get("server") != "skynet-edr-mcp"
-            or status.get("read_only") is not True
-            or type(status.get("version")) is not str or not status["version"]
-            or any(type(status.get(key)) is not int or status[key] < 0 for key in root_counts)
-            or ingestion.get("state") not in {"healthy", "degraded"}
+    if (ingestion.get("state") not in {"healthy", "degraded"}
             or ingestion.get("role_identity_assurance") != "authorized_uid_self_reported"
             or type(ingestion.get("listener_live")) is not bool
             or ingestion.get("transport_heartbeat_state") not in {"fresh", "stale", "not_observed"}
@@ -1179,7 +1201,9 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
     manager_unit = f"user@{context['uid']}.service"
     units = (manager_unit, UNIT, DAEMON_UNIT)
     before = {unit: _service_identity(context, unit, deadline_ns) for unit in units}
-    previous_nonce = _previous_runtime_nonce(_status(deadline_ns), context, before[UNIT])
+    previous_nonce = _previous_runtime_nonce(
+        _status(deadline_ns, allow_disabled=True), context, before[UNIT]
+    )
     _run([str(SYSTEMCTL), "restart", manager_unit],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
     _run([str(SYSTEMCTL), "restart", DAEMON_UNIT],
