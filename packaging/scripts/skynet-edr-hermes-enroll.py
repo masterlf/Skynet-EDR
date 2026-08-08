@@ -309,9 +309,8 @@ def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict
         or obs.get("observed_generation") != generation
         or obs.get("target_uid") != request["uid"]
         or obs.get("effective_uid") != 0
-        or not isinstance(observed_at, int)
+        or type(observed_at) is not int
         or observed_at > now
-        or now - observed_at > 30_000_000_000
     ):
         return "DRIFTED", "observation_failure"
     if obs.get("plugin_enabled") is not True or obs.get("loaded_generation") != generation:
@@ -336,6 +335,8 @@ def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict
     hook_ok = isinstance(hook, dict) and hook.get("correlated") is True and hook.get("committed") is True and hook.get("incident_opened") is False
     if not healthy or not hook_ok:
         return "DEGRADED", "producer_health"
+    if now - observed_at > 30_000_000_000:
+        return "VERIFY_REQUIRED", "observation_expired"
     return "ENROLLED", "verified"
 
 
@@ -1186,6 +1187,27 @@ def enrollment_lock(state_root: Path) -> Path:
     return state_root / "enrollment.lock"
 
 
+def open_enrollment_lock(path: Path, *, create: bool):
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+    if create:
+        flags |= os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise EnrollmentError("invalid_lock") from exc
+    except OSError as exc:
+        raise EnrollmentError("invalid_lock") from exc
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        os.close(fd)
+        raise EnrollmentError("invalid_lock")
+    return os.fdopen(fd, "r+b")
+
+
 def install_desktop(source: Path, parent: Path, state_root: Path, uid: int, gid: int) -> tuple[Path, Path]:
     target = parent / "skynet-edr"
     prior = state_root / "prior-desktop"
@@ -1236,27 +1258,44 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
     gid = pwd.getpwuid(uid).pw_gid
     validate_managed_parents(home, uid, gid)
     require_same_filesystem(home, state_root)
+    existing_enrollment = exists_nofollow(state_root / "enrollment.json")
     state_root_created = not exists_nofollow(state_root)
     state_parent_created = not exists_nofollow(state_root.parent)
     previous_observation = snapshot_optional_regular(observations)
-    state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = enrollment_lock(state_root)
-    lock_created = not exists_nofollow(lock_path)
+    lock_created = not existing_enrollment and not exists_nofollow(lock_path)
     lock_parent_created = not exists_nofollow(lock_path.parent)
-    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (opened_user_directory(home, "plugins", uid, gid, create=True) as plugin_directory,
-          opened_user_directory(home, "desktop-plugins", uid, gid, create=True) as desktop_directory,
-          lock_path.open("a+b") as lock):
+    if existing_enrollment:
+        try:
+            root_info = os.lstat(state_root)
+        except OSError as exc:
+            raise EnrollmentError("invalid_lock") from exc
+        if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != 0
+                or stat.S_IMODE(root_info.st_mode) != 0o700):
+            raise EnrollmentError("invalid_lock")
+    else:
+        state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.ExitStack() as stack:
+        lock = stack.enter_context(open_enrollment_lock(lock_path, create=not existing_enrollment))
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        plugin_directory = stack.enter_context(
+            opened_user_directory(home, "plugins", uid, gid, create=not existing_enrollment)
+        )
+        desktop_directory = stack.enter_context(
+            opened_user_directory(home, "desktop-plugins", uid, gid, create=not existing_enrollment)
+        )
         opened, plugins_created = plugin_directory
         desktop_parent, desktop_parent_created = desktop_directory
         assert opened is not None and desktop_parent is not None
-        os.chmod(lock_path, 0o600)
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+
         if (state_root / "transaction.json").exists():
             return emit("MANUAL_RECOVERY_REQUIRED", "active_transaction")
         state, category = assess(request, home, state_root, manifest, observations, opened)
         initial_absent = state == "ABSENT"
         if state == "ENROLLED":
+            return emit(state, category, noop=True)
+        if state == "VERIFY_REQUIRED":
             return emit(state, category, noop=True)
         generation = canonical_generation(manifest)
         if state == "RELOAD_REQUIRED":

@@ -203,12 +203,13 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertFalse(self.state.exists())
 
     def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile", fail_action=None,
-                     require_payload_before_prepare=False):
+                     require_payload_before_prepare=False, call_log=None):
         home = self.home if home is None else home
         adapter = self.base / "adapter.py"
         adapter.write_text(
             "#!/usr/bin/env python3\n"
             "import json, os, sys\n"
+            + (f"open({str(call_log)!r},'a').write(sys.argv[1]+'\\n')\n" if call_log else "") +
             f"if sys.argv[1] == {fail_action!r}: raise SystemExit(9)\n"
             "assert os.environ['HERMES_HOME']==" + repr(str(home)) + "\n"
             "assert os.environ['HERMES_PROFILE']==" + repr(profile) + "\n"
@@ -320,6 +321,91 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertTrue(output["noop"])
         after = {p.relative_to(target): (p.stat().st_mtime_ns, p.read_bytes()) for p in target.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
+
+    def _expire_enrollment(self, adapter):
+        result, _ = self.run_cli("apply", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observation = json.loads(self.obs_path.read_text(encoding="utf-8"))
+        observation["observed_at_ns"] -= 31_000_000_000
+        self.obs_path.write_text(json.dumps(observation), encoding="utf-8")
+
+    def _managed_snapshot(self):
+        result = {}
+        for root in (self.state, self.home / "plugins", self.home / "desktop-plugins"):
+            for path in ([root] if root.exists() or root.is_symlink() else []) + list(root.rglob("*")):
+                info = os.lstat(path)
+                result[str(path)] = (
+                    info.st_mode, info.st_uid, info.st_gid, info.st_nlink, info.st_ino,
+                    info.st_mtime_ns, info.st_ctime_ns,
+                    path.read_bytes() if stat.S_ISREG(info.st_mode) else None,
+                )
+        info = os.lstat(self.obs_path)
+        result[str(self.obs_path)] = (info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+                                      info.st_ino, info.st_mtime_ns, info.st_ctime_ns,
+                                      self.obs_path.read_bytes())
+        return result
+
+    def test_expired_repeat_is_nonzero_noop_and_preserves_every_managed_object(self):
+        calls = self.base / "adapter.calls"
+        adapter = self.make_adapter(call_log=calls)
+        self._expire_enrollment(adapter)
+        calls.write_text("", encoding="utf-8")
+        before = self._managed_snapshot()
+
+        result, output = self.run_cli("apply", "--adapter", adapter)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output, {"schema": 1, "state": "VERIFY_REQUIRED",
+                                  "category": "observation_expired", "noop": True})
+        self.assertEqual(self._managed_snapshot(), before)
+        self.assertEqual(calls.read_text(encoding="utf-8"), "")
+
+    def test_existing_enrollment_missing_lock_is_not_recreated(self):
+        adapter = self.make_adapter()
+        self._expire_enrollment(adapter)
+        lock = self.state / "enrollment.lock"
+        lock.unlink()
+        before = self._managed_snapshot()
+
+        result, output = self.run_cli("apply", "--adapter", adapter)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(lock.exists())
+        self.assertEqual(output["category"], "invalid_lock")
+        self.assertEqual(self._managed_snapshot(), before)
+
+    def test_existing_enrollment_hostile_locks_fail_closed_unchanged(self):
+        adapter = self.make_adapter()
+        self._expire_enrollment(adapter)
+        lock = self.state / "enrollment.lock"
+        lock.unlink()
+        hostile = self.base / "hostile-lock"
+        hostile.write_bytes(b"hostile")
+        cases = ("symlink", "directory", "hardlink", "mode", "owner")
+        for case in cases:
+            with self.subTest(case=case):
+                if case == "symlink":
+                    lock.symlink_to(hostile)
+                elif case == "directory":
+                    lock.mkdir()
+                elif case == "hardlink":
+                    os.link(hostile, lock)
+                else:
+                    lock.write_bytes(b"lock")
+                    lock.chmod(0o644 if case == "mode" else 0o600)
+                    if case == "owner":
+                        os.chown(lock, 1, -1)
+                before = self._managed_snapshot()
+                try:
+                    result, output = self.run_cli("apply", "--adapter", adapter)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(output["category"], "invalid_lock")
+                    self.assertEqual(self._managed_snapshot(), before)
+                finally:
+                    if lock.is_dir() and not lock.is_symlink():
+                        lock.rmdir()
+                    else:
+                        lock.unlink()
 
     def test_attestation_observation_schema_is_exact(self):
         result, _ = self.run_cli("apply", "--adapter", self.make_adapter())

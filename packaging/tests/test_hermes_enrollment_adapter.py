@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import json
@@ -516,6 +517,65 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(self.module.AdapterError, "source_cardinality"):
             self.module._exact_source({"sources": [transient_cli, valid]}, context, gateway)
+
+    def test_initial_source_readiness_retries_only_typed_connection_refusal(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        status = self._status_payload({"sources": [self._v3_source()]})
+        refusal = self.module.AdapterError("status_connection_refused")
+        with mock.patch.object(self.module, "_status", side_effect=[refusal, status]) as read_status, \
+                mock.patch.object(self.module, "_bounded_sleep") as sleep:
+            actual, _ = self.module._wait_for_source(
+                context, gateway, 1234, retry_connection_refused=True
+            )
+        self.assertIs(actual, status)
+        self.assertEqual(read_status.call_count, 2)
+        sleep.assert_called_once_with(1234)
+
+    def test_source_readiness_refusal_is_terminal_without_authorized_retry(self):
+        refusal = self.module.AdapterError("status_connection_refused")
+        with mock.patch.object(self.module, "_status", side_effect=refusal), \
+                mock.patch.object(self.module, "_bounded_sleep") as sleep, \
+                self.assertRaisesRegex(self.module.AdapterError, "status_connection_refused"):
+            self.module._wait_for_source({}, self.module.ProcessIdentity(1, 2, 3), 1234)
+        sleep.assert_not_called()
+
+    def test_persistent_initial_refusal_stops_at_inherited_deadline(self):
+        refusal = self.module.AdapterError("status_connection_refused")
+        deadline = self.module.AdapterError("deadline")
+        with mock.patch.object(self.module, "_status", side_effect=refusal) as read_status, \
+                mock.patch.object(self.module, "_bounded_sleep", side_effect=deadline), \
+                self.assertRaisesRegex(self.module.AdapterError, "deadline"):
+            self.module._wait_for_source(
+                {}, self.module.ProcessIdentity(1, 2, 3), 1234,
+                retry_connection_refused=True,
+            )
+        read_status.assert_called_once_with(1234)
+
+    def test_source_readiness_retries_no_other_error(self):
+        for category in ("readback_failure", "status_timeout"):
+            with self.subTest(category=category), \
+                    mock.patch.object(self.module, "_status",
+                                      side_effect=self.module.AdapterError(category)), \
+                    mock.patch.object(self.module, "_bounded_sleep") as sleep, \
+                    self.assertRaisesRegex(self.module.AdapterError, category):
+                self.module._wait_for_source(
+                    {}, self.module.ProcessIdentity(1, 2, 3), 1234,
+                    retry_connection_refused=True,
+                )
+            sleep.assert_not_called()
+
+    def test_status_types_only_errno_econnrefused(self):
+        for error, category in ((ConnectionRefusedError(errno.ECONNREFUSED, "refused"),
+                                 "status_connection_refused"),
+                                (ConnectionRefusedError(errno.EACCES, "denied"), "readback_failure")):
+            client = mock.MagicMock()
+            client.__enter__.return_value = client
+            client.connect.side_effect = error
+            with self.subTest(category=category), mock.patch.object(
+                self.module.socket, "socket", return_value=client
+            ), self.assertRaisesRegex(self.module.AdapterError, category):
+                self.module._status()
 
     def test_exact_v3_source_rejects_unknown_missing_and_mistyped_schema(self):
         context = {"uid": 1000, "generation": "b" * 64}

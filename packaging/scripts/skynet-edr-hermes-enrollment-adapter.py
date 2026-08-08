@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import grp
 import hashlib
 import json
@@ -714,7 +715,12 @@ def _status(deadline_ns: int | None = None, *, allow_disabled: bool = False) -> 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
             client.settimeout(_remaining_seconds(deadline_ns, 3.0))
-            client.connect(("127.0.0.1", 8787))
+            try:
+                client.connect(("127.0.0.1", 8787))
+            except ConnectionRefusedError as exc:
+                if exc.errno == errno.ECONNREFUSED:
+                    raise AdapterError("status_connection_refused") from exc
+                raise
             request = b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
             client.settimeout(_remaining_seconds(deadline_ns, 1.0))
             client.sendall(request)
@@ -1314,9 +1320,16 @@ def _old_identity_gone(identity: ProcessIdentity, deadline_ns: int) -> bool:
 
 
 def _wait_for_source(context: dict[str, Any], gateway: ProcessIdentity,
-                     deadline_ns: int) -> tuple[dict[str, Any], dict[str, Any]]:
+                     deadline_ns: int, *, retry_connection_refused: bool = False
+                     ) -> tuple[dict[str, Any], dict[str, Any]]:
     while True:
-        status = _status(deadline_ns)
+        try:
+            status = _status(deadline_ns)
+        except AdapterError as exc:
+            if not retry_connection_refused or exc.category != "status_connection_refused":
+                raise
+            _bounded_sleep(deadline_ns)
+            continue
         ingestion = status.get("ingestion")
         if type(ingestion) is not dict:
             raise AdapterError("readback_failure")
@@ -1380,7 +1393,9 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
             or not _gateway_context_matches(context, deadline_ns)):
         raise AdapterError("readback_failure")
 
-    status, source = _wait_for_source(context, after[UNIT], deadline_ns)
+    status, source = _wait_for_source(
+        context, after[UNIT], deadline_ns, retry_connection_refused=True
+    )
     baseline = _startup_canary_baseline(source, event_id)
     if previous_nonce is not None and baseline["runtime_instance_nonce"] == previous_nonce:
         raise AdapterError("source_identity")
