@@ -14,8 +14,8 @@ use std::{
 
 use skynet_edr_core::LocalStore;
 use skynet_edr_daemon::{
-    bind_ingest_listener, process_ingest_connection, IngestionHealth, ProducerRole,
-    UnixIngestConfig,
+    authenticate_ingest_peer, bind_ingest_listener, process_ingest_connection, IngestionHealth,
+    ProducerRole, UnixIngestConfig,
 };
 
 const CANONICAL_EVENT: &str =
@@ -65,6 +65,79 @@ fn health_report(version: u64, role: Option<&str>, instance_id: Option<&str>) ->
         report["instance_id"] = serde_json::json!(instance_id);
     }
     report
+}
+
+fn v3_health(role: &str, generation: &str, nonce: &str) -> serde_json::Value {
+    serde_json::json!({
+        "version": 3,
+        "message_type": "producer_health",
+        "runtime_role": role,
+        "plugin_generation": generation,
+        "runtime_instance_nonce": nonce,
+        "checkpoint_bytes": 0,
+        "backlog_bytes": 0,
+        "backlog_age_ms": null,
+        "events_dropped_total": 0,
+        "events_malformed_total": 0,
+        "transport_state": "available"
+    })
+}
+
+fn v3_event(
+    role: &str,
+    generation: &str,
+    nonce: &str,
+    event: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "version": 3,
+        "message_type": "canonical_event",
+        "runtime_role": role,
+        "plugin_generation": generation,
+        "runtime_instance_nonce": nonce,
+        "event": event
+    })
+}
+
+fn v3_event_raw(event: &str) -> String {
+    format!(
+        r#"{{"version":3,"message_type":"canonical_event","runtime_role":"gateway","plugin_generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime_instance_nonce":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","event":{event}}}"#
+    )
+}
+
+fn duplicate_json_field(frame: &str, field: &str, first: &str, second: &str) -> String {
+    let original = format!(r#""{field}":{second}"#);
+    let duplicate = format!(r#""{field}":{first},"{field}":{second}"#);
+    let mutated = frame.replacen(&original, &duplicate, 1);
+    assert_ne!(mutated, frame, "duplicate fixture field {field}");
+    mutated
+}
+
+fn assert_duplicate_health_rejected(name: &str, report: &str) {
+    let db_path = temp_path(&format!("duplicate-health-{name}.sqlite"));
+    let config = config(
+        temp_path(&format!("duplicate-health-{name}.sock")),
+        vec![1_234],
+    );
+    let health = IngestionHealth::with_required_reported_roles(vec![ProducerRole::Gateway]);
+    health.record_listener_started();
+    let ack = exchange_with_health(1_234, &config, &db_path, &frame(report.as_bytes()), &health);
+
+    assert!(
+        ack.contains(r#""status":"rejected_permanent""#)
+            && ack.contains(r#""reason":"invalid_health""#),
+        "{name}: {ack}"
+    );
+    assert!(!ack.contains("health_recorded"), "{name}: {ack}");
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["state"], "degraded", "{name}");
+    assert_eq!(status["sources"], serde_json::json!([]), "{name}");
+    assert_eq!(
+        status["required_reported_roles"][0]["state"], "absent",
+        "{name}"
+    );
+    assert_eq!(health.snapshot().events_persisted_total, 0, "{name}");
+    assert!(!db_path.exists(), "{name}");
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {
@@ -160,10 +233,27 @@ fn exchange_with_health(
     client
         .shutdown(std::net::Shutdown::Write)
         .expect("request completes");
-    process_ingest_connection(server, uid, config, db_path, health).expect("connection handled");
+    process_with_test_uid(server, uid, config, db_path, health);
     let mut ack = String::new();
     client.read_to_string(&mut ack).expect("ack reads");
     ack
+}
+
+fn process_with_test_uid(
+    server: UnixStream,
+    uid: u32,
+    config: &UnixIngestConfig,
+    db_path: &std::path::Path,
+    health: &IngestionHealth,
+) {
+    let peer = authenticate_ingest_peer(&server).expect("peer identity captured once");
+    let mut effective_config = config.clone();
+    if config.allowed_uids.contains(&uid) {
+        effective_config.allowed_uids = vec![peer.uid()];
+        effective_config.allow_root = peer.uid() == 0;
+    }
+    process_ingest_connection(server, &peer, &effective_config, db_path, health)
+        .expect("connection handled");
 }
 
 #[test]
@@ -239,20 +329,26 @@ fn repeated_frames_do_not_rerun_legacy_incident_normalization() {
 
 #[test]
 fn collision_ack_is_explicit_only_after_durable_evidence() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const FIRST_NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const COLLISION_NONCE: &str =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let db_path = temp_path("collision.sqlite");
     drop(LocalStore::open(&db_path).expect("startup migration succeeds"));
     let config = config(temp_path("collision.sock"), vec![1_234, 2_345]);
     let mut event: serde_json::Value =
         serde_json::from_str(CANONICAL_EVENT).expect("fixture parses");
     event["event_id"] = serde_json::json!("evt_unix_collision");
-    let first_payload = serde_json::to_vec(&event).expect("event serializes");
+    let first = v3_event("gateway", GENERATION, FIRST_NONCE, &event);
+    let first_payload = serde_json::to_vec(&first).expect("event serializes");
     let health = IngestionHealth::default();
     assert!(
         exchange_with_health(1_234, &config, &db_path, &frame(&first_payload), &health,)
             .contains(r#""status":"persisted""#)
     );
     event["title"] = serde_json::json!("FAKE_COLLISION_PAYLOAD_MUST_NOT_PERSIST");
-    let collision_payload = serde_json::to_vec(&event).expect("collision serializes");
+    let collision = v3_event("gateway", GENERATION, COLLISION_NONCE, &event);
+    let collision_payload = serde_json::to_vec(&collision).expect("collision serializes");
 
     let ack = exchange_with_health(
         2_345,
@@ -270,9 +366,14 @@ fn collision_ack_is_explicit_only_after_durable_evidence() {
         1
     );
     let status = health.status_json(Duration::from_secs(30));
-    assert_eq!(status["sources"][1]["source_id"], "uid:2345");
-    assert!(status["sources"][1]["last_event_committed_at_unix_ms"].is_null());
-    assert_eq!(status["sources"][1]["events_collision_total"], 1);
+    let collision_source = status["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["runtime_instance_nonce"] == COLLISION_NONCE)
+        .unwrap();
+    assert!(collision_source["last_event_committed_at_unix_ms"].is_null());
+    assert_eq!(collision_source["events_collision_total"], 1);
     let _ = fs::remove_file(db_path);
 }
 
@@ -284,8 +385,7 @@ fn unauthorized_peer_is_rejected_before_payload_read() {
     let (mut client, server) = UnixStream::pair().expect("stream pair opens");
 
     let started = Instant::now();
-    process_ingest_connection(server, 9_999, &config, &db_path, &health)
-        .expect("unauthorized connection is handled");
+    process_with_test_uid(server, 9_999, &config, &db_path, &health);
     assert!(started.elapsed() < Duration::from_millis(50));
     assert_eq!(health.snapshot().connections_unauthorized_total, 1);
     assert!(client
@@ -312,8 +412,7 @@ fn zero_oversize_malformed_and_slow_frames_persist_nothing() {
     slow_client
         .write_all(&[0, 0])
         .expect("partial header writes");
-    process_ingest_connection(slow_server, 1_234, &config, &db_path, &health)
-        .expect("slow frame timeout is isolated");
+    process_with_test_uid(slow_server, 1_234, &config, &db_path, &health);
     assert_eq!(health.snapshot().frames_timeout_total, 1);
     assert!(!db_path.exists());
 }
@@ -335,8 +434,7 @@ fn slow_drip_cannot_extend_the_absolute_frame_deadline() {
         }
     });
 
-    process_ingest_connection(server, 1_234, &config, &db_path, &health)
-        .expect("slow-drip frame is isolated");
+    process_with_test_uid(server, 1_234, &config, &db_path, &health);
     assert!(
         started.elapsed() < Duration::from_millis(350),
         "absolute deadline must not reset after each byte"
@@ -449,7 +547,10 @@ fn authenticated_producer_health_is_source_aware_bounded_and_operator_safe() {
     let status = health.status_json(Duration::from_secs(30));
     assert_eq!(status["state"], "degraded");
     assert_eq!(status["listener_live"], true);
-    assert_eq!(status["sources"][0]["source_id"], "uid:1234");
+    assert_eq!(
+        status["sources"][0]["authenticated_uid"],
+        nix::unistd::Uid::effective().as_raw()
+    );
     assert_eq!(status["sources"][0]["producer_checkpoint_bytes"], 128);
     assert_eq!(status["sources"][0]["backlog_bytes"], 64);
     assert_eq!(status["sources"][0]["backlog_age_ms"], 250);
@@ -632,6 +733,552 @@ fn legacy_health_is_observable_but_cannot_satisfy_explicit_role() {
 }
 
 #[test]
+fn v3_health_and_event_share_exact_source_and_only_persist_advances_commit_sequence() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const COLLISION_NONCE: &str =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let db_path = temp_path("v3-attribution.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("v3-attribution.sock"), vec![1_234]);
+    let health = IngestionHealth::with_required_reported_roles(vec![ProducerRole::Gateway]);
+    health.record_listener_started();
+    let report = v3_health("gateway", GENERATION, NONCE);
+    let health_ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&report).unwrap()),
+        &health,
+    );
+    assert!(health_ack.contains("health_recorded"), "{health_ack}");
+    let health_only = health.status_json(Duration::from_secs(30));
+    assert_eq!(health_only["sources"][0]["s3_eligible"], true);
+    assert_eq!(health_only["sources"][0]["events_persisted_total"], 0);
+
+    let mut event: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).unwrap();
+    event["event_id"] = serde_json::json!("evt_v3_exact_source");
+    let envelope = v3_event("gateway", GENERATION, NONCE, &event);
+    let persisted = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&envelope).unwrap()),
+        &health,
+    );
+    assert!(persisted.contains(r#""status":"persisted""#), "{persisted}");
+    let duplicate = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&envelope).unwrap()),
+        &health,
+    );
+    assert!(duplicate.contains(r#""status":"duplicate""#), "{duplicate}");
+    let collision_envelope = v3_event("gateway", GENERATION, COLLISION_NONCE, &event);
+    let collision = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&collision_envelope).unwrap()),
+        &health,
+    );
+    assert!(collision.contains(r#""status":"collision""#), "{collision}");
+
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["sources"].as_array().unwrap().len(), 2);
+    let source = status["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["runtime_instance_nonce"] == NONCE)
+        .unwrap();
+    assert_eq!(source["protocol_version"], 3);
+    assert_eq!(source["s3_eligible"], true);
+    assert_eq!(source["plugin_generation"], GENERATION);
+    assert_eq!(source["runtime_instance_nonce"], NONCE);
+    assert_eq!(source["events_persisted_total"], 1);
+    assert_eq!(source["commit_sequence"], 1);
+    assert_eq!(source["events_duplicate_total"], 1);
+    assert_eq!(source["events_collision_total"], 0);
+    assert!(source["kernel_peer_pid"].is_i64());
+    assert!(source["kernel_peer_start_ticks"].is_u64());
+    assert!(source["last_event_received_at_unix_ms"].is_u64());
+    assert!(source["last_event_committed_at_unix_ms"].is_u64());
+    let collision_source = status["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["runtime_instance_nonce"] == COLLISION_NONCE)
+        .unwrap();
+    assert_eq!(collision_source["events_persisted_total"], 0);
+    assert_eq!(collision_source["commit_sequence"], 0);
+    assert_eq!(collision_source["events_collision_total"], 1);
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn persisted_attestation_projects_exact_safe_receipt_and_zero_incidents_on_same_source() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let db_path = temp_path("v3-attestation-proof.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("v3-attestation-proof.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    health.record_listener_started();
+    let report = v3_health("gateway", GENERATION, NONCE);
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&report).unwrap()),
+        &health,
+    );
+    let mut event: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).unwrap();
+    event["event_id"] = serde_json::json!(concat!(
+        "evt_skynet_attest_",
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    ));
+    event["event_type"] = serde_json::json!("agent.telemetry.attestation");
+    event["severity"] = serde_json::json!("informational");
+    event["source"] = serde_json::json!({
+        "kind": "sensor", "sensor": "hermes-plugin", "integration": "hermes"
+    });
+    event["trust_level"] = serde_json::json!("sensor_observation");
+    event["attributes"] = serde_json::json!({
+        "hook": "register", "producer_bound": true, "content_omitted": true,
+        "argument_count": 0, "keyword_count": 0, "message_count": 0
+    });
+    event["redaction"] = serde_json::json!({
+        "contains_sensitive_data": false, "redacted_fields": []
+    });
+    let envelope = v3_event("gateway", GENERATION, NONCE, &event);
+    let ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&envelope).unwrap()),
+        &health,
+    );
+    assert!(ack.contains(r#""status":"persisted""#), "{ack}");
+    let status = health.status_json(Duration::from_secs(30));
+    let source = &status["sources"][0];
+    assert_eq!(source["last_persisted_canary_event_id"], event["event_id"]);
+    assert_eq!(source["last_persisted_canary_receipt_status"], "persisted");
+    assert_eq!(source["last_persisted_canary_incidents_opened"], 0);
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn v3_event_only_source_is_not_s3_eligible_before_exact_health() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let db_path = temp_path("v3-event-only.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("v3-event-only.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    let mut event: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).unwrap();
+    event["event_id"] = serde_json::json!("evt_v3_before_health");
+    let envelope = v3_event("gateway", GENERATION, NONCE, &event);
+
+    let ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&envelope).unwrap()),
+        &health,
+    );
+
+    assert!(ack.contains(r#""status":"persisted""#), "{ack}");
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["sources"][0]["s3_eligible"], false);
+    assert!(status["sources"][0]["producer_reported_at_unix_ms"].is_null());
+    assert_eq!(status["sources"][0]["events_persisted_total"], 1);
+    let report = v3_health("gateway", GENERATION, NONCE);
+    let health_ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&report).unwrap()),
+        &health,
+    );
+    assert!(health_ack.contains("health_recorded"), "{health_ack}");
+    let eligible = health.status_json(Duration::from_secs(30));
+    assert_eq!(eligible["sources"][0]["s3_eligible"], true);
+    assert_eq!(eligible["sources"][0]["events_persisted_total"], 1);
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn v3_valid_identity_with_invalid_nested_event_is_attributed_to_exact_source() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let db_path = temp_path("v3-invalid-nested.sqlite");
+    let config = config(temp_path("v3-invalid-nested.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    let envelope = v3_event(
+        "gateway",
+        GENERATION,
+        NONCE,
+        &serde_json::json!({"schema_version":"not-canonical"}),
+    );
+
+    let ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&envelope).unwrap()),
+        &health,
+    );
+
+    assert!(ack.contains(r#""reason":"invalid_event""#), "{ack}");
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(status["sources"][0]["runtime_role"], "gateway");
+    assert_eq!(status["sources"][0]["plugin_generation"], GENERATION);
+    assert_eq!(status["sources"][0]["runtime_instance_nonce"], NONCE);
+    assert_eq!(status["sources"][0]["events_malformed_total"], 1);
+    assert_eq!(
+        status["sources"][0]["last_error_category"],
+        "malformed_frame"
+    );
+    assert!(!db_path.exists());
+}
+
+#[test]
+fn v3_rejects_duplicate_keys_throughout_raw_nested_events_without_persistence() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let cases = [
+        (
+            "event_id",
+            r#""event_id": "evt_01HZCANONICAL","#,
+            r#""event_id": "evt_duplicate", "event_id": "evt_01HZCANONICAL","#,
+        ),
+        (
+            "attributes",
+            r#""attributes": {"#,
+            r#""attributes": {}, "attributes": {"#,
+        ),
+        (
+            "attribute metadata",
+            r#""direct_ip": true"#,
+            r#""direct_ip": false, "direct_ip": true"#,
+        ),
+        (
+            "redaction metadata",
+            r#""contains_sensitive_data": true,"#,
+            r#""contains_sensitive_data": false, "contains_sensitive_data": true,"#,
+        ),
+        (
+            "redaction array metadata",
+            r#""path": "attributes.token","#,
+            r#""path": "attributes.command", "path": "attributes.token","#,
+        ),
+        (
+            "numeric field",
+            r#""observed_at_unix_ms": 1781560000000,"#,
+            r#""observed_at_unix_ms": 1, "observed_at_unix_ms": 1781560000000,"#,
+        ),
+    ];
+
+    for (name, original, duplicate) in cases {
+        let event = CANONICAL_EVENT.replacen(original, duplicate, 1);
+        assert_ne!(event, CANONICAL_EVENT, "{name} fixture mutation");
+        let db_path = temp_path(&format!("v3-duplicate-{name}.sqlite"));
+        let config = config(temp_path(&format!("v3-duplicate-{name}.sock")), vec![1_234]);
+        let health = IngestionHealth::default();
+        let report = v3_health("gateway", GENERATION, NONCE);
+        let health_ack = exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&report).unwrap()),
+            &health,
+        );
+        assert!(
+            health_ack.contains("health_recorded"),
+            "{name}: {health_ack}"
+        );
+
+        let ack = exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(v3_event_raw(&event).as_bytes()),
+            &health,
+        );
+
+        assert!(
+            ack.contains(r#""status":"rejected_permanent""#)
+                && ack.contains(r#""reason":"invalid_event""#),
+            "{name}: {ack}"
+        );
+        let status = health.status_json(Duration::from_secs(30));
+        assert_eq!(status["sources"].as_array().unwrap().len(), 1, "{name}");
+        assert_eq!(status["sources"][0]["runtime_role"], "gateway", "{name}");
+        assert_eq!(
+            status["sources"][0]["plugin_generation"], GENERATION,
+            "{name}"
+        );
+        assert_eq!(
+            status["sources"][0]["runtime_instance_nonce"], NONCE,
+            "{name}"
+        );
+        assert_eq!(status["sources"][0]["events_persisted_total"], 0, "{name}");
+        assert_eq!(status["sources"][0]["commit_sequence"], 0, "{name}");
+        assert_eq!(status["sources"][0]["events_malformed_total"], 1, "{name}");
+        assert!(!db_path.exists(), "{name}");
+    }
+}
+
+#[test]
+fn v3_rejects_duplicate_envelope_identity_fields_without_source_success() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let event = v3_event_raw(CANONICAL_EVENT);
+    let event_cases = [
+        event.replacen(
+            r#""runtime_role":"gateway""#,
+            r#""runtime_role":"gateway","runtime_role":"gateway""#,
+            1,
+        ),
+        event.replacen(
+            &format!(r#""plugin_generation":"{GENERATION}""#),
+            &format!(r#""plugin_generation":"{GENERATION}","plugin_generation":"{GENERATION}""#),
+            1,
+        ),
+        event.replacen(
+            &format!(r#""runtime_instance_nonce":"{NONCE}""#),
+            &format!(r#""runtime_instance_nonce":"{NONCE}","runtime_instance_nonce":"{NONCE}""#),
+            1,
+        ),
+    ];
+    let health = format!(
+        r#"{{"version":3,"message_type":"producer_health","runtime_role":"gateway","plugin_generation":"{GENERATION}","runtime_instance_nonce":"{NONCE}","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}}"#
+    );
+    let health_cases = [
+        health.replacen(
+            r#""runtime_role":"gateway""#,
+            r#""runtime_role":"gateway","runtime_role":"gateway""#,
+            1,
+        ),
+        health.replacen(
+            &format!(r#""plugin_generation":"{GENERATION}""#),
+            &format!(r#""plugin_generation":"{GENERATION}","plugin_generation":"{GENERATION}""#),
+            1,
+        ),
+        health.replacen(
+            &format!(r#""runtime_instance_nonce":"{NONCE}""#),
+            &format!(r#""runtime_instance_nonce":"{NONCE}","runtime_instance_nonce":"{NONCE}""#),
+            1,
+        ),
+    ];
+
+    for (kind, cases, reason) in [
+        ("event", event_cases.as_slice(), "invalid_event"),
+        ("health", health_cases.as_slice(), "invalid_health"),
+    ] {
+        for (index, envelope) in cases.iter().enumerate() {
+            let db_path = temp_path(&format!("v3-duplicate-{kind}-identity-{index}.sqlite"));
+            let config = config(
+                temp_path(&format!("v3-duplicate-{kind}-identity-{index}.sock")),
+                vec![1_234],
+            );
+            let source_health = IngestionHealth::default();
+            let ack = exchange_with_health(
+                1_234,
+                &config,
+                &db_path,
+                &frame(envelope.as_bytes()),
+                &source_health,
+            );
+            assert!(
+                ack.contains(r#""status":"rejected_permanent""#) && ack.contains(reason),
+                "{kind} {index}: {ack}"
+            );
+            assert_eq!(source_health.snapshot().events_persisted_total, 0);
+            assert!(
+                source_health.status_json(Duration::from_secs(30))["sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|source| source["s3_eligible"] == false)
+            );
+            assert!(!db_path.exists(), "{kind} {index}");
+        }
+    }
+}
+
+#[test]
+fn duplicate_health_fields_are_rejected_before_version_dispatch_without_source_success() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let v1 = r#"{"version":1,"message_type":"producer_health","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}"#;
+    let v2 = r#"{"version":2,"message_type":"producer_health","runtime_role":"gateway","instance_id":"gateway-a1","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}"#;
+    let v3 = format!(
+        r#"{{"version":3,"message_type":"producer_health","runtime_role":"gateway","plugin_generation":"{GENERATION}","runtime_instance_nonce":"{NONCE}","checkpoint_bytes":0,"backlog_bytes":0,"backlog_age_ms":null,"events_dropped_total":0,"events_malformed_total":0,"transport_state":"available"}}"#
+    );
+    let cases = [
+        (
+            "version-3-then-2",
+            duplicate_json_field(v2, "version", "3", "2"),
+        ),
+        (
+            "version-2-then-3",
+            duplicate_json_field(&v3, "version", "2", "3"),
+        ),
+        (
+            "version-3-then-1",
+            duplicate_json_field(v1, "version", "3", "1"),
+        ),
+        (
+            "message-type",
+            duplicate_json_field(
+                v2,
+                "message_type",
+                r#""producer_health""#,
+                r#""producer_health""#,
+            ),
+        ),
+        (
+            "runtime-role",
+            duplicate_json_field(v2, "runtime_role", r#""gateway""#, r#""gateway""#),
+        ),
+        (
+            "instance-id",
+            duplicate_json_field(v2, "instance_id", r#""gateway-a1""#, r#""gateway-a1""#),
+        ),
+        (
+            "plugin-generation",
+            duplicate_json_field(
+                &v3,
+                "plugin_generation",
+                &format!(r#""{GENERATION}""#),
+                &format!(r#""{GENERATION}""#),
+            ),
+        ),
+        (
+            "runtime-instance-nonce",
+            duplicate_json_field(
+                &v3,
+                "runtime_instance_nonce",
+                &format!(r#""{NONCE}""#),
+                &format!(r#""{NONCE}""#),
+            ),
+        ),
+        (
+            "checkpoint-bytes",
+            duplicate_json_field(v2, "checkpoint_bytes", "1", "0"),
+        ),
+        (
+            "backlog-bytes",
+            duplicate_json_field(v2, "backlog_bytes", "1", "0"),
+        ),
+        (
+            "backlog-age-ms",
+            duplicate_json_field(v2, "backlog_age_ms", "1", "null"),
+        ),
+        (
+            "events-dropped-total",
+            duplicate_json_field(v2, "events_dropped_total", "1", "0"),
+        ),
+        (
+            "events-malformed-total",
+            duplicate_json_field(v2, "events_malformed_total", "1", "0"),
+        ),
+        (
+            "transport-state",
+            duplicate_json_field(v2, "transport_state", r#""degraded""#, r#""available""#),
+        ),
+    ];
+
+    for (name, report) in cases {
+        assert_duplicate_health_rejected(name, &report);
+    }
+}
+
+#[test]
+fn v3_rejects_noncanonical_or_reused_identity_and_unknown_fields_without_leakage() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let db_path = temp_path("v3-hostile.sqlite");
+    let config = config(temp_path("v3-hostile.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    let mut cases = vec![
+        v3_health("gateway", "A", NONCE),
+        v3_health("gateway", GENERATION, "b"),
+        v3_health("gateway", GENERATION, GENERATION),
+    ];
+    let mut unknown = v3_health("gateway", GENERATION, NONCE);
+    unknown["path"] = serde_json::json!("/root/FAKE_V3_SECRET");
+    cases.push(unknown);
+    for report in cases {
+        let ack = exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&report).unwrap()),
+            &health,
+        );
+        assert!(ack.contains(r#""reason":"invalid_health""#), "{ack}");
+    }
+    let mut event: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).unwrap();
+    event["event_id"] = serde_json::json!("evt_v3_unknown_field");
+    let mut envelope = v3_event("gateway", GENERATION, NONCE, &event);
+    envelope["payload_path"] = serde_json::json!("/root/FAKE_V3_EVENT_SECRET");
+    let ack = exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&envelope).unwrap()),
+        &health,
+    );
+    assert!(ack.contains(r#""reason":"invalid_event""#), "{ack}");
+    let serialized = health.status_json(Duration::from_secs(30)).to_string();
+    assert!(!serialized.contains("FAKE_V3_SECRET"));
+    assert!(!serialized.contains("FAKE_V3_EVENT_SECRET"));
+    assert!(!db_path.exists());
+}
+
+#[test]
+fn v1_v2_and_raw_sources_are_visible_but_explicitly_s3_ineligible() {
+    let db_path = temp_path("legacy-eligibility.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("legacy-eligibility.sock"), vec![1_234]);
+    let health = IngestionHealth::default();
+    for report in [
+        health_report(1, None, None),
+        health_report(2, Some("gateway"), Some("gateway-v2")),
+    ] {
+        exchange_with_health(
+            1_234,
+            &config,
+            &db_path,
+            &frame(&serde_json::to_vec(&report).unwrap()),
+            &health,
+        );
+    }
+    let mut event: serde_json::Value = serde_json::from_str(CANONICAL_EVENT).unwrap();
+    event["event_id"] = serde_json::json!("evt_raw_legacy_visibility");
+    exchange_with_health(
+        1_234,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&event).unwrap()),
+        &health,
+    );
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["sources"].as_array().unwrap().len(), 2);
+    assert!(status["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|source| source["s3_eligible"] == false));
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
 fn heartbeat_and_hook_event_freshness_are_separate_and_required_role_stales() {
     let db_path = temp_path("freshness.sqlite");
     let config = config(temp_path("freshness.sock"), vec![1_234]);
@@ -694,12 +1341,12 @@ fn hostile_v2_attribution_is_rejected_and_instances_remain_independent() {
 }
 
 #[test]
-fn source_cap_applies_to_complete_identities_and_existing_identity_can_refresh() {
+fn v3_source_cap_applies_to_exact_identities_and_existing_identity_can_refresh() {
     let db_path = temp_path("source-cap.sqlite");
     let config = config(temp_path("source-cap.sock"), vec![1_000]);
     let health = IngestionHealth::default();
     for index in 0..64 {
-        let report = health_report(2, Some("worker"), Some(&format!("worker-{index}")));
+        let report = v3_health("worker", &format!("{index:064x}"), &"f".repeat(64));
         let ack = exchange_with_health(
             1_000,
             &config,
@@ -709,7 +1356,7 @@ fn source_cap_applies_to_complete_identities_and_existing_identity_can_refresh()
         );
         assert!(ack.contains(r#""status":"health_recorded""#), "{ack}");
     }
-    let overflow = health_report(2, Some("gateway"), Some("gate-overflow"));
+    let overflow = v3_health("gateway", &format!("{:064x}", 64), &"f".repeat(64));
     let rejected = exchange_with_health(
         1_000,
         &config,
@@ -722,7 +1369,7 @@ fn source_cap_applies_to_complete_identities_and_existing_identity_can_refresh()
         "{rejected}"
     );
 
-    let existing = health_report(2, Some("worker"), Some("worker-0"));
+    let existing = v3_health("worker", &format!("{:064x}", 0), &"f".repeat(64));
     let accepted = exchange_with_health(
         1_000,
         &config,
@@ -784,14 +1431,14 @@ fn stale_optional_instance_stays_visible_without_poisoning_fresh_required_gatewa
 }
 
 #[test]
-fn stale_identity_retention_evicts_before_capacity_is_consumed_forever() {
+fn stale_v3_identity_retention_evicts_before_capacity_is_consumed_forever() {
     let db_path = temp_path("source-eviction.sqlite");
     let config = config(temp_path("source-eviction.sock"), vec![1_234]);
     let health = IngestionHealth::with_required_reported_roles_and_retention(
         Vec::new(),
         Duration::from_millis(1),
     );
-    let old = health_report(2, Some("worker"), Some("worker-old"));
+    let old = v3_health("worker", &"a".repeat(64), &"b".repeat(64));
     exchange_with_health(
         1_234,
         &config,
@@ -800,7 +1447,7 @@ fn stale_identity_retention_evicts_before_capacity_is_consumed_forever() {
         &health,
     );
     thread::sleep(Duration::from_millis(3));
-    let current = health_report(2, Some("worker"), Some("worker-current"));
+    let current = v3_health("worker", &"c".repeat(64), &"d".repeat(64));
     exchange_with_health(
         1_234,
         &config,
@@ -811,7 +1458,7 @@ fn stale_identity_retention_evicts_before_capacity_is_consumed_forever() {
 
     let status = health.status_json(Duration::from_secs(30));
     assert_eq!(status["sources"].as_array().unwrap().len(), 1);
-    assert_eq!(status["sources"][0]["instance_id"], "worker-current");
+    assert_eq!(status["sources"][0]["plugin_generation"], "c".repeat(64));
 }
 
 #[test]
@@ -1218,7 +1865,10 @@ fn unix_incident_collision_diagnostic_failure_returns_retry_later() {
 }
 
 #[test]
-fn unix_different_peer_uids_do_not_correlate() {
+fn unix_different_v3_source_keys_do_not_correlate() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const FIRST_NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SECOND_NONCE: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let db_path = temp_path("p1a-uid-isolation.sqlite");
     drop(LocalStore::open(&db_path).expect("schema initializes"));
     let config = config(temp_path("p1a-uid-isolation.sock"), vec![1_304, 2_304]);
@@ -1245,8 +1895,22 @@ fn unix_different_peer_uids_do_not_correlate() {
         "FAKE_UNIX_TRACE_29",
         successor_attrs,
     );
-    assert!(p1a_exchange(1_304, &config, &db_path, &precursor).contains("persisted"));
-    assert!(p1a_exchange(2_304, &config, &db_path, &successor).contains("persisted"));
+    let first = v3_event("gateway", GENERATION, FIRST_NONCE, &precursor);
+    let second = v3_event("gateway", GENERATION, SECOND_NONCE, &successor);
+    assert!(exchange(
+        1_304,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&first).unwrap())
+    )
+    .contains("persisted"));
+    assert!(exchange(
+        2_304,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&second).unwrap())
+    )
+    .contains("persisted"));
     assert!(LocalStore::open_read_only(&db_path)
         .unwrap()
         .list_incidents()

@@ -22,7 +22,7 @@ FIXTURE_FILES = (
     "crates/skynet-edr-cli/Cargo.toml",
     "crates/skynet-edr-daemon/Cargo.toml",
     "crates/skynet-edr-mcp/Cargo.toml",
-    "docs/releases/v0.4.1.md",
+    "docs/releases/v0.5.0.md",
     "README.md",
     "docs/ROADMAP.md",
     "docs/INSTALL.md",
@@ -67,17 +67,17 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             "skynet-edr-core": "",
             "skynet-edr-cli": (
                 "[dependencies]\n"
-                'skynet-edr-core = { version = "0.4.1", path = "../skynet-edr-core" }\n'
+                'skynet-edr-core = { version = "0.5.0", path = "../skynet-edr-core" }\n'
             ),
             "skynet-edr-daemon": (
                 "[dependencies]\n"
-                'skynet-edr-core = { version = "0.4.1", path = "../skynet-edr-core" }\n'
-                'skynet-edr-mcp = { version = "0.4.1", path = "../skynet-edr-mcp" }\n'
+                'skynet-edr-core = { version = "0.5.0", path = "../skynet-edr-core" }\n'
+                'skynet-edr-mcp = { version = "0.5.0", path = "../skynet-edr-mcp" }\n'
                 "\n[dev-dependencies]\n"
             ),
             "skynet-edr-mcp": (
                 "[dependencies]\n"
-                'skynet-edr-core = { version = "0.4.1", path = "../skynet-edr-core" }\n'
+                'skynet-edr-core = { version = "0.5.0", path = "../skynet-edr-core" }\n'
             ),
         }
         for package_name, dependencies in manifests.items():
@@ -111,7 +111,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
     def test_rejects_duplicate_python_plugin_version_assignments(self) -> None:
         plugin = self.fixture_root / "integrations/hermes/skynet-edr/__init__.py"
         duplicate_assignments = (
-            'PLUGIN_VERSION = "0.4.1"',
+            'PLUGIN_VERSION = "0.5.0"',
             'PLUGIN_VERSION = "9.9.9"',
             'if True:\n    PLUGIN_VERSION = "9.9.9"',
             'PLUGIN_VERSION += ".hostile"',
@@ -194,7 +194,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
     def test_rejects_duplicate_plugin_yaml_version_keys(self) -> None:
         manifest = self.fixture_root / "integrations/hermes/skynet-edr/plugin.yaml"
         for duplicate_key, duplicate_value in (
-            ("version", '"0.4.1"'),
+            ("version", '"0.5.0"'),
             ("version", '"9.9.9"'),
             ("version", "9.9.9"),
             ('"version"', '"9.9.9"'),
@@ -227,7 +227,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
     def test_rejects_duplicate_nfpm_version_keys(self) -> None:
         manifest = self.fixture_root / "packaging/nfpm.yaml"
         for duplicate_key, duplicate_value in (
-            ("version", "${SKYNET_EDR_VERSION:-0.4.1}"),
+            ("version", "${SKYNET_EDR_VERSION:-0.5.0}"),
             ("version", "${SKYNET_EDR_VERSION:-9.9.9}"),
             ("version", "9.9.9"),
             ('"version"', "9.9.9"),
@@ -259,13 +259,13 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             self.fixture_root
             / "integrations/hermes/skynet-edr/dashboard/manifest.json"
         )
-        for duplicate_version in ("0.4.1", "9.9.9"):
+        for duplicate_version in ("0.5.0", "9.9.9"):
             with self.subTest(duplicate_version=duplicate_version):
                 original = manifest.read_text(encoding="utf-8")
                 manifest.write_text(
                     original.replace(
-                        '"version": "0.4.1",',
-                        '"version": "0.4.1",\n'
+                        '"version": "0.5.0",',
+                        '"version": "0.5.0",\n'
                         f'  "version": "{duplicate_version}",',
                         1,
                     ),
@@ -306,7 +306,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                 original = manifest.read_text(encoding="utf-8")
                 manifest.write_text(
                     original.replace(
-                        f'{dependency} = {{ version = "0.4.1"',
+                        f'{dependency} = {{ version = "0.5.0"',
                         f'{dependency} = {{ version = "9.9.9"',
                     ),
                     encoding="utf-8",
@@ -329,7 +329,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.4.1", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.5.0", path = "../skynet-edr-core" }',
                 'skynet-edr-core = { path = "../skynet-edr-core", version = "9.9.9" }',
             ),
             encoding="utf-8",
@@ -357,7 +357,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.4.1", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.5.0", path = "../skynet-edr-core" }',
                 'skynet-edr-core = { path = "../skynet-edr-core" }',
             ),
             encoding="utf-8",
@@ -378,7 +378,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.4.1", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.5.0", path = "../skynet-edr-core" }',
                 "skynet-edr-core = { workspace = true }",
             ),
             encoding="utf-8",
@@ -430,7 +430,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             daemon_manifest.read_text(encoding="utf-8").replace(
                 "[dev-dependencies]\n",
                 "[dev-dependencies]\n"
-                'skynet-edr-implicit = { path = "../skynet-edr-implicit", version = "0.4.1" }\n',
+                'skynet-edr-implicit = { path = "../skynet-edr-implicit", version = "0.5.0" }\n',
             ),
             encoding="utf-8",
         )
@@ -505,7 +505,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.4.1", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.5.0", path = "../skynet-edr-core" }',
                 'skynet_edr_core = { version = ">=0.4", path = "../skynet-edr-core" }',
             ),
             encoding="utf-8",
@@ -536,7 +536,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
 
     def test_rejects_duplicate_internal_cargo_lock_entries(self) -> None:
         lockfile = self.fixture_root / "Cargo.lock"
-        current_entry = '[[package]]\nname = "skynet-edr-core"\nversion = "0.4.1"'
+        current_entry = '[[package]]\nname = "skynet-edr-core"\nversion = "0.5.0"'
         lockfile.write_text(
             lockfile.read_text(encoding="utf-8").replace(
                 current_entry,

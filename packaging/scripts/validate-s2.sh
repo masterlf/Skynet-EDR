@@ -75,7 +75,12 @@ run_gate() {
 }
 
 run_gate docs python3 packaging/scripts/check-docs.py
-run_gate packaging packaging/scripts/validate-packaging.sh
+run_gate packaging env \
+  -u S2_REPORT_PARENT_FD \
+  -u S2_REPORT_STAGE_FD \
+  -u S2_REPORT_STAGE \
+  -u S2_REPORT_TOKEN \
+  packaging/scripts/validate-packaging.sh
 run_gate fmt cargo fmt --all -- --check
 run_gate clippy cargo clippy --workspace --all-targets --all-features --offline -- -D warnings
 run_gate rust-workspace cargo test --workspace --all-features --offline

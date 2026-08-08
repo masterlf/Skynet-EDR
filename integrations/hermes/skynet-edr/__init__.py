@@ -15,6 +15,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import socket
 import stat
 import threading
@@ -32,7 +33,7 @@ except ImportError:  # pragma: no cover - continuous ingestion is Linux-first
     fcntl = None
 
 PLUGIN_NAME = "skynet-edr"
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.5.0"
 SCHEMA_VERSION = "skynet.event.v0"
 DEFAULT_MAX_FIELD_CHARS = 4096
 DEFAULT_MAX_LOG_BYTES = 1_048_576
@@ -46,6 +47,8 @@ _CLASSIFICATION_MAX_ITEMS = 64
 _CLASSIFICATION_MAX_SCALAR_BYTES = 4096
 _CLASSIFICATION_MAX_TOTAL_BYTES = 16_384
 _MUTATION_RESULT_MAX_CHARS = 16_384
+_ATTESTATION_TOKEN_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_ATTESTATION_EVENT_ID_RE = re.compile(r"\Aevt_skynet_attest_[0-9a-f]{64}\Z")
 _SCHEDULED_NEXT_RUN_RE = re.compile(
     r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
@@ -101,6 +104,7 @@ _lock = threading.Lock()
 _logger_lock = threading.Lock()
 _session_trace_id = f"hermes-local-{uuid.uuid4().hex}"
 _runtime_instance_fallback = uuid.uuid4().hex
+_runtime_instance_nonce = secrets.token_hex(32)
 _counter = 0
 _logger: logging.Logger | None = None
 
@@ -118,6 +122,8 @@ _worker_lock = threading.Lock()
 _worker_started = False
 _worker_stop = threading.Event()
 _worker_thread: threading.Thread | None = None
+_startup_canary_lock = threading.Lock()
+_startup_canary_attempted = False
 _transport_counters = {
     "queue_drops": 0,
     "socket_failures": 0,
@@ -137,6 +143,43 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_tool_call", _safe_hook(_post_tool_call))
     if _enabled():
         _ensure_worker()
+        _queue_startup_canary_once()
+
+
+def _queue_startup_canary_once() -> None:
+    """Queue one token-free enrollment canary for this producer process."""
+    global _startup_canary_attempted
+    with _startup_canary_lock:
+        if _startup_canary_attempted:
+            return
+        _startup_canary_attempted = True
+        token = os.environ.get("SKYNET_EDR_ATTESTATION_TOKEN", "")
+        if _ATTESTATION_TOKEN_RE.fullmatch(token) is None:
+            return
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        if _ATTESTATION_EVENT_ID_RE.fullmatch(event_id) is None:
+            return
+        try:
+            _write_event(
+                event_id=event_id,
+                event_type="agent.telemetry.attestation",
+                source_kind="sensor",
+                trust_level="sensor_observation",
+                severity="informational",
+                title="Skynet-EDR enrollment attestation canary",
+                attributes={
+                    "hook": "register",
+                    "producer_bound": True,
+                    "content_omitted": True,
+                    "argument_count": 0,
+                    "keyword_count": 0,
+                    "message_count": 0,
+                },
+            )
+        except Exception:  # pragma: no cover - registration remains fail-closed
+            _setup_logging().error("startup_canary_failed category=queue_failure")
 
 
 def _safe_hook(handler):
@@ -394,6 +437,7 @@ def _reject_nonstandard_json_constant(_constant: str) -> None:
 
 def _write_event(
     *,
+    event_id: str | None = None,
     event_type: str,
     source_kind: str,
     trust_level: str,
@@ -406,7 +450,7 @@ def _write_event(
     if not _enabled():
         return
     now = _now_ms()
-    event_id = _event_id(event_type, now, attributes)
+    event_id = event_id or _event_id(event_type, now, attributes)
     redacted_fields = redacted_fields or []
     event = {
         "schema_version": SCHEMA_VERSION,
@@ -508,8 +552,8 @@ def _report_transport_counters() -> None:
 
 
 def _send_frame(line: str) -> str:
-    payload = line.encode("utf-8")
-    if not payload or len(payload) > MAX_INGEST_FRAME_BYTES:
+    canonical_payload = line.encode("utf-8")
+    if not canonical_payload or len(canonical_payload) > MAX_INGEST_FRAME_BYTES:
         return "rejected_permanent"
     try:
         request = json.loads(line)
@@ -517,6 +561,24 @@ def _send_frame(line: str) -> str:
         if not isinstance(event_id, str) or not event_id:
             return "rejected_permanent"
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return "rejected_permanent"
+    identity = _transport_identity()
+    if identity is None:
+        return "retry_later"
+    generation, nonce = identity
+    payload = json.dumps(
+        {
+            "version": 3,
+            "message_type": "canonical_event",
+            "runtime_role": _runtime_role(),
+            "plugin_generation": generation,
+            "runtime_instance_nonce": nonce,
+            "event": request,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(payload) > MAX_INGEST_FRAME_BYTES:
         return "rejected_permanent"
     socket_path = os.environ.get("SKYNET_EDR_INGEST_SOCKET", DEFAULT_INGEST_SOCKET)
     timeout = min(2.0, max(0.01, _safe_positive_int_env("SKYNET_EDR_SOCKET_TIMEOUT_MS", 250) / 1000))
@@ -569,12 +631,17 @@ def _send_health_report() -> bool:
         # Cumulative counters remain visible for audit, but current transport health must
         # recover after a transient failure once the durable backlog is fully drained.
         degraded = backlog > 0
+        identity = _transport_identity()
+        if identity is None:
+            return False
+        generation, nonce = identity
         payload = json.dumps(
             {
-                "version": 2,
+                "version": 3,
                 "message_type": "producer_health",
                 "runtime_role": _runtime_role(),
-                "instance_id": _runtime_instance_id(),
+                "plugin_generation": generation,
+                "runtime_instance_nonce": nonce,
                 "checkpoint_bytes": checkpoint,
                 "backlog_bytes": backlog,
                 "backlog_age_ms": backlog_age_ms,
@@ -716,6 +783,17 @@ def _runtime_role() -> str:
     """Return only a fixed Hermes runtime role; hostile labels become unknown."""
     configured = os.environ.get("HERMES_RUNTIME_ROLE", "unknown")
     return configured if configured in {"gateway", "dashboard", "worker", "unknown"} else "unknown"
+
+
+def _transport_identity() -> tuple[str, str] | None:
+    """Return the controlled generation and this process's random runtime nonce."""
+    generation = os.environ.get("SKYNET_EDR_PLUGIN_GENERATION", "")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", generation) is None
+        or generation == _runtime_instance_nonce
+    ):
+        return None
+    return generation, _runtime_instance_nonce
 
 
 def _runtime_instance_id() -> str:

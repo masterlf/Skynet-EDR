@@ -53,11 +53,11 @@ The project research scope includes detection and alerting for:
 - **Least privilege:** reduce agent tool and credential blast radius.
 - **Operator-friendly evidence:** every alert should include source, evidence, attempted action, affected asset, and recommended containment.
 - **Privacy-aware telemetry:** redact secrets, minimize captured content, and prefer hashes/snippets where possible.
-- **Detection before blocking:** v0.4.1 is passive; guard-mode blocking is future v0.6+ work and requires an exercised control point.
+- **Detection before blocking:** v0.5.0 is passive; guard-mode blocking is future v0.6+ work and requires an exercised control point.
 
 ## Status
 
-Skynet-EDR v0.4.1 is an installable passive Linux-first prerelease. The shipped live producer is Hermes; OpenClaw and other runtime references are adapter contracts or external-producer paths, not shipped live integrations. It detects and records redacted local evidence but does not block agent actions. Read the [MVP public support contract](docs/MVP_SUPPORT_MATRIX.md) before relying on a package, rule, or integration claim.
+Skynet-EDR v0.5.0 is an installable passive Linux-first prerelease. The shipped live producer is Hermes; OpenClaw and other runtime references are adapter contracts or external-producer paths, not shipped live integrations. It detects and records redacted local evidence but does not block agent actions. Read the [MVP public support contract](docs/MVP_SUPPORT_MATRIX.md) before relying on a package, rule, or integration claim.
 
 Current crates:
 
@@ -103,7 +103,7 @@ Start with the [documentation hub](docs/README.md). The documentation is organiz
 - [Operations](docs/OPERATIONS.md) — local store, API/MCP posture, evidence handling, and troubleshooting.
 - [MVP public support contract](docs/MVP_SUPPORT_MATRIX.md) — evidence-backed platform tiers, live/producer-dependent/dark capability status, and exclusions.
 - [Release process](docs/RELEASE_PROCESS.md) and [packaging plan](docs/PACKAGING.md) — release gates, artifacts, publishing, and rollback.
-- [Current roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [v0.4.1 release notes](docs/releases/v0.4.1.md) — shipped scope and remaining limitations.
+- [Current roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [v0.5.0 release notes](docs/releases/v0.5.0.md) — shipped scope and remaining limitations.
 
 ## Naming
 

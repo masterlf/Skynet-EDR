@@ -27,6 +27,7 @@ Published checksums provide integrity checking, but this prerelease has no packa
 |---|---|---|
 | Canonical schema, redaction, local SQLite storage, CLI, loopback read-only HTTP visibility | Live | Implemented local surfaces subject to their documented validation and availability limits. |
 | Hermes lifecycle plugin and authenticated AF_UNIX ingestion | Live producer | The only shipped live producer path. It is passive and depends on explicit local enrollment, producer-supplied facts, successful ingestion, and bounded queues/checkpoints. |
+| Autonomous Hermes enrollment | Unproven / blocked | A fail-closed transaction, package-owned privileged adapter, and deterministic boundary fixtures exist for Ubuntu 24.04 amd64/systemd plus Hermes 0.19.0, but no disposable clean-host real-Hermes/systemd gate has passed. No host may yet be claimed autonomously `ENROLLED`; all other Hermes versions/platform cells are unsupported. |
 | `EDR-MCP-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-CRON-001` | Live, narrow | Exact Hermes producer shapes only; cron coverage is limited to authoritative successful built-in `cronjob` create/update outcomes. |
 | `EDR-EXFIL-001`, `EDR-MALWARE-001` | Live, narrow | Exact reviewed event shapes, joins, ordering, and bounded correlation only. Absence of an incident is not proof that an action was safe. |
 | Canonical JSONL from another producer and normalized Hermes trace import | Producer-dependent | The engine can evaluate documented input, but coverage exists only when an external producer supplies valid redacted events. |
@@ -54,4 +55,4 @@ non-Hermes producers; Windows or macOS sensors; signed supply-chain artifacts;
 and production support/SLA commitments. This exclusion does not rule out the
 planned v0.5.0 passive local durable alert/evidence presentation.
 
-For rule-level detail, see [Detections](DETECTIONS.md#rule-to-producer-coverage-matrix). For installation evidence and caveats, see [Install](INSTALL.md). For future work, see [Current roadmap](ROADMAP.md).
+For rule-level detail, see [Detections](DETECTIONS.md#rule-to-producer-coverage-matrix). For installation evidence and caveats, see [Install](INSTALL.md) and [Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md). For future work, see [Current roadmap](ROADMAP.md).

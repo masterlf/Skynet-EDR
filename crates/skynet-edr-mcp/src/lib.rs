@@ -511,6 +511,7 @@ fn evidence_title(event_type: Option<&str>) -> &'static str {
         Some("agent.automation.scheduled") => "Automation schedule evidence",
         Some("agent.approval.granted") => "Approval or scope change evidence",
         Some("agent.llm.call.requested") => "Model call request evidence",
+        Some("agent.telemetry.attestation") => "Telemetry attestation evidence",
         Some("agent.llm.call.completed") => "Model call completion evidence",
         Some(_) | None => "Security event evidence",
     }
