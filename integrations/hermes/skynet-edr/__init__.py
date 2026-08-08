@@ -216,19 +216,6 @@ def _on_session_end(*args: Any, **kwargs: Any) -> None:
 
 
 def _pre_llm_call(*args: Any, **kwargs: Any) -> None:
-    canary_event_id = _attestation_canary_event_id(args, kwargs)
-    if canary_event_id is not None:
-        _write_event(
-            event_id=canary_event_id,
-            event_type="agent.llm.call.requested",
-            source_kind="sensor",
-            trust_level="sensor_observation",
-            severity="informational",
-            title="Skynet-EDR enrollment attestation canary",
-            attributes={"hook": "pre_llm_call", "content_omitted": True,
-                        "argument_count": 1, "keyword_count": 0, "message_count": 1},
-        )
-        return
     attributes: dict[str, Any] = {
         "hook": "pre_llm_call",
         "content_omitted": True,
@@ -246,29 +233,6 @@ def _pre_llm_call(*args: Any, **kwargs: Any) -> None:
         title="Hermes LLM call requested",
         attributes=attributes,
     )
-
-
-def _attestation_canary_event_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
-    if kwargs or type(args) is not tuple or len(args) != 1 or type(args[0]) is not list:
-        return None
-    messages = args[0]
-    if len(messages) != 1 or type(messages[0]) is not dict or set(messages[0]) != {"role", "content"}:
-        return None
-    if messages[0].get("role") != "user" or type(messages[0].get("content")) is not str:
-        return None
-    token = os.environ.get("SKYNET_EDR_ATTESTATION_TOKEN", "")
-    if _ATTESTATION_TOKEN_RE.fullmatch(token) is None:
-        return None
-    event_id = "evt_skynet_attest_" + hashlib.sha256(
-        b"skynet-edr-attestation-v1\0" + token.encode("ascii")
-    ).hexdigest()
-    expected = (
-        f"SKYNET_EDR_ATTEST_V1 {event_id} {token}\n"
-        f"Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text."
-    )
-    if messages[0]["content"] != expected or _ATTESTATION_EVENT_ID_RE.fullmatch(event_id) is None:
-        return None
-    return event_id
 
 
 def _pre_tool_call(*args: Any, **kwargs: Any) -> None:

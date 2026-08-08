@@ -1810,6 +1810,34 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(write.call_args.kwargs["attributes"]["producer_bound"], True)
         self.assertNotIn(token, json.dumps(write.call_args.kwargs))
 
+    def test_exact_legacy_attestation_prompt_cannot_reemit_fixed_canary(self):
+        token = "a" * 64
+        event_id = "evt_skynet_attest_" + hashlib.sha256(
+            b"skynet-edr-attestation-v1\0" + token.encode("ascii")
+        ).hexdigest()
+        prompt = (
+            f"SKYNET_EDR_ATTEST_V1 {event_id} {token}\n"
+            f"Respond with exactly SKYNET_EDR_ATTEST_ACK_V1 {event_id} and no other text."
+        )
+        os.environ["SKYNET_EDR_ATTESTATION_TOKEN"] = token
+        ctx = FakeContext()
+
+        with patch.object(self.plugin, "_ensure_worker"), patch.object(
+            self.plugin, "_write_event"
+        ) as write:
+            self.plugin.register(ctx)
+            ctx.hooks["pre_llm_call"]([{"role": "user", "content": prompt}])
+
+        self.assertEqual(write.call_count, 2)
+        startup, llm = [call.kwargs for call in write.call_args_list]
+        self.assertEqual(startup["event_id"], event_id)
+        self.assertEqual(startup["event_type"], "agent.telemetry.attestation")
+        self.assertIs(startup["attributes"]["producer_bound"], True)
+        self.assertNotIn("event_id", llm)
+        self.assertEqual(llm["event_type"], "agent.llm.call.requested")
+        self.assertEqual(llm["attributes"]["message_count"], 1)
+        self.assertNotIn(token, json.dumps(write.call_args_list))
+
     def test_register_startup_canary_fails_dark_without_exact_token_or_when_disabled(self):
         for token, enabled, worker_calls in (
             (None, "1", 1),

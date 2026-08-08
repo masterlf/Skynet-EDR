@@ -207,6 +207,16 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         self.assertTrue(result["plugin_enabled"])
         self.assertEqual([call.args[0][0] for call in run.call_args_list], [str(resolved), str(resolved)])
 
+    def test_execute_disable_accepts_real_hermes_019_disabled_readback(self):
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64}
+        resolved = Path("/opt/hermes/bin/hermes")
+        payloads = [b"", json.dumps([{"name": "skynet-edr", "status": "disabled"}]).encode()]
+        with mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=resolved), \
+                mock.patch.object(self.module, "_run", side_effect=payloads):
+            result = self.module.execute("disable", context)
+        self.assertIs(result["plugin_enabled"], False)
+
     def test_privileged_actions_require_root_and_target_never_allows_uid_zero(self):
         env = {
             "SKYNET_EDR_TARGET_UID": "1000",
@@ -1164,14 +1174,24 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
     def test_real_hermes_019_plugin_status_is_parsed_strictly(self):
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "work",
                    "_hermes_launcher": self.module.HERMES}
-        cases = (("enabled", True), ("not enabled", False))
+        cases = (("enabled", True), ("disabled", False))
         for status, expected in cases:
             payload = json.dumps([{"name": "skynet-edr", "status": status, "version": "0.4.1"}]).encode()
             with self.subTest(status=status), mock.patch.object(self.module, "_run", return_value=payload):
                 self.assertIs(self.module._plugin_enabled(context), expected)
-        for invalid in ("unknown", True, None):
+        for invalid in ("not enabled", "unknown", True, None):
             payload = json.dumps([{"name": "skynet-edr", "status": invalid, "version": "0.4.1"}]).encode()
             with self.subTest(invalid=invalid), mock.patch.object(self.module, "_run", return_value=payload):
+                with self.assertRaises(self.module.AdapterError):
+                    self.module._plugin_enabled(context)
+        malformed = (
+            [{"name": "skynet-edr", "status": "disabled"},
+             {"name": "skynet-edr", "status": "disabled"}],
+            [{"name": "skynet-edr", "status": "disabled", "enabled": False}],
+        )
+        for records in malformed:
+            payload = json.dumps(records).encode()
+            with self.subTest(records=records), mock.patch.object(self.module, "_run", return_value=payload):
                 with self.assertRaises(self.module.AdapterError):
                     self.module._plugin_enabled(context)
 
