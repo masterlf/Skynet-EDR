@@ -702,7 +702,7 @@ def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> 
     status = matches[0].get("status")
     if status == "enabled":
         return True
-    if status == "disabled":
+    if status in {"not enabled", "disabled"}:
         return False
     raise AdapterError("readback_failure")
 

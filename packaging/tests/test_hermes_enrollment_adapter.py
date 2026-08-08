@@ -217,6 +217,32 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             result = self.module.execute("disable", context)
         self.assertIs(result["plugin_enabled"], False)
 
+    def test_execute_prepare_accepts_real_hermes_019_not_enabled_readback(self):
+        config = self.base / "config.toml"
+        config.write_text(BASE_CONFIG, encoding="utf-8")
+        command = self.base / "command"
+        command.write_text("safe", encoding="utf-8")
+        command.chmod(0o755)
+        state = self.base / "adapter-state"
+        context = {"uid": 1000, "account": "alice", "home": Path("/home/alice/.hermes"),
+                   "profile": "default", "generation": "b" * 64}
+        group = SimpleNamespace(gr_mem=["alice"], gr_gid=1000)
+        plugin_list = json.dumps([{"name": "skynet-edr", "status": "not enabled"}]).encode()
+        with mock.patch.object(self.module, "CONFIG", config), \
+                mock.patch.object(self.module, "DROPIN", self.base / "dropin" / "50-skynet-edr.conf"), \
+                mock.patch.object(self.module, "STATE_ROOT", state), \
+                mock.patch.object(self.module, "HERMES", command), \
+                mock.patch.object(self.module, "SYSTEMCTL", command), \
+                mock.patch.object(self.module, "USERMOD", command), \
+                mock.patch.object(self.module, "_trusted_parent"), \
+                mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=command), \
+                mock.patch.object(self.module.grp, "getgrnam", return_value=group), \
+                mock.patch.object(self.module, "_run", side_effect=[plugin_list, b""]):
+            result = self.module.execute("prepare", context)
+            snapshot = json.loads((self.module._scope(context) / "snapshot.json").read_text())
+        self.assertEqual(result, {"prepared": True, "plugin_enabled": False})
+        self.assertIs(snapshot["plugin_enabled"], False)
+
     def test_privileged_actions_require_root_and_target_never_allows_uid_zero(self):
         env = {
             "SKYNET_EDR_TARGET_UID": "1000",
@@ -1174,12 +1200,12 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
     def test_real_hermes_019_plugin_status_is_parsed_strictly(self):
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "work",
                    "_hermes_launcher": self.module.HERMES}
-        cases = (("enabled", True), ("disabled", False))
+        cases = (("enabled", True), ("not enabled", False), ("disabled", False))
         for status, expected in cases:
             payload = json.dumps([{"name": "skynet-edr", "status": status, "version": "0.4.1"}]).encode()
             with self.subTest(status=status), mock.patch.object(self.module, "_run", return_value=payload):
                 self.assertIs(self.module._plugin_enabled(context), expected)
-        for invalid in ("not enabled", "unknown", True, None):
+        for invalid in ("unknown", "Enabled", " disabled", "disabled ", True, None):
             payload = json.dumps([{"name": "skynet-edr", "status": invalid, "version": "0.4.1"}]).encode()
             with self.subTest(invalid=invalid), mock.patch.object(self.module, "_run", return_value=payload):
                 with self.assertRaises(self.module.AdapterError):
