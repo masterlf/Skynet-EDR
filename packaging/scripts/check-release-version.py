@@ -25,6 +25,21 @@ UNSAFE_PYTHON_NAMESPACE_NAMES = {
     "setattr",
     "vars",
 }
+SEMVER_NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
+SEMVER_PRERELEASE_IDENTIFIER = (
+    r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+)
+CANONICAL_RELEASE_VERSION_PATTERN = (
+    rf"{SEMVER_NUMERIC_IDENTIFIER}\."
+    rf"{SEMVER_NUMERIC_IDENTIFIER}\."
+    rf"{SEMVER_NUMERIC_IDENTIFIER}"
+    rf"(?:-{SEMVER_PRERELEASE_IDENTIFIER}(?:\.{SEMVER_PRERELEASE_IDENTIFIER})*)?"
+)
+
+
+def is_canonical_release_version(value: object) -> bool:
+    """Return whether a value is canonical SemVer without build metadata."""
+    return type(value) is str and re.fullmatch(CANONICAL_RELEASE_VERSION_PATTERN, value) is not None
 
 
 def text(path: str) -> str:
@@ -333,7 +348,7 @@ def main() -> None:
     cargo = tomllib.loads(root_manifest.read_text(encoding="utf-8"))
     workspace_version = cargo["workspace"]["package"]["version"]
     expected = workspace_version if args.expected is None else args.expected
-    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", expected) is None:
+    if not is_canonical_release_version(expected):
         raise SystemExit(f"invalid release version: {expected!r}")
 
     observed = {
@@ -469,11 +484,11 @@ def main() -> None:
 
     authoritative_doc_versions = {
         "SECURITY.md": (
-            r"^Skynet-EDR v([0-9]+\.[0-9]+\.[0-9]+) is an installable prerelease",
-            r"^\| `v([0-9]+\.[0-9]+\.[0-9]+)` prerelease \|",
+            rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) is an installable prerelease",
+            rf"^\| `v({CANONICAL_RELEASE_VERSION_PATTERN})` prerelease \|",
         ),
         "docs/README.md": (
-            r"^Current documentation structure target: v([0-9]+\.[0-9]+\.[0-9]+)\.",
+            rf"^Current documentation structure target: v({CANONICAL_RELEASE_VERSION_PATTERN})\.",
         ),
     }
     for path, patterns in authoritative_doc_versions.items():

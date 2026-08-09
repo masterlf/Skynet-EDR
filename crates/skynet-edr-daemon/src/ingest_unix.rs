@@ -31,7 +31,8 @@ use serde::{
 use serde_json::{json, value::RawValue};
 use skynet_edr_core::{
     built_in_ai_agent_sequence_rules, parse_canonical_event_json, CanonicalEventEnvelope,
-    ContinuousIngestError, ContinuousIngestResult, ContinuousIngestStatus, LocalStore,
+    ContinuousIncidentNotice, ContinuousIngestError, ContinuousIngestResult,
+    ContinuousIngestStatus, LocalStore,
 };
 
 const MAX_HEALTH_SOURCES: usize = 64;
@@ -101,6 +102,28 @@ pub struct UnixIngestConfig {
     pub required_reported_roles: Vec<ProducerRole>,
 }
 
+/// Bounded sink for one already-redacted incident-notice JSON line.
+pub trait AlertNoticeSink: Send + Sync {
+    /// Write exactly one compact UTF-8 JSON line.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the local operational sink cannot accept the line.
+    fn write_line(&self, line: &[u8]) -> io::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StdoutAlertNoticeSink;
+
+impl AlertNoticeSink for StdoutAlertNoticeSink {
+    fn write_line(&self, line: &[u8]) -> io::Result<()> {
+        let stdout = io::stdout();
+        let mut locked = stdout.lock();
+        locked.write_all(line)?;
+        locked.flush()
+    }
+}
+
 /// Bounded aggregate ingestion counters shared with the read-only status projection.
 #[derive(Debug)]
 pub struct IngestionHealth {
@@ -119,6 +142,7 @@ pub struct IngestionHealth {
     incident_integrity_collisions: AtomicU64,
     correlation_truncated: AtomicU64,
     storage_errors: AtomicU64,
+    alert_delivery_errors: AtomicU64,
     last_degraded_at_unix_ms: AtomicU64,
     listener_live: AtomicBool,
     last_event_received_at_unix_ms: AtomicU64,
@@ -566,6 +590,8 @@ pub struct IngestionHealthSnapshot {
     pub correlation_truncated_total: u64,
     /// Transactional storage/correlation failures.
     pub storage_errors_total: u64,
+    /// Post-commit local incident notices that the operational sink could not accept.
+    pub alert_delivery_errors_total: u64,
 }
 
 impl Default for IngestionHealth {
@@ -606,6 +632,7 @@ impl IngestionHealth {
             incident_integrity_collisions: AtomicU64::new(0),
             correlation_truncated: AtomicU64::new(0),
             storage_errors: AtomicU64::new(0),
+            alert_delivery_errors: AtomicU64::new(0),
             last_degraded_at_unix_ms: AtomicU64::new(0),
             listener_live: AtomicBool::new(false),
             last_event_received_at_unix_ms: AtomicU64::new(0),
@@ -637,6 +664,7 @@ impl IngestionHealth {
                 .load(Ordering::Relaxed),
             correlation_truncated_total: self.correlation_truncated.load(Ordering::Relaxed),
             storage_errors_total: self.storage_errors.load(Ordering::Relaxed),
+            alert_delivery_errors_total: self.alert_delivery_errors.load(Ordering::Relaxed),
         }
     }
 
@@ -771,6 +799,7 @@ impl IngestionHealth {
             "incident_integrity_collision_total": snapshot.incident_integrity_collision_total,
             "correlation_truncated_total": snapshot.correlation_truncated_total,
             "storage_errors_total": snapshot.storage_errors_total,
+            "alert_delivery_errors_total": snapshot.alert_delivery_errors_total,
             "sources": source_values,
         })
     }
@@ -915,6 +944,15 @@ impl IngestionHealth {
         self.record_degradation();
     }
 
+    fn record_alert_delivery_error(&self, key: &SourceKey) {
+        let _ = self.alert_delivery_errors.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |value| Some(value.saturating_add(1)),
+        );
+        self.record_source_error(key, "alert_delivery");
+    }
+
     fn record_degradation(&self) {
         self.last_degraded_at_unix_ms
             .store(unix_ms_now(), Ordering::Relaxed);
@@ -959,7 +997,7 @@ fn valid_attestation_event_id(value: &str) -> bool {
 fn is_degrading_error(category: &str) -> bool {
     matches!(
         category,
-        "frame_timeout" | "storage" | "transaction" | "incident_collision"
+        "frame_timeout" | "storage" | "transaction" | "incident_collision" | "alert_delivery"
     )
 }
 
@@ -1361,19 +1399,27 @@ fn handle_producer_health_frame(
     ))
 }
 
+struct CommitEventContext<'a> {
+    config: &'a UnixIngestConfig,
+    db_path: &'a Path,
+    health: &'a IngestionHealth,
+    alert_sink: &'a dyn AlertNoticeSink,
+}
+
 fn commit_event_and_ack(
     stream: &mut UnixStream,
     source_key: &SourceKey,
     peer: KernelPeerIdentity,
-    config: &UnixIngestConfig,
-    db_path: &Path,
-    health: &IngestionHealth,
+    context: &CommitEventContext<'_>,
     event: &CanonicalEventEnvelope,
 ) -> io::Result<()> {
-    health.record_event_received(source_key, peer);
-    let Ok(store) = LocalStore::open_existing_writable(db_path) else {
-        health.storage_errors.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(source_key, "storage");
+    context.health.record_event_received(source_key, peer);
+    let Ok(store) = LocalStore::open_existing_writable(context.db_path) else {
+        context
+            .health
+            .storage_errors
+            .fetch_add(1, Ordering::Relaxed);
+        context.health.record_source_error(source_key, "storage");
         return write_ack(
             stream,
             &json!({"version":1,"status":"retry_later","reason":"storage"}),
@@ -1384,24 +1430,32 @@ fn commit_event_and_ack(
         &source_id,
         event,
         &built_in_ai_agent_sequence_rules(),
-        config.candidate_limit,
+        context.config.candidate_limit,
     ) {
         Ok(result) => {
-            health.record_result(source_key, event, &result);
+            context.health.record_result(source_key, event, &result);
             if result.correlation_truncated {
-                health.record_correlation_truncated();
+                context.health.record_correlation_truncated();
+            }
+            for notice in &result.incident_notices {
+                if write_alert_notice(context.alert_sink, notice).is_err() {
+                    context.health.record_alert_delivery_error(source_key);
+                }
+            }
+            if result.opened_incidents > result.incident_notices.len() {
+                context.health.record_alert_delivery_error(source_key);
             }
             let status = match result.status {
                 ContinuousIngestStatus::Persisted => {
-                    health.persisted.fetch_add(1, Ordering::Relaxed);
+                    context.health.persisted.fetch_add(1, Ordering::Relaxed);
                     "persisted"
                 }
                 ContinuousIngestStatus::Duplicate => {
-                    health.duplicates.fetch_add(1, Ordering::Relaxed);
+                    context.health.duplicates.fetch_add(1, Ordering::Relaxed);
                     "duplicate"
                 }
                 ContinuousIngestStatus::Collision => {
-                    health.collisions.fetch_add(1, Ordering::Relaxed);
+                    context.health.collisions.fetch_add(1, Ordering::Relaxed);
                     "collision"
                 }
             };
@@ -1411,32 +1465,58 @@ fn commit_event_and_ack(
             )
         }
         Err(ContinuousIngestError::Canonical(_)) => {
-            health.invalid.fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(source_key, "invalid_event");
+            context.health.invalid.fetch_add(1, Ordering::Relaxed);
+            context
+                .health
+                .record_source_error(source_key, "invalid_event");
             write_ack(
                 stream,
                 &json!({"version":1,"event_id":event.event_id.as_str(),"status":"rejected_permanent","reason":"invalid_event"}),
             )
         }
         Err(ContinuousIngestError::IncidentCollision { .. }) => {
-            health
+            context
+                .health
                 .incident_integrity_collisions
                 .fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(source_key, "incident_collision");
+            context
+                .health
+                .record_source_error(source_key, "incident_collision");
             write_ack(
                 stream,
                 &json!({"version":1,"event_id":event.event_id.as_str(),"status":"rejected_permanent","reason":"incident_collision"}),
             )
         }
         Err(_) => {
-            health.storage_errors.fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(source_key, "transaction");
+            context
+                .health
+                .storage_errors
+                .fetch_add(1, Ordering::Relaxed);
+            context
+                .health
+                .record_source_error(source_key, "transaction");
             write_ack(
                 stream,
                 &json!({"version":1,"event_id":event.event_id.as_str(),"status":"retry_later","reason":"transaction"}),
             )
         }
     }
+}
+
+fn write_alert_notice(
+    sink: &dyn AlertNoticeSink,
+    notice: &ContinuousIncidentNotice,
+) -> io::Result<()> {
+    let mut line = serde_json::to_vec(&json!({
+        "schema_version": "skynet.alert.notice.v1",
+        "incident_id": notice.id,
+        "severity": notice.severity,
+        "summary": notice.summary,
+        "created_at_unix_ms": notice.created_at_unix_ms,
+    }))
+    .map_err(|error| io::Error::other(format!("failed to serialize alert notice: {error}")))?;
+    line.push(b'\n');
+    sink.write_line(&line)
 }
 
 /// Process one authenticated, bounded frame and emit one bounded ACK when possible.
@@ -1449,12 +1529,13 @@ fn commit_event_and_ack(
 /// Returns only socket setup/write errors. Hostile frames and persistence failures
 /// are isolated as bounded protocol responses.
 #[allow(clippy::too_many_lines)]
-pub fn process_ingest_connection(
+pub fn process_ingest_connection_with_alert_sink(
     mut stream: UnixStream,
     peer: &AuthenticatedPeer,
     config: &UnixIngestConfig,
     db_path: &Path,
     health: &IngestionHealth,
+    alert_sink: &dyn AlertNoticeSink,
 ) -> io::Result<()> {
     let uid = peer.uid;
     let authorized = if uid == 0 {
@@ -1562,9 +1643,12 @@ pub fn process_ingest_connection(
             &mut stream,
             &source_key,
             kernel_identity,
-            config,
-            db_path,
-            health,
+            &CommitEventContext {
+                config,
+                db_path,
+                health,
+                alert_sink,
+            },
             &event,
         );
     }
@@ -1580,10 +1664,36 @@ pub fn process_ingest_connection(
         &mut stream,
         &legacy_key,
         peer.identity,
+        &CommitEventContext {
+            config,
+            db_path,
+            health,
+            alert_sink,
+        },
+        &event,
+    )
+}
+
+/// Process one authenticated frame and write newly opened incident notices to stdout.
+///
+/// # Errors
+///
+/// Returns only socket setup/write errors. Alert stdout failures are reflected in
+/// ingestion health after commit and never revoke the event acknowledgement.
+pub fn process_ingest_connection(
+    stream: UnixStream,
+    peer: &AuthenticatedPeer,
+    config: &UnixIngestConfig,
+    db_path: &Path,
+    health: &IngestionHealth,
+) -> io::Result<()> {
+    process_ingest_connection_with_alert_sink(
+        stream,
+        peer,
         config,
         db_path,
         health,
-        &event,
+        &StdoutAlertNoticeSink,
     )
 }
 

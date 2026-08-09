@@ -64,7 +64,20 @@ INCIDENTS_EXPORT="$RUNTIME/incidents.jsonl"
 RAW_SECRET='FAKE_SKYNET_ATTACK_SIM_SECRET_DO_NOT_EXPOSE'
 RAW_PATH='/home/attack-sim/.skynet/fake-secret.env'
 RAW_MALWARE_MARKER='SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE'
-EXPECTED_VERSION=$(dpkg-deb -f "$DEB" Version)
+EXPECTED_PACKAGE_VERSION=$(dpkg-deb -f "$DEB" Version)
+EXPECTED_PRODUCT_VERSION=$(
+  python3 - "$REPO/Cargo.toml" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+manifest = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+version = manifest["workspace"]["package"]["version"]
+if not isinstance(version, str) or not version:
+    raise SystemExit("invalid workspace product version")
+print(version)
+PY
+)
 
 cleanup() {
   systemctl stop skynet-edr.service >/dev/null 2>&1 || true
@@ -82,8 +95,8 @@ install -d -o root -g root -m 0750 /var/lib/skynet-edr
 apt-get install -y --no-install-recommends "$(realpath "$DEB")"
 
 ACTUAL_VERSION=$(dpkg-query -W -f='${Version}' skynet-edr)
-if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
-  echo "dpkg version mismatch: package=$EXPECTED_VERSION installed=$ACTUAL_VERSION" >&2
+if [ "$ACTUAL_VERSION" != "$EXPECTED_PACKAGE_VERSION" ]; then
+  echo "dpkg version mismatch: package=$EXPECTED_PACKAGE_VERSION installed=$ACTUAL_VERSION" >&2
   exit 1
 fi
 
@@ -189,7 +202,7 @@ done
 # installed executable identity, service-user DAC access, and all three HTTP 200
 # read-only contracts. It has no mutation or repair mode.
 /usr/libexec/skynet-edr/deploy-verify \
-  --expected-version "$EXPECTED_VERSION"
+  --expected-version "$EXPECTED_PRODUCT_VERSION"
 runuser -u skynet-edr -- install -m 0640 /dev/null \
   /var/lib/skynet-edr/.deployment-smoke-write
 test "$(stat -c '%U:%G %a' /var/lib/skynet-edr/.deployment-smoke-write)" = \
@@ -202,7 +215,7 @@ systemctl stop skynet-edr.service
 chown root:root /var/lib/skynet-edr
 drift_report="$RUNTIME/injected-ownership-drift.json"
 if /usr/libexec/skynet-edr/deploy-verify \
-  --expected-version "$EXPECTED_VERSION" >"$drift_report" 2>&1; then
+  --expected-version "$EXPECTED_PRODUCT_VERSION" >"$drift_report" 2>&1; then
   echo "deployment verifier accepted injected root-owned state drift" >&2
   exit 1
 fi

@@ -8,14 +8,16 @@ use std::{
     os::unix::net::UnixStream,
     path::PathBuf,
     process::Command,
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
 use skynet_edr_core::LocalStore;
 use skynet_edr_daemon::{
-    authenticate_ingest_peer, bind_ingest_listener, process_ingest_connection, IngestionHealth,
-    ProducerRole, UnixIngestConfig,
+    authenticate_ingest_peer, bind_ingest_listener, process_ingest_connection,
+    process_ingest_connection_with_alert_sink, AlertNoticeSink, IngestionHealth, ProducerRole,
+    UnixIngestConfig,
 };
 
 const CANONICAL_EVENT: &str =
@@ -254,6 +256,58 @@ fn process_with_test_uid(
     }
     process_ingest_connection(server, &peer, &effective_config, db_path, health)
         .expect("connection handled");
+}
+
+#[derive(Default)]
+struct RecordingAlertSink {
+    fail: bool,
+    lines: Mutex<Vec<Vec<u8>>>,
+}
+
+impl AlertNoticeSink for RecordingAlertSink {
+    fn write_line(&self, line: &[u8]) -> std::io::Result<()> {
+        if self.fail {
+            return Err(std::io::Error::other("forced alert sink failure"));
+        }
+        self.lines
+            .lock()
+            .expect("alert lines lock")
+            .push(line.to_vec());
+        Ok(())
+    }
+}
+
+fn exchange_with_alert_sink(
+    uid: u32,
+    config: &UnixIngestConfig,
+    db_path: &std::path::Path,
+    bytes: &[u8],
+    health: &IngestionHealth,
+    sink: &dyn AlertNoticeSink,
+) -> String {
+    let (mut client, server) = UnixStream::pair().expect("stream pair opens");
+    client.write_all(bytes).expect("frame writes");
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("frame completes");
+    let peer = authenticate_ingest_peer(&server).expect("peer identity captured once");
+    let mut effective_config = config.clone();
+    if config.allowed_uids.contains(&uid) {
+        effective_config.allowed_uids = vec![peer.uid()];
+        effective_config.allow_root = peer.uid() == 0;
+    }
+    process_ingest_connection_with_alert_sink(
+        server,
+        &peer,
+        &effective_config,
+        db_path,
+        health,
+        sink,
+    )
+    .expect("connection handled");
+    let mut ack = String::new();
+    client.read_to_string(&mut ack).expect("ack reads");
+    ack
 }
 
 #[test]
@@ -1658,6 +1712,107 @@ fn unix_malware_ack_after_atomic_visibility() {
         .unwrap()
         .iter()
         .any(|incident| incident.id.as_str().contains("EDR-MALWARE-001")));
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn newly_opened_incident_emits_one_compact_redacted_notice_and_replay_emits_none() {
+    let db_path = temp_path("alert-notice.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("alert-notice.sock"), vec![1_308]);
+    let event = p1a_event(
+        "evt_alert_notice",
+        "agent.tool.completed",
+        "mcp_tool",
+        "tool_output",
+        1_781_600_000_000,
+        "FAKE_ALERT_TRACE",
+        serde_json::json!({
+            "hook":"post_tool_call","tool_name":"remote.fetch","result_omitted":true,
+            "result_length":0,"network_indicator":false,"direct_ip":false,
+            "delivery_indicator":false,"sensitive_access":false,
+            "prompt_injection_indicator":false,"malware_indicator":true,
+            "malware_signature":"eicar_test_string"
+        }),
+    );
+    let payload = frame(&serde_json::to_vec(&event).expect("event serializes"));
+    let health = IngestionHealth::default();
+    let sink = RecordingAlertSink::default();
+
+    let first = exchange_with_alert_sink(1_308, &config, &db_path, &payload, &health, &sink);
+    assert!(first.contains(r#""status":"persisted""#), "{first}");
+    let replay = exchange_with_alert_sink(1_308, &config, &db_path, &payload, &health, &sink);
+    assert!(replay.contains(r#""status":"duplicate""#), "{replay}");
+
+    let lines = sink.lines.lock().expect("alert lines lock");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].last(), Some(&b'\n'));
+    let notice: serde_json::Value = serde_json::from_slice(&lines[0]).expect("notice is JSON");
+    assert_eq!(notice["schema_version"], "skynet.alert.notice.v1");
+    assert!(notice["incident_id"]
+        .as_str()
+        .is_some_and(|id| id.contains("EDR-MALWARE-001")));
+    assert_eq!(notice["severity"], "high");
+    assert!(notice["summary"]
+        .as_str()
+        .is_some_and(|summary| !summary.is_empty()));
+    assert_eq!(notice.as_object().expect("notice object").len(), 5);
+    let serialized = String::from_utf8(lines[0].clone()).expect("notice is UTF-8");
+    for forbidden in ["FAKE_ALERT_TRACE", "evt_alert_notice", "eicar_test_string"] {
+        assert!(!serialized.contains(forbidden), "notice leaked {forbidden}");
+    }
+    drop(lines);
+    let _ = fs::remove_file(db_path);
+}
+
+#[test]
+fn alert_sink_failure_preserves_committed_incident_and_ack_but_degrades_health() {
+    let db_path = temp_path("alert-sink-failure.sqlite");
+    drop(LocalStore::open(&db_path).expect("schema initializes"));
+    let config = config(temp_path("alert-sink-failure.sock"), vec![1_309]);
+    let event = p1a_event(
+        "evt_alert_sink_failure",
+        "agent.tool.completed",
+        "mcp_tool",
+        "tool_output",
+        1_781_600_000_000,
+        "FAKE_ALERT_FAILURE_TRACE",
+        serde_json::json!({
+            "hook":"post_tool_call","tool_name":"remote.fetch","result_omitted":true,
+            "result_length":0,"network_indicator":false,"direct_ip":false,
+            "delivery_indicator":false,"sensitive_access":false,
+            "prompt_injection_indicator":false,"malware_indicator":true,
+            "malware_signature":"eicar_test_string"
+        }),
+    );
+    let health = IngestionHealth::default();
+    health.record_listener_started();
+    let sink = RecordingAlertSink {
+        fail: true,
+        ..RecordingAlertSink::default()
+    };
+
+    let ack = exchange_with_alert_sink(
+        1_309,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&event).expect("event serializes")),
+        &health,
+        &sink,
+    );
+
+    assert!(ack.contains(r#""status":"persisted""#), "{ack}");
+    let visible = LocalStore::open_read_only(&db_path).expect("store opens read-only");
+    assert_eq!(visible.count_incidents().expect("incident count"), 1);
+    assert_eq!(visible.count_ingest_receipts().expect("receipt count"), 1);
+    assert_eq!(health.snapshot().alert_delivery_errors_total, 1);
+    let status = health.status_json(Duration::from_secs(30));
+    assert_eq!(status["state"], "degraded");
+    assert_eq!(status["alert_delivery_errors_total"], 1);
+    assert_eq!(
+        status["sources"][0]["last_error_category"],
+        "alert_delivery"
+    );
     let _ = fs::remove_file(db_path);
 }
 

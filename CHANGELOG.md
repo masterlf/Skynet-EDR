@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0-alpha.1 - 2026-08-09
+
+- Added one compact server-redacted `skynet.alert.notice.v1` stdout line for each incident newly committed by continuous ingestion; duplicate replay emits no second notice.
+- Made post-commit notice failure preserve the incident and producer ACK while incrementing `alert_delivery_errors_total` and degrading ingestion health.
+- Extended release-version consistency checks to canonical SemVer prereleases and verified package metadata handling for the prerelease.
+
 ## 0.5.1 - 2026-08-09
 
 - Added listing-only DEB inspection policy and banned privileged package extraction on live or persistent hosts.

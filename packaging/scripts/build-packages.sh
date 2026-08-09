@@ -6,6 +6,7 @@ DEB_ARCH="${NFPM_ARCH:-amd64}"
 RPM_ARCH="${NFPM_RPM_ARCH:-x86_64}"
 ARCHLINUX_ARCH="${NFPM_ARCHLINUX_ARCH:-x86_64}"
 NFPM_RENDERED="dist/nfpm.${VERSION}.yaml"
+NFPM_ARCH_RENDERED="dist/nfpm.${VERSION}.archlinux.yaml"
 CARGO_RELEASE_DIR="${CARGO_TARGET_DIR:-target}/release"
 STAGED_HERMES_PLUGIN="dist/staging/nfpm/hermes-plugin/skynet-edr"
 
@@ -30,10 +31,23 @@ version = sys.argv[1]
 release_dir = sys.argv[2]
 source = Path('packaging/nfpm.yaml')
 target = Path('dist') / f'nfpm.{version}.yaml'
+arch_target = Path('dist') / f'nfpm.{version}.archlinux.yaml'
 text = source.read_text()
 text = re.sub(r'^version:.*$', f'version: {version}', text, flags=re.MULTILINE)
 text = text.replace('./target/release/', f'{release_dir}/')
 target.write_text(text)
+
+# Arch pkgver forbids hyphens. nFPM's SemVer conversion drops prerelease
+# identifiers for Arch, so render an explicit, information-preserving native
+# version instead of silently publishing the prerelease as the stable core.
+arch_version = version.replace('-', '.')
+arch_text = re.sub(
+    r'^version:.*$',
+    f'version: {arch_version}\nversion_schema: none',
+    text,
+    flags=re.MULTILINE,
+)
+arch_target.write_text(arch_text)
 PY
 
 NFPM_ARCH="$DEB_ARCH" nfpm package \
@@ -47,6 +61,6 @@ NFPM_ARCH="$RPM_ARCH" nfpm package \
   --target "dist/skynet-edr-${VERSION}-1.${RPM_ARCH}.rpm"
 
 NFPM_ARCH="$ARCHLINUX_ARCH" nfpm package \
-  --config "$NFPM_RENDERED" \
+  --config "$NFPM_ARCH_RENDERED" \
   --packager archlinux \
   --target "dist/skynet-edr-${VERSION}-1-${ARCHLINUX_ARCH}.pkg.tar.zst"
