@@ -2116,6 +2116,19 @@ class SkynetEdrHermesDashboardTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 502)
         self.assertEqual(raised.exception.detail, "upstream_unavailable")
 
+    def test_dashboard_status_upstream_http_500_is_generic_bad_gateway(self):
+        module = load_dashboard_api()
+        setattr(module, "_opener", Mock())
+        module._opener.open.side_effect = module.urllib.error.HTTPError(
+            "http://127.0.0.1:8787/api/status", 500, "internal error", {}, None
+        )
+
+        with self.assertRaises(FakeHTTPException) as raised:
+            module.status()
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(raised.exception.detail, "upstream_unavailable")
+
     def test_dashboard_validates_fixed_loopback_port_and_query_bounds(self):
         module = load_dashboard_api()
         for raw in ["not-a-port", "0", "65536", "8787;host=evil"]:

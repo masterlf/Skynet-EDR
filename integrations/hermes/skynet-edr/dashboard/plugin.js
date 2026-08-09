@@ -335,7 +335,7 @@
       if ((source.producer_reported_at_unix_ms === null) !== (source.producer_report_age_ms === null)) failContract();
       if (!["available", "degraded", "stale", "unknown"].includes(source.transport_state)) failContract();
       if (source.backlog_bytes !== null && !boundedSafeInteger(source.backlog_bytes)) failContract();
-      const errorCategories = ["frame_timeout", "storage", "transaction", "malformed_frame", "frame_size"];
+      const errorCategories = ["frame_timeout", "storage", "transaction", "incident_collision", "invalid_event", "malformed_frame", "frame_size"];
       if (source.last_error_category === null) {
         if (source.last_error_at_unix_ms !== null || source.last_error_age_ms !== null) failContract();
       } else if (!errorCategories.includes(source.last_error_category)
@@ -343,7 +343,7 @@
           || !boundedSafeInteger(source.last_error_age_ms)) {
         failContract();
       }
-      const recentSourceError = ["frame_timeout", "storage", "transaction"].includes(source.last_error_category)
+      const recentSourceError = ["frame_timeout", "storage", "transaction", "incident_collision"].includes(source.last_error_category)
         && source.last_error_age_ms <= 30000;
       const reported = source.producer_report_age_ms !== null;
       const fresh = reported && source.producer_report_age_ms <= 30000;
