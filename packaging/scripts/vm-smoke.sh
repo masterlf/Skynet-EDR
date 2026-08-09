@@ -98,19 +98,20 @@ skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
 skynet-edr status
-PLUGIN_HOME="$RUNTIME/hermes-home"
+PLUGIN_PAYLOAD=/usr/share/skynet-edr/hermes-plugin/skynet-edr
+PLUGIN_ENTRYPOINT="$PLUGIN_PAYLOAD/__init__.py"
 PLUGIN_STATE="$RUNTIME/hermes-state"
-export PLUGIN_HOME
-SKYNET_EDR_STATE_DIR="$PLUGIN_STATE" skynet-edr-install-hermes-plugin --hermes-home "$PLUGIN_HOME" --no-enable
-if [ ! -f "$PLUGIN_HOME/plugins/skynet-edr/__init__.py" ]; then
-  echo "Hermes plugin installer did not copy __init__.py" >&2
-  exit 1
-fi
+export PLUGIN_PAYLOAD
+dpkg-query -L skynet-edr | grep -F -x "$PLUGIN_ENTRYPOINT" >/dev/null
+test "$(stat -c '%U:%G %a' "$PLUGIN_ENTRYPOINT")" = "root:root 644"
+
+# This directly imports the package-owned payload to exercise plugin registration
+# and its isolated log/spool transport. It does not exercise or prove enrollment.
 SKYNET_EDR_STATE_DIR="$PLUGIN_STATE" python3 - <<'PY'
 import importlib.util
 import os
 import pathlib
-plugin = pathlib.Path(os.environ['PLUGIN_HOME']) / 'plugins/skynet-edr/__init__.py'
+plugin = pathlib.Path(os.environ['PLUGIN_PAYLOAD']) / '__init__.py'
 spec = importlib.util.spec_from_file_location('skynet_edr_vm_smoke_plugin', plugin)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -142,7 +143,7 @@ if grep -a -F 'SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE' "$PLUGIN_SPOOL" "
   exit 1
 fi
 
-echo "Hermes plugin install/log/spool smoke passed"
+echo "Hermes package payload/plugin transport smoke passed (not enrollment proof)"
 skynet-edr store init --db "$DB"
 skynet-edr events ingest-spool --db "$DB" --spool "$PLUGIN_SPOOL" --checkpoint "$RUNTIME/plugin.checkpoint"
 skynet-edr events ingest-spool --db "$DB" --spool "$SPOOL" --checkpoint "$CHECKPOINT"

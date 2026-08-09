@@ -66,6 +66,32 @@ class VmSmokeGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("unknown argument: --skip-purge", result.stderr)
 
+    def test_uses_installed_package_plugin_payload_without_legacy_installer_args(self) -> None:
+        script = SCRIPT.read_text()
+
+        self.assertNotIn("--hermes-home", script)
+        self.assertNotIn("--no-enable", script)
+        self.assertNotIn("PLUGIN_HOME", script)
+        self.assertIn(
+            "PLUGIN_PAYLOAD=/usr/share/skynet-edr/hermes-plugin/skynet-edr",
+            script,
+        )
+        self.assertIn(
+            "plugin = pathlib.Path(os.environ['PLUGIN_PAYLOAD']) / '__init__.py'",
+            script,
+        )
+
+    def test_checks_package_ownership_and_does_not_claim_enrollment(self) -> None:
+        script = SCRIPT.read_text()
+
+        self.assertIn(
+            'dpkg-query -L skynet-edr | grep -F -x "$PLUGIN_ENTRYPOINT"',
+            script,
+        )
+        self.assertIn("package payload/plugin transport smoke passed", script)
+        self.assertIn("not enrollment proof", script)
+        self.assertNotIn("Hermes plugin install/log/spool smoke passed", script)
+
 
 if __name__ == "__main__":
     unittest.main()
