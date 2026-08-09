@@ -92,6 +92,17 @@ class VmSmokeGateTests(unittest.TestCase):
         self.assertIn("not enrollment proof", script)
         self.assertNotIn("Hermes plugin install/log/spool smoke passed", script)
 
+    def test_distinguishes_native_package_and_canonical_product_versions(self) -> None:
+        script = SCRIPT.read_text()
+
+        self.assertIn(
+            'EXPECTED_PACKAGE_VERSION=$(dpkg-deb -f "$DEB" Version)',
+            script,
+        )
+        self.assertIn('python3 - "$REPO/Cargo.toml"', script)
+        self.assertIn('--expected-version "$EXPECTED_PRODUCT_VERSION"', script)
+        self.assertNotIn('--expected-version "$EXPECTED_PACKAGE_VERSION"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

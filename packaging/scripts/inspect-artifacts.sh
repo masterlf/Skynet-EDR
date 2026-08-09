@@ -45,6 +45,8 @@ deb=$(require_one 'skynet-edr_*.deb')
 rpm=$(require_one 'skynet-edr-*.rpm')
 arch=$(require_one 'skynet-edr-*.pkg.tar.zst')
 version=$(basename "$deb" | sed -E 's/^skynet-edr_([^_]+)_.*/\1/')
+deb_rpm_version=$(printf '%s' "$version" | sed 's/-/~/')
+arch_version=$(printf '%s' "$version" | tr '-' '.')
 
 mkdir -p "$DIST_DIR/inspection"
 
@@ -71,8 +73,8 @@ dpkg-deb --contents "$deb" > "$DIST_DIR/inspection/deb.txt"
 reject_cache_files "$DIST_DIR/inspection/deb.txt"
 python3 packaging/scripts/validate-artifact-listing.py \
   --format deb "$DIST_DIR/inspection/deb.txt"
-if [ "$(dpkg-deb -f "$deb" Version)" != "$version" ]; then
-  echo "deb metadata version does not match artifact version: $(dpkg-deb -f "$deb" Version) != $version" >&2
+if [ "$(dpkg-deb -f "$deb" Version)" != "$deb_rpm_version" ]; then
+  echo "deb metadata version does not match native release version: $(dpkg-deb -f "$deb" Version) != $deb_rpm_version" >&2
   exit 1
 fi
 dpkg-deb --info "$deb" > "$DIST_DIR/inspection/deb-info.txt"
@@ -101,6 +103,11 @@ rpm -qplv "$rpm" > "$DIST_DIR/inspection/rpm-verbose.txt"
 rpm -qpi "$rpm" > "$DIST_DIR/inspection/rpm-info.txt"
 rpm -qp --scripts "$rpm" > "$DIST_DIR/inspection/rpm-scripts.txt"
 rpm -qpR "$rpm" > "$DIST_DIR/inspection/rpm-requires.txt"
+rpm_version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$rpm")
+if [ "$rpm_version" != "$deb_rpm_version-1" ]; then
+  echo "rpm metadata version does not match native release version: $rpm_version != $deb_rpm_version-1" >&2
+  exit 1
+fi
 reject_cache_files "$DIST_DIR/inspection/rpm.txt"
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/bin/skynet-edr-daemon$'
@@ -121,6 +128,12 @@ grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/share/skynet-edr/hermes-plugi
 
 require_cmd zstd
 tar --zstd -tf "$arch" > "$DIST_DIR/inspection/archlinux.txt"
+tar --zstd -xOf "$arch" .PKGINFO > "$DIST_DIR/inspection/archlinux-pkginfo.txt"
+arch_pkgver=$(sed -n 's/^pkgver = //p' "$DIST_DIR/inspection/archlinux-pkginfo.txt")
+if [ "$arch_pkgver" != "$arch_version-1" ]; then
+  echo "Arch metadata version does not match native release version: $arch_pkgver != $arch_version-1" >&2
+  exit 1
+fi
 reject_cache_files "$DIST_DIR/inspection/archlinux.txt"
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/archlinux.txt" '^usr/bin/skynet-edr-daemon$'

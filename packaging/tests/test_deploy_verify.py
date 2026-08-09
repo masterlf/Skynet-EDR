@@ -118,13 +118,13 @@ class DeploymentVerifierTests(unittest.TestCase):
 
     def test_api_contract_requires_status_risks_and_rules(self) -> None:
         documents = {
-            "/api/status": {"version": "0.5.1", "ingestion": {"state": "disabled"}},
+            "/api/status": {"version": "0.6.0-alpha.1", "ingestion": {"state": "disabled"}},
             "/api/v1/risks?limit=1&offset=0": {"schema_version": "skynet.risk.v1", "read_only": True},
             "/api/v1/rules": {"schema_version": "skynet.rules.v1", "read_only": True, "compiled_active": True},
         }
-        self.assertEqual(self.verifier.verify_api_documents(documents, "0.5.1"), [])
+        self.assertEqual(self.verifier.verify_api_documents(documents, "0.6.0-alpha.1"), [])
         del documents["/api/v1/rules"]
-        self.assertIn("/api/v1/rules: missing HTTP 200 JSON document", self.verifier.verify_api_documents(documents, "0.5.1"))
+        self.assertIn("/api/v1/rules: missing HTTP 200 JSON document", self.verifier.verify_api_documents(documents, "0.6.0-alpha.1"))
 
     def test_api_contract_rejects_wrong_version_schema_and_degraded_ingestion(self) -> None:
         documents = {
@@ -132,7 +132,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             "/api/v1/risks?limit=1&offset=0": {"schema_version": "wrong", "read_only": False},
             "/api/v1/rules": {"schema_version": "wrong", "read_only": True, "compiled_active": False},
         }
-        errors = self.verifier.verify_api_documents(documents, "0.5.1")
+        errors = self.verifier.verify_api_documents(documents, "0.6.0-alpha.1")
         self.assertGreaterEqual(len(errors), 6)
 
     def test_port_accepts_only_strict_bounded_decimal(self) -> None:
@@ -219,7 +219,7 @@ class DeploymentVerifierTests(unittest.TestCase):
                 return self.body[:limit]
 
         valid_documents = {
-            "/api/status": {"version": "0.5.1", "ingestion": {"state": "healthy"}},
+            "/api/status": {"version": "0.6.0-alpha.1", "ingestion": {"state": "healthy"}},
             "/api/v1/risks?limit=1&offset=0": {"schema_version": "skynet.risk.v1", "read_only": True},
             "/api/v1/rules": {"schema_version": "skynet.rules.v1", "read_only": True, "compiled_active": True},
         }

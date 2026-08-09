@@ -286,6 +286,13 @@ fn late_event_correlates_incrementally_inside_derived_window() {
 
     assert_eq!(result.max_rule_window_ms, 60_000);
     assert_eq!(result.opened_incidents, 1);
+    assert_eq!(result.incident_notices.len(), 1);
+    assert_eq!(
+        result.incident_notices[0].id,
+        "inc:EDR-PI-001:7495016ca4679c8198690557f3efc99c9d15a6f5afecf7b9dd4c634fa226b293"
+    );
+    assert_eq!(result.incident_notices[0].severity, "high");
+    assert!(!result.incident_notices[0].summary.is_empty());
     assert_eq!(store.count_incidents().expect("incident count"), 1);
     assert_eq!(
         store
@@ -299,6 +306,12 @@ fn late_event_correlates_incrementally_inside_derived_window() {
         "inc:EDR-PI-001:7495016ca4679c8198690557f3efc99c9d15a6f5afecf7b9dd4c634fa226b293"
     );
     assert!(result.candidate_events <= 2);
+
+    let replay = store
+        .commit_continuous_event("uid:1000", &prompt, &rules, 10_000)
+        .expect("duplicate replay succeeds");
+    assert_eq!(replay.status, ContinuousIngestStatus::Duplicate);
+    assert!(replay.incident_notices.is_empty());
 
     let _ = fs::remove_file(db_path);
 }

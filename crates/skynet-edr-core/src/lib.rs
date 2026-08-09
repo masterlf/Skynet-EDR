@@ -23,6 +23,9 @@ const MAX_JSON_ATTRIBUTE_TREE_UNITS: usize = 4_096;
 // Canonical-to-storage projection adds at most six synthetic top-level fields and
 // twelve fixed typed child fields (provenance plus artifact).
 const MAX_STORAGE_JSON_ATTRIBUTE_TREE_UNITS: usize = MAX_JSON_ATTRIBUTE_TREE_UNITS + 18;
+/// Maximum newly inserted incident projections returned by one continuous transaction.
+pub const MAX_CONTINUOUS_INCIDENT_NOTICES: usize = 64;
+const MAX_CONTINUOUS_NOTICE_SUMMARY_CHARS: usize = 512;
 const SYNTHETIC_CANONICAL_ATTRIBUTES: [&str; 6] = [
     "schema_version",
     "event_type",
@@ -364,12 +367,27 @@ pub struct ContinuousIngestResult {
     pub status: ContinuousIngestStatus,
     /// Number of newly opened deterministic incidents.
     pub opened_incidents: usize,
+    /// Bounded redacted summaries for incidents newly committed by this transaction.
+    pub incident_notices: Vec<ContinuousIncidentNotice>,
     /// Number of indexed events evaluated for correlation.
     pub candidate_events: usize,
     /// Correlation used a bounded recent subset because the candidate set overflowed.
     pub correlation_truncated: bool,
     /// Maximum window derived from the validated active rules.
     pub max_rule_window_ms: u64,
+}
+
+/// Bounded already-redacted incident projection safe for local alert delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContinuousIncidentNotice {
+    /// Safe routable incident identifier (at most 256 Unicode scalar values).
+    pub id: String,
+    /// Stable lowercase severity label.
+    pub severity: String,
+    /// Redacted operator summary capped at 512 Unicode scalar values.
+    pub summary: String,
+    /// Incident creation timestamp in Unix epoch milliseconds.
+    pub created_at_unix_ms: u64,
 }
 
 /// Error returned by transactional continuous ingestion.
@@ -4870,6 +4888,8 @@ impl LocalStore {
     ///
     /// Returns [`ContinuousIngestError`] when validation, bounded correlation, or any
     /// part of the `SQLite` transaction fails.
+    // Keep the event/incident/receipt transaction ordering visible in one place.
+    #[allow(clippy::too_many_lines)]
     pub fn commit_continuous_event(
         &self,
         source_id: &str,
@@ -4903,6 +4923,7 @@ impl LocalStore {
             return Ok(ContinuousIngestResult {
                 status: insert_status,
                 opened_incidents: 0,
+                incident_notices: Vec::new(),
                 candidate_events: 0,
                 correlation_truncated: false,
                 max_rule_window_ms,
@@ -4931,34 +4952,41 @@ impl LocalStore {
             .map(canonical_event_to_storage_event)
             .collect::<Vec<_>>();
         let mut opened_incidents = 0;
+        let mut incident_notices = Vec::new();
         if correlation_truncated {
             let incident = degraded_correlation_incident(&source_key, &event);
-            opened_incidents += insert_continuous_incident_or_record_collision!(
+            let inserted = insert_continuous_incident_or_record_collision!(
                 self,
                 transaction,
                 &source_key,
                 &incident
             );
+            opened_incidents += inserted;
+            push_continuous_incident_notice(&mut incident_notices, &incident, inserted);
         }
         for sequence_match in matches {
             let incident = sanitize_incident_for_storage(&continuous_sequence_match_incident(
                 &sequence_match,
                 &stored_events,
             ));
-            opened_incidents += insert_continuous_incident_or_record_collision!(
+            let inserted = insert_continuous_incident_or_record_collision!(
                 self,
                 transaction,
                 &source_key,
                 &incident
             );
+            opened_incidents += inserted;
+            push_continuous_incident_notice(&mut incident_notices, &incident, inserted);
         }
         for incident in p1_incidents_for_trigger(&projected, &candidates) {
-            opened_incidents += insert_continuous_incident_or_record_collision!(
+            let inserted = insert_continuous_incident_or_record_collision!(
                 self,
                 transaction,
                 &source_key,
                 &incident
             );
+            opened_incidents += inserted;
+            push_continuous_incident_notice(&mut incident_notices, &incident, inserted);
         }
         transaction.execute(
             "INSERT INTO ingest_receipts (event_id, source_id, committed_at_unix_ms)
@@ -4974,6 +5002,7 @@ impl LocalStore {
         Ok(ContinuousIngestResult {
             status: ContinuousIngestStatus::Persisted,
             opened_incidents,
+            incident_notices,
             candidate_events: candidates.len(),
             correlation_truncated,
             max_rule_window_ms,
@@ -5844,6 +5873,34 @@ fn sqlite_usize(field: &'static str, value: usize) -> StorageResult<i64> {
         field,
         value: u64::try_from(value).unwrap_or(u64::MAX),
     })
+}
+
+fn push_continuous_incident_notice(
+    notices: &mut Vec<ContinuousIncidentNotice>,
+    incident: &Incident,
+    inserted: usize,
+) {
+    if inserted != 1 || notices.len() >= MAX_CONTINUOUS_INCIDENT_NOTICES {
+        return;
+    }
+    let sanitized = sanitize_incident_for_storage(incident);
+    notices.push(ContinuousIncidentNotice {
+        id: sanitized.id.as_str().to_owned(),
+        severity: match sanitized.severity {
+            Severity::Informational => "informational",
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Critical => "critical",
+        }
+        .to_owned(),
+        summary: sanitized
+            .summary
+            .chars()
+            .take(MAX_CONTINUOUS_NOTICE_SUMMARY_CHARS)
+            .collect(),
+        created_at_unix_ms: sanitized.created_at_unix_ms,
+    });
 }
 
 fn sanitize_incident_for_storage(incident: &Incident) -> Incident {
