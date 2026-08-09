@@ -5,9 +5,9 @@ usage() {
   cat <<'USAGE'
 Usage: sudo vm-smoke.sh --deb <package.deb> --repo <source-checkout> [--skip-purge]
 
-Runs the clean-host Ubuntu packaging/runtime smoke gate against an already-built
-Skynet-EDR DEB. The source checkout supplies test fixtures only; installed
-binaries are exercised from /usr/bin.
+Runs the authoritative disposable Ubuntu/systemd gate against an already-built
+Skynet-EDR DEB. Never run this on a persistent host: it intentionally injects
+ownership drift after proving the healthy deployment contract.
 USAGE
 }
 
@@ -42,7 +42,7 @@ if [ ! -d "$REPO" ]; then
   exit 1
 fi
 
-RUNTIME=/tmp/skynet-edr-vm-smoke
+RUNTIME=$(mktemp -d /tmp/skynet-edr-vm-smoke.XXXXXX)
 DB="$RUNTIME/skynet.sqlite"
 SPOOL="$REPO/crates/skynet-edr-core/tests/fixtures/hermes_agent_golden_events_v0.jsonl"
 MALWARE_TRACE="$REPO/crates/skynet-edr-core/tests/fixtures/hermes_fake_malware_content_trace.json"
@@ -56,15 +56,18 @@ EXPECTED_VERSION=$(dpkg-deb -f "$DEB" Version)
 
 cleanup() {
   systemctl stop skynet-edr.service >/dev/null 2>&1 || true
+  rm -rf "$RUNTIME"
 }
 trap cleanup EXIT INT TERM
 
-rm -rf "$RUNTIME"
-install -d -m 0755 "$RUNTIME"
 test -f "$SPOOL"
 test -f "$MALWARE_TRACE"
 
-dpkg -i "$DEB"
+# Reproduce the incident precursor before package installation. The package's
+# bounded tmpfiles contract must correct this exact directory (not recurse).
+install -d -o root -g root -m 0750 /var/lib/skynet-edr
+
+apt-get install -y --no-install-recommends "$(realpath "$DEB")"
 
 ACTUAL_VERSION=$(dpkg-query -W -f='${Version}' skynet-edr)
 if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
@@ -165,6 +168,30 @@ until curl -fsS http://127.0.0.1:8787/api/status >/dev/null; do
   fi
   sleep 0.25
 done
+
+# The verifier checks exact owner/group/mode tuples, real systemd process UID,
+# installed executable identity, service-user DAC access, and all three HTTP 200
+# read-only contracts. It has no mutation or repair mode.
+python3 "$REPO/packaging/scripts/deploy-verify.py" \
+  --expected-version "$EXPECTED_VERSION"
+runuser -u skynet-edr -- install -m 0640 /dev/null \
+  /var/lib/skynet-edr/.deployment-smoke-write
+test "$(stat -c '%U:%G %a' /var/lib/skynet-edr/.deployment-smoke-write)" = \
+  "skynet-edr:skynet-edr 640"
+rm -f /var/lib/skynet-edr/.deployment-smoke-write
+
+# Prove the regression gate fails closed on the incident's exact ownership
+# drift. Do not repair it: this guest is disposable and is destroyed after CI.
+systemctl stop skynet-edr.service
+chown root:root /var/lib/skynet-edr
+drift_report="$RUNTIME/injected-ownership-drift.json"
+if python3 "$REPO/packaging/scripts/deploy-verify.py" \
+  --expected-version "$EXPECTED_VERSION" >"$drift_report" 2>&1; then
+  echo "deployment verifier accepted injected root-owned state drift" >&2
+  exit 1
+fi
+grep -F '/var/lib/skynet-edr: expected skynet-edr:skynet-edr 0750, observed root:root 0750' \
+  "$drift_report" >/dev/null
 
 apt-get remove -y skynet-edr
 if [ "$SKIP_PURGE" -eq 0 ]; then

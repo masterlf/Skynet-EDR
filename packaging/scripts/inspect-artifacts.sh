@@ -69,11 +69,15 @@ grep_listing "$DIST_DIR/inspection/tarball.txt" '/integrations/hermes/skynet-edr
 require_cmd dpkg-deb
 dpkg-deb --contents "$deb" > "$DIST_DIR/inspection/deb.txt"
 reject_cache_files "$DIST_DIR/inspection/deb.txt"
+python3 packaging/scripts/validate-artifact-listing.py \
+  --format deb "$DIST_DIR/inspection/deb.txt"
 if [ "$(dpkg-deb -f "$deb" Version)" != "$version" ]; then
   echo "deb metadata version does not match artifact version: $(dpkg-deb -f "$deb" Version) != $version" >&2
   exit 1
 fi
-dpkg-deb --control "$deb" "$DIST_DIR/inspection/deb-control"
+dpkg-deb --info "$deb" > "$DIST_DIR/inspection/deb-info.txt"
+dpkg-deb --field "$deb" Package Version Architecture Depends \
+  > "$DIST_DIR/inspection/deb-fields.txt"
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './usr/bin/skynet-edr-daemon$'
 grep_listing "$DIST_DIR/inspection/deb.txt" './etc/skynet-edr/config.toml$'
@@ -92,6 +96,10 @@ grep_listing "$DIST_DIR/inspection/deb.txt" './usr/share/skynet-edr/hermes-plugi
 
 require_cmd rpm
 rpm -qpl "$rpm" > "$DIST_DIR/inspection/rpm.txt"
+rpm -qplv "$rpm" > "$DIST_DIR/inspection/rpm-verbose.txt"
+rpm -qpi "$rpm" > "$DIST_DIR/inspection/rpm-info.txt"
+rpm -qp --scripts "$rpm" > "$DIST_DIR/inspection/rpm-scripts.txt"
+rpm -qpR "$rpm" > "$DIST_DIR/inspection/rpm-requires.txt"
 reject_cache_files "$DIST_DIR/inspection/rpm.txt"
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/bin/skynet-edr$'
 grep_listing "$DIST_DIR/inspection/rpm.txt" '^/usr/bin/skynet-edr-daemon$'

@@ -4,6 +4,8 @@ This document defines the Linux packaging baseline for Skynet-EDR. The product t
 
 Skynet-EDR is security software. Packaging, install scripts, maintainer scripts, service units, and release workflows are privileged attack surface and must be reviewed like production code.
 
+Package payloads must never be extracted or replayed as root on a live or persistent host. This unconditional ban includes `dpkg-deb -x`, `dpkg-deb --control`, `rpm2cpio | cpio`, `tar -x`, and `bsdtar -x`. Use metadata/listing queries in CI, a disposable non-root network-isolated sandbox for byte inspection, and the native package manager for deployment. See the bounded [DEB/systemd deployment and rollback runbook](DEPLOYMENT.md).
+
 ## Packaging objectives
 
 1. Make Skynet-EDR installable on common Linux distributions.
@@ -170,12 +172,14 @@ tar -tf dist/skynet-edr.pkg.tar.zst
 
 Smoke tests should eventually run in clean Ubuntu/Debian/Fedora/Arch containers or VMs. Do not call a package production-ready without install/upgrade/remove tests.
 
-The current release workflow runs `packaging/scripts/smoke-install-artifacts.sh`
-after artifact inspection. It executes the `.deb` and custom tarball in clean
-Ubuntu containers, including remove/purge behavior, and keeps RPM/Arch coverage
-to checksum/content validation until distro-native runtime environments are part
-of CI. This is deliberately narrower than pretending a foreign host has proven
-all package managers equally.
+The package workflows run `packaging/scripts/smoke-install-artifacts.sh` after
+listing-only artifact inspection, then invoke `packaging/scripts/vm-smoke.sh` on
+the disposable Ubuntu runner. The latter is the authoritative DEB/systemd gate:
+it runs the real unit as `skynet-edr`, proves writable persistent state and the
+status/risks/rules HTTP contracts, and proves injected root-owned state drift is
+rejected. RPM/Arch remain checksum/content validation only until distro-native
+runtime environments exist. This is deliberately narrower than pretending a
+foreign host has proven every package manager equally.
 
 ## Maintainer script rules
 

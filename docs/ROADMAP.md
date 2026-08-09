@@ -15,16 +15,18 @@ v0.5.0 is a passive Linux-first prerelease. Within the narrow evidence-backed sc
 
 It does **not** provide inline pause, approval, blocking, or active containment.
 
-## Current milestone: v0.5.0 Passive Public MVP
+## Current milestone: v0.5.1 Deployment Integrity Hotfix
 
-The v0.5.0 milestone carries forward the v0.4.1 reliability baseline and adds the bounded S3 Hermes enrollment path:
+The v0.5.1 milestone carries forward the v0.5.0 passive/S3 baseline and adds the release-blocking DEB/systemd deployment-integrity path:
 
 - deterministic sequence-capable correlation and the reviewed high-signal AI-agent rule pack;
 - `skynet-edr doctor` and private, redaction-safe diagnostics collection;
 - authenticated bounded continuous ingestion with privacy-safe EXFIL/MALWARE detection;
 - completed-outcome telemetry for exact successful Hermes cron create/update operations;
 - explicit fail-dark treatment for unsupported config, persistence, and approval-scope outcomes;
-- clean-container Ubuntu `.deb` and tarball install/remove/purge evidence without service start;
+- a disposable Ubuntu DEB/systemd vertical smoke with real service identity, writable persistent state, and live read-only APIs;
+- a read-only exact owner/group/mode, process identity, service-user access, and API verifier that rejects injected ownership drift;
+- listing-only package inspection and an unconditional live-host privileged-extraction ban;
 - public download, checksum, extraction, and version verification;
 - green Rust, Python, documentation, SAST, secret-scanning, dependency, and packaging gates;
 - release notes that separate implemented behavior from limitations.

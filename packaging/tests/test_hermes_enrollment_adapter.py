@@ -43,7 +43,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         return {
             "product": "Skynet-EDR", "binary": "skynet-edr", "run_mode": "passive",
             "server": "skynet-edr-mcp", "read_only": True, "tool_count": 6,
-            "incident_count": 0, "event_count": 1, "version": "0.5.0",
+            "incident_count": 0, "event_count": 1, "version": "0.5.1",
             "ingestion": ingestion,
         }
 
