@@ -1320,25 +1320,39 @@ def _old_identity_gone(identity: ProcessIdentity, deadline_ns: int) -> bool:
 
 
 def _wait_for_source(context: dict[str, Any], gateway: ProcessIdentity,
-                     deadline_ns: int, *, retry_connection_refused: bool = False
-                     ) -> tuple[dict[str, Any], dict[str, Any]]:
+                     deadline_ns: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    status = _status(deadline_ns)
+    ingestion = status.get("ingestion")
+    if type(ingestion) is not dict:
+        raise AdapterError("readback_failure")
+    return status, _exact_source(ingestion, context, gateway)
+
+
+def _acquire_source(context: dict[str, Any], deadline_ns: int
+                    ) -> tuple[dict[str, Any], dict[str, Any], ProcessIdentity]:
     while True:
+        before = _service_identity(context, UNIT, deadline_ns)
         try:
             status = _status(deadline_ns)
         except AdapterError as exc:
-            if not retry_connection_refused or exc.category != "status_connection_refused":
+            if exc.category != "status_connection_refused":
                 raise
             _bounded_sleep(deadline_ns)
             continue
         ingestion = status.get("ingestion")
         if type(ingestion) is not dict:
             raise AdapterError("readback_failure")
-        try:
-            return status, _exact_source(ingestion, context, gateway)
-        except AdapterError as exc:
-            if exc.category != "source_missing":
-                raise
-        _bounded_sleep(deadline_ns)
+        sources = ingestion.get("sources")
+        if type(sources) is not list:
+            raise AdapterError("readback_failure")
+        if not sources:
+            _bounded_sleep(deadline_ns)
+            continue
+        source = _exact_source(ingestion, context, before)
+        after = _service_identity(context, UNIT, deadline_ns)
+        if before != after:
+            raise AdapterError("identity_epoch")
+        return status, source, after
 
 
 def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
@@ -1372,7 +1386,12 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
          env=_minimal_env(context), target=context, deadline_ns=deadline_ns)
     _run([str(SYSTEMCTL), "restart", DAEMON_UNIT],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
-    after = {unit: _service_identity(context, unit, deadline_ns) for unit in units}
+    after = {
+        unit: _service_identity(context, unit, deadline_ns)
+        for unit in (manager_unit, DAEMON_UNIT)
+    }
+    status, source, selected_gateway = _acquire_source(context, deadline_ns)
+    after[UNIT] = selected_gateway
     if any(after[unit] == before[unit] for unit in units):
         raise AdapterError("identity_epoch")
     if any(not _old_identity_gone(identity, deadline_ns) for identity in before.values()):
@@ -1393,9 +1412,6 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
             or not _gateway_context_matches(context, deadline_ns)):
         raise AdapterError("readback_failure")
 
-    status, source = _wait_for_source(
-        context, after[UNIT], deadline_ns, retry_connection_refused=True
-    )
     baseline = _startup_canary_baseline(source, event_id)
     if previous_nonce is not None and baseline["runtime_instance_nonce"] == previous_nonce:
         raise AdapterError("source_identity")

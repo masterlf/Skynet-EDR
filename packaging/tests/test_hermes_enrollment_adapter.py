@@ -523,14 +523,166 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         gateway = self.module.ProcessIdentity(22, 202, 2002)
         status = self._status_payload({"sources": [self._v3_source()]})
         refusal = self.module.AdapterError("status_connection_refused")
-        with mock.patch.object(self.module, "_status", side_effect=[refusal, status]) as read_status, \
+        with mock.patch.object(self.module, "_service_identity", return_value=gateway) as identity, \
+                mock.patch.object(self.module, "_status", side_effect=[refusal, status]) as read_status, \
                 mock.patch.object(self.module, "_bounded_sleep") as sleep:
-            actual, _ = self.module._wait_for_source(
-                context, gateway, 1234, retry_connection_refused=True
-            )
+            actual, _, selected = self.module._acquire_source(context, 1234)
         self.assertIs(actual, status)
+        self.assertEqual(selected, gateway)
         self.assertEqual(read_status.call_count, 2)
+        self.assertEqual(identity.call_args_list, [
+            mock.call(context, self.module.UNIT, 1234),
+            mock.call(context, self.module.UNIT, 1234),
+            mock.call(context, self.module.UNIT, 1234),
+        ])
         sleep.assert_called_once_with(1234)
+
+    def test_initial_source_orders_identity_status_source_and_identity(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        status = self._status_payload({"sources": [self._v3_source()]})
+        trace = []
+        original_exact_source = self.module._exact_source
+
+        def identity(*_args):
+            trace.append("identity")
+            return gateway
+
+        def read_status(*_args):
+            trace.append("status")
+            return status
+
+        def exact_source(*args, **kwargs):
+            trace.append("source")
+            return original_exact_source(*args, **kwargs)
+
+        with mock.patch.object(self.module, "_service_identity", side_effect=identity), \
+                mock.patch.object(self.module, "_status", side_effect=read_status), \
+                mock.patch.object(self.module, "_exact_source", side_effect=exact_source):
+            self.module._acquire_source(context, 1234)
+        self.assertEqual(trace, ["identity", "status", "source", "identity"])
+
+    def test_initial_source_second_strict_identity_failure_is_terminal(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        ready = self._status_payload({"sources": [self._v3_source()]})
+        failure = self.module.AdapterError("readback_failure")
+        with mock.patch.object(
+                self.module, "_service_identity", side_effect=[gateway, failure]
+        ) as identity, mock.patch.object(self.module, "_status", return_value=ready) as status, \
+                mock.patch.object(self.module, "_bounded_sleep") as sleep, \
+                self.assertRaisesRegex(self.module.AdapterError, "readback_failure"):
+            self.module._acquire_source(context, 1234)
+        self.assertEqual(identity.call_count, 2)
+        status.assert_called_once_with(1234)
+        sleep.assert_not_called()
+
+    def test_empty_then_first_nonempty_mismatch_is_terminal(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        empty = self._status_payload({"sources": []})
+        cases = (
+            [self._v3_source(plugin_generation="c" * 64)],
+            [self._v3_source(kernel_peer_pid=23)],
+            [self._v3_source(runtime_role="cli")],
+            [self._v3_source(transport_state="degraded")],
+            [self._v3_source(), self._v3_source()],
+        )
+        for sources in cases:
+            with self.subTest(sources=sources), mock.patch.object(
+                    self.module, "_service_identity", return_value=gateway
+            ), mock.patch.object(
+                    self.module, "_status",
+                    side_effect=[empty, self._status_payload({"sources": sources})]
+            ) as status, mock.patch.object(
+                    self.module, "_bounded_sleep",
+                    side_effect=[None, AssertionError("prohibited source retry")]
+            ) as sleep, \
+                    self.assertRaises(self.module.AdapterError):
+                self.module._acquire_source(context, 1234)
+            self.assertEqual(status.call_count, 2)
+            sleep.assert_called_once_with(1234)
+
+    def test_post_baseline_nonempty_identity_schema_and_health_mismatch_is_terminal(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        schema = self._v3_source()
+        schema.pop("source_id")
+        cases = (self._v3_source(kernel_peer_pid=23), schema,
+                 self._v3_source(transport_state="degraded"))
+        for source in cases:
+            status = self._status_payload({"sources": [source]})
+            with self.subTest(source=source), \
+                    mock.patch.object(self.module, "_status", return_value=status) as read_status, \
+                    mock.patch.object(
+                        self.module, "_bounded_sleep",
+                        side_effect=AssertionError("prohibited source retry"),
+                    ) as sleep, \
+                    self.assertRaises(self.module.AdapterError):
+                self.module._wait_for_source(context, gateway, 1234)
+            read_status.assert_called_once_with(1234)
+            sleep.assert_not_called()
+
+    def test_initial_source_acquisition_retries_empty_then_selects_stable_source_identity(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway_a = self.module.ProcessIdentity(21, 201, 2001)
+        gateway_b = self.module.ProcessIdentity(22, 202, 2002)
+        empty = self._status_payload({"sources": []})
+        ready = self._status_payload({"sources": [self._v3_source()]})
+        with mock.patch.object(
+                self.module, "_service_identity", side_effect=[gateway_a, gateway_b, gateway_b]
+        ) as identity, mock.patch.object(
+                self.module, "_status", side_effect=[empty, ready]
+        ), mock.patch.object(self.module, "_bounded_sleep") as sleep:
+            status, source, selected = self.module._acquire_source(context, 1234)
+        self.assertIs(status, ready)
+        self.assertEqual(source, self._v3_source())
+        self.assertEqual(selected, gateway_b)
+        self.assertTrue(all(call.args[-1] == 1234 for call in identity.call_args_list))
+        sleep.assert_called_once_with(1234)
+
+    def test_initial_source_first_nonempty_mismatch_is_terminal_without_sleep(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        cases = (
+            [self._v3_source(authenticated_uid=1001)],
+            [self._v3_source(plugin_generation="c" * 64)],
+            [self._v3_source(kernel_peer_pid=23)],
+            [self._v3_source(kernel_peer_start_ticks=203)],
+            [self._v3_source(runtime_role="cli")],
+            [self._v3_source(runtime_instance_nonce="malformed")],
+            [self._v3_source(transport_state="degraded")],
+            [self._v3_source(), self._v3_source()],
+        )
+        for sources in cases:
+            with self.subTest(sources=sources), mock.patch.object(
+                    self.module, "_service_identity", return_value=gateway
+            ), mock.patch.object(
+                    self.module, "_status", return_value=self._status_payload({"sources": sources})
+            ), mock.patch.object(
+                    self.module, "_bounded_sleep",
+                    side_effect=AssertionError("prohibited source retry")
+            ) as sleep, \
+                    self.assertRaises(self.module.AdapterError):
+                self.module._acquire_source(context, 1234)
+            sleep.assert_not_called()
+
+    def test_initial_source_identity_change_and_strict_service_error_are_terminal(self):
+        context = {"uid": 1000, "generation": "b" * 64}
+        gateway = self.module.ProcessIdentity(22, 202, 2002)
+        changed = self.module.ProcessIdentity(23, 203, 2003)
+        ready = self._status_payload({"sources": [self._v3_source()]})
+        for identities, category in (
+            ([gateway, changed], "identity_epoch"),
+            (self.module.AdapterError("readback_failure"), "readback_failure"),
+        ):
+            with self.subTest(category=category), mock.patch.object(
+                    self.module, "_service_identity", side_effect=identities
+            ), mock.patch.object(self.module, "_status", return_value=ready), \
+                    mock.patch.object(self.module, "_bounded_sleep") as sleep, \
+                    self.assertRaisesRegex(self.module.AdapterError, category):
+                self.module._acquire_source(context, 1234)
+            sleep.assert_not_called()
 
     def test_source_readiness_refusal_is_terminal_without_authorized_retry(self):
         refusal = self.module.AdapterError("status_connection_refused")
@@ -540,29 +692,44 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             self.module._wait_for_source({}, self.module.ProcessIdentity(1, 2, 3), 1234)
         sleep.assert_not_called()
 
+    def test_post_baseline_empty_source_is_terminal_without_sleep(self):
+        status = self._status_payload({"sources": []})
+        with mock.patch.object(self.module, "_status", return_value=status), \
+                mock.patch.object(
+                    self.module, "_bounded_sleep",
+                    side_effect=AssertionError("prohibited source retry"),
+                ) as sleep, \
+                self.assertRaisesRegex(self.module.AdapterError, "source_missing"):
+            self.module._wait_for_source(
+                {"uid": 1000, "generation": "b" * 64},
+                self.module.ProcessIdentity(22, 202, 2002), 1234,
+            )
+        sleep.assert_not_called()
+
     def test_persistent_initial_refusal_stops_at_inherited_deadline(self):
         refusal = self.module.AdapterError("status_connection_refused")
         deadline = self.module.AdapterError("deadline")
-        with mock.patch.object(self.module, "_status", side_effect=refusal) as read_status, \
+        with mock.patch.object(
+                self.module, "_service_identity",
+                return_value=self.module.ProcessIdentity(1, 2, 3)
+        ), mock.patch.object(self.module, "_status", side_effect=refusal) as read_status, \
                 mock.patch.object(self.module, "_bounded_sleep", side_effect=deadline), \
                 self.assertRaisesRegex(self.module.AdapterError, "deadline"):
-            self.module._wait_for_source(
-                {}, self.module.ProcessIdentity(1, 2, 3), 1234,
-                retry_connection_refused=True,
-            )
+            self.module._acquire_source({}, 1234)
         read_status.assert_called_once_with(1234)
 
     def test_source_readiness_retries_no_other_error(self):
         for category in ("readback_failure", "status_timeout"):
             with self.subTest(category=category), \
+                    mock.patch.object(
+                        self.module, "_service_identity",
+                        return_value=self.module.ProcessIdentity(1, 2, 3),
+                    ), \
                     mock.patch.object(self.module, "_status",
                                       side_effect=self.module.AdapterError(category)), \
                     mock.patch.object(self.module, "_bounded_sleep") as sleep, \
                     self.assertRaisesRegex(self.module.AdapterError, category):
-                self.module._wait_for_source(
-                    {}, self.module.ProcessIdentity(1, 2, 3), 1234,
-                    retry_connection_refused=True,
-                )
+                self.module._acquire_source({}, 1234)
             sleep.assert_not_called()
 
     def test_status_types_only_errno_econnrefused(self):
@@ -1103,19 +1270,23 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         identities = [
             self.module.ProcessIdentity(11, 101, 1001), self.module.ProcessIdentity(21, 201, 2001),
             self.module.ProcessIdentity(31, 301, 3001), self.module.ProcessIdentity(12, 102, 1002),
-            self.module.ProcessIdentity(22, 202, 2002), self.module.ProcessIdentity(32, 302, 3002),
-            self.module.ProcessIdentity(12, 102, 1002), self.module.ProcessIdentity(22, 202, 2002),
             self.module.ProcessIdentity(32, 302, 3002),
-            self.module.ProcessIdentity(12, 102, 1002), self.module.ProcessIdentity(22, 202, 2002),
+            self.module.ProcessIdentity(12, 102, 1002), self.module.ProcessIdentity(23, 203, 2003),
+            self.module.ProcessIdentity(32, 302, 3002),
+            self.module.ProcessIdentity(12, 102, 1002), self.module.ProcessIdentity(23, 203, 2003),
             self.module.ProcessIdentity(32, 302, 3002),
         ]
-        baseline = self._v3_source()
+        baseline = self._v3_source(kernel_peer_pid=23, kernel_peer_start_ticks=203)
         advanced = self._v3_source(
+            kernel_peer_pid=23, kernel_peer_start_ticks=203,
             commit_sequence=5, events_persisted_total=5,
             last_persisted_canary_event_id=event_id,
             last_persisted_canary_receipt_status="persisted",
             last_persisted_canary_incidents_opened=0,
         )
+        baseline_status = {
+            "ingestion": {"state": "healthy", "listener_live": True, "sources": [baseline]}
+        }
         status = {"ingestion": {"state": "healthy", "listener_live": True, "sources": [advanced]}}
         prior_status = {"ingestion": {"sources": [self._v3_source(
             source_id="uid:1000:gateway:" + "b" * 64 + ":" + "c" * 64,
@@ -1141,10 +1312,15 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
               mock.patch.object(self.module, "_old_identity_gone", return_value=True),
               mock.patch.object(self.module, "_wait_for_socket_ready", return_value=True) as socket_ready,
               mock.patch.object(self.module, "CONFIG", config),
-              mock.patch.object(self.module, "_process_groups", return_value={987}),
+              mock.patch.object(self.module, "_process_groups", return_value={987}) as groups,
               mock.patch.object(self.module, "_gateway_context_matches", return_value=True),
-              mock.patch.object(self.module, "_wait_for_source", side_effect=[(status, baseline), (status, advanced)]),
-              mock.patch.object(self.module, "_status", side_effect=[prior_status, status]) as status_readback,
+              mock.patch.object(self.module, "_acquire_source",
+                                return_value=(baseline_status, baseline,
+                                              self.module.ProcessIdentity(23, 203, 2003))) as acquire,
+              mock.patch.object(self.module, "_wait_for_source",
+                                return_value=(status, advanced)) as source_readback,
+              mock.patch.object(self.module, "_status",
+                                side_effect=[prior_status, status]) as status_readback,
               mock.patch.object(self.module, "_run", side_effect=command) as run,
               mock.patch.object(self.module, "_atomic_write") as atomic_write,
               mock.patch.object(self.module, "_plugin_enabled", return_value=True),
@@ -1153,7 +1329,13 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             observation = self.module._restart(context)
         self.assertEqual(observation["restart_blast_radius"], "complete_user_manager")
         self.assertEqual(len(set(deadlines)), 1)
-        self.assertEqual(len(deadlines), 12)
+        self.assertEqual(len(deadlines), 11)
+        acquire.assert_called_once_with(context, 15_000_001_000)
+        source_readback.assert_called_once_with(
+            context, self.module.ProcessIdentity(23, 203, 2003), 15_000_001_000
+        )
+        self.assertEqual(groups.call_args_list, [mock.call(12, 15_000_001_000),
+                                                 mock.call(23, 15_000_001_000)])
         self.assertIn([str(self.module.SYSTEMCTL), "restart", "user@1000.service"],
                       [call.args[0] for call in run.call_args_list])
         self.assertIn([str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT],
@@ -1249,7 +1431,10 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
             with self.subTest(unchanged=unchanged), mock.patch.object(
                 self.module.time, "monotonic_ns", return_value=0
             ), mock.patch.object(
-                self.module, "_service_identity", side_effect=before + after
+                self.module, "_service_identity", side_effect=before + [after[0], after[2]]
+            ), mock.patch.object(
+                self.module, "_acquire_source",
+                return_value=({"ingestion": {}}, {}, after[1])
             ), mock.patch.object(self.module, "_status", return_value={"ingestion": {"sources": []}}), \
                     mock.patch.object(self.module, "_run", return_value=b""), \
                     mock.patch.object(self.module, "_atomic_write"):
