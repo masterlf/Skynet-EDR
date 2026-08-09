@@ -457,13 +457,28 @@ def main() -> None:
         raise SystemExit(f"missing reviewed release notes: {release_note.relative_to(ROOT)}")
 
     required_docs = {
-        "README.md": f"docs/releases/v{expected}.md",
-        "docs/ROADMAP.md": f"Current milestone: v{expected}",
-        "docs/INSTALL.md": f"skynet-edr_{expected}_amd64.deb",
-        "CHANGELOG.md": f"## {expected} -",
+        "README.md": (f"docs/releases/v{expected}.md",),
+        "docs/ROADMAP.md": (f"Current milestone: v{expected}",),
+        "docs/INSTALL.md": (f"skynet-edr_{expected}_amd64.deb",),
+        "CHANGELOG.md": (f"## {expected} -",),
     }
-    for path, marker in required_docs.items():
-        if marker not in text(path):
+    for path, markers in required_docs.items():
+        document = text(path)
+        if any(marker not in document for marker in markers):
+            raise SystemExit(f"{path} does not reference current release {expected}")
+
+    authoritative_doc_versions = {
+        "SECURITY.md": (
+            r"^Skynet-EDR v([0-9]+\.[0-9]+\.[0-9]+) is an installable prerelease",
+            r"^\| `v([0-9]+\.[0-9]+\.[0-9]+)` prerelease \|",
+        ),
+        "docs/README.md": (
+            r"^Current documentation structure target: v([0-9]+\.[0-9]+\.[0-9]+)\.",
+        ),
+    }
+    for path, patterns in authoritative_doc_versions.items():
+        document = text(path)
+        if any(re.findall(pattern, document, flags=re.MULTILINE) != [expected] for pattern in patterns):
             raise SystemExit(f"{path} does not reference current release {expected}")
 
     print(f"release version consistency passed: {expected}")

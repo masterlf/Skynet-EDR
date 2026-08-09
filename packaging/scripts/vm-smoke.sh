@@ -3,7 +3,7 @@ set -eu
 
 usage() {
   cat <<'USAGE'
-Usage: sudo vm-smoke.sh --deb <package.deb> --repo <source-checkout> [--skip-purge]
+Usage: sudo vm-smoke.sh --deb <package.deb> --repo <source-checkout>
 
 Runs the authoritative disposable Ubuntu/systemd gate against an already-built
 Skynet-EDR DEB. Never run this on a persistent host: it intentionally injects
@@ -13,13 +13,25 @@ USAGE
 
 DEB=
 REPO=
-SKIP_PURGE=0
+
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
+  echo "authoritative smoke requires GITHUB_ACTIONS=true" >&2
+  exit 1
+fi
+if [ "${SKYNET_EDR_RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+  echo "authoritative smoke requires runner.environment=github-hosted" >&2
+  exit 1
+fi
+if [ "${SKYNET_EDR_DISPOSABLE_SMOKE:-}" != 1 ]; then
+  echo "authoritative smoke requires SKYNET_EDR_DISPOSABLE_SMOKE=1" >&2
+  exit 1
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --deb) DEB=${2:?missing --deb path}; shift 2 ;;
     --repo) REPO=${2:?missing --repo path}; shift 2 ;;
-    --skip-purge) SKIP_PURGE=1; shift ;;
+
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -78,6 +90,9 @@ fi
 getent passwd skynet-edr >/dev/null
 getent group skynet-edr >/dev/null
 test "$(stat -c '%U:%G %a' /etc/skynet-edr/config.toml)" = "root:skynet-edr 640"
+test "$(stat -c '%U:%G %a' /usr/libexec/skynet-edr/deploy-verify)" = "root:root 755"
+cmp -s "$REPO/packaging/scripts/deploy-verify.py" /usr/libexec/skynet-edr/deploy-verify
+test -z "$(dpkg -V skynet-edr)"
 
 skynet-edr --version
 skynet-edr-daemon --version
@@ -172,7 +187,7 @@ done
 # The verifier checks exact owner/group/mode tuples, real systemd process UID,
 # installed executable identity, service-user DAC access, and all three HTTP 200
 # read-only contracts. It has no mutation or repair mode.
-python3 "$REPO/packaging/scripts/deploy-verify.py" \
+/usr/libexec/skynet-edr/deploy-verify \
   --expected-version "$EXPECTED_VERSION"
 runuser -u skynet-edr -- install -m 0640 /dev/null \
   /var/lib/skynet-edr/.deployment-smoke-write
@@ -185,7 +200,7 @@ rm -f /var/lib/skynet-edr/.deployment-smoke-write
 systemctl stop skynet-edr.service
 chown root:root /var/lib/skynet-edr
 drift_report="$RUNTIME/injected-ownership-drift.json"
-if python3 "$REPO/packaging/scripts/deploy-verify.py" \
+if /usr/libexec/skynet-edr/deploy-verify \
   --expected-version "$EXPECTED_VERSION" >"$drift_report" 2>&1; then
   echo "deployment verifier accepted injected root-owned state drift" >&2
   exit 1
@@ -194,8 +209,6 @@ grep -F '/var/lib/skynet-edr: expected skynet-edr:skynet-edr 0750, observed root
   "$drift_report" >/dev/null
 
 apt-get remove -y skynet-edr
-if [ "$SKIP_PURGE" -eq 0 ]; then
-  apt-get purge -y skynet-edr
-fi
+apt-get purge -y skynet-edr
 
 echo "Skynet-EDR VM smoke passed for $DEB"

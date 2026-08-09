@@ -27,6 +27,8 @@ FIXTURE_FILES = (
     "docs/ROADMAP.md",
     "docs/INSTALL.md",
     "CHANGELOG.md",
+    "SECURITY.md",
+    "docs/README.md",
 )
 
 
@@ -324,6 +326,59 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             self.run_checker("--expected", "")
 
         self.assertIn("invalid release version", str(failure.exception))
+
+    def test_rejects_stale_authoritative_current_version_docs(self) -> None:
+        for relative, current_marker in (
+            ("SECURITY.md", "Skynet-EDR v0.5.1 is an installable prerelease"),
+            ("SECURITY.md", "| `v0.5.1` prerelease |"),
+            ("docs/README.md", "Current documentation structure target: v0.5.1."),
+        ):
+            with self.subTest(relative=relative):
+                path = self.fixture_root / relative
+                original = path.read_text(encoding="utf-8")
+                path.write_text(
+                    original.replace(current_marker, current_marker.replace("0.5.1", "9.9.9")),
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn(
+                        f"{relative} does not reference current release 0.5.1",
+                        str(failure.exception),
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_rejects_contradictory_authoritative_current_version_docs(self) -> None:
+        cases = (
+            (
+                "SECURITY.md",
+                "\nSkynet-EDR v9.9.9 is an installable prerelease for evaluation.\n",
+            ),
+            (
+                "SECURITY.md",
+                "\n| `v9.9.9` prerelease | Best effort | Contradictory row |\n",
+            ),
+            (
+                "docs/README.md",
+                "\nCurrent documentation structure target: v9.9.9.\n",
+            ),
+        )
+        for relative, contradiction in cases:
+            with self.subTest(relative=relative, contradiction=contradiction):
+                path = self.fixture_root / relative
+                original = path.read_text(encoding="utf-8")
+                path.write_text(original + contradiction, encoding="utf-8")
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn(
+                        f"{relative} does not reference current release 0.5.1",
+                        str(failure.exception),
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
 
     def test_rejects_reordered_internal_dependency_version(self) -> None:
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"

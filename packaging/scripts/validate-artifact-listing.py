@@ -43,6 +43,9 @@ RECORD = re.compile(
     r"(?P<size>\d+)\s+(?P<date>\d{4}-\d{2}-\d{2})\s+"
     r"(?P<time>\d{2}:\d{2})\s+(?P<path>.+)$"
 )
+REQUIRED_ENTRIES = {
+    "usr/libexec/skynet-edr/deploy-verify": ("-rwxr-xr-x", "root", "root"),
+}
 
 
 def _is_allowed(path: str) -> bool:
@@ -107,6 +110,15 @@ def validate_deb_listing(text: str) -> list[str]:
         if normalized in seen:
             errors.append(f"line {number}: duplicate normalized path {normalized!r}")
         seen.add(normalized)
+        required = REQUIRED_ENTRIES.get(normalized)
+        if required is not None and (mode, owner, group) != required:
+            errors.append(
+                f"line {number}: required path {normalized!r} must have type/mode "
+                f"and identity {required[0]} {required[1]}:{required[2]}"
+            )
+    for required_path in REQUIRED_ENTRIES:
+        if required_path not in seen:
+            errors.append(f"missing required payload path {required_path!r}")
     return errors
 
 

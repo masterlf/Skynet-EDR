@@ -4,33 +4,37 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import grp
 import json
 import os
 import pwd
+import signal
 import stat
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
 
 PATH_CONTRACT = (
-    ("/etc/skynet-edr", "root", "skynet-edr", "0750"),
-    ("/etc/skynet-edr/rules.d", "root", "skynet-edr", "0750"),
-    ("/etc/skynet-edr/agents.d", "root", "skynet-edr", "0750"),
-    ("/etc/skynet-edr/config.toml", "root", "skynet-edr", "0640"),
-    ("/var/lib/skynet-edr", "skynet-edr", "skynet-edr", "0750"),
-    ("/var/log/skynet-edr", "skynet-edr", "skynet-edr", "0750"),
-    ("/var/cache/skynet-edr", "skynet-edr", "skynet-edr", "0750"),
-    ("/run/skynet-edr", "skynet-edr", "skynet-edr", "0750"),
-    ("/run/skynet-edr-ingest", "skynet-edr", "skynet-edr-ingest", "0750"),
-    ("/usr/bin/skynet-edr", "root", "root", "0755"),
-    ("/usr/bin/skynet-edr-daemon", "root", "root", "0755"),
-    ("/usr/lib/systemd/system/skynet-edr.service", "root", "root", "0644"),
-    ("/usr/lib/sysusers.d/skynet-edr.conf", "root", "root", "0644"),
-    ("/usr/lib/tmpfiles.d/skynet-edr.conf", "root", "root", "0644"),
+    ("/etc/skynet-edr", "directory", "root", "skynet-edr", "0750"),
+    ("/etc/skynet-edr/rules.d", "directory", "root", "skynet-edr", "0750"),
+    ("/etc/skynet-edr/agents.d", "directory", "root", "skynet-edr", "0750"),
+    ("/etc/skynet-edr/config.toml", "regular", "root", "skynet-edr", "0640"),
+    ("/var/lib/skynet-edr", "directory", "skynet-edr", "skynet-edr", "0750"),
+    ("/var/log/skynet-edr", "directory", "skynet-edr", "skynet-edr", "0750"),
+    ("/var/cache/skynet-edr", "directory", "skynet-edr", "skynet-edr", "0750"),
+    ("/run/skynet-edr", "directory", "skynet-edr", "skynet-edr", "0750"),
+    ("/run/skynet-edr-ingest", "directory", "skynet-edr", "skynet-edr-ingest", "0750"),
+    ("/usr/bin/skynet-edr", "regular", "root", "root", "0755"),
+    ("/usr/bin/skynet-edr-daemon", "regular", "root", "root", "0755"),
+    ("/usr/libexec/skynet-edr/deploy-verify", "regular", "root", "root", "0755"),
+    ("/usr/lib/systemd/system/skynet-edr.service", "regular", "root", "root", "0644"),
+    ("/usr/lib/sysusers.d/skynet-edr.conf", "regular", "root", "root", "0644"),
+    ("/usr/lib/tmpfiles.d/skynet-edr.conf", "regular", "root", "root", "0644"),
 )
 ACCESS_CONTRACT = (
     ("/etc/skynet-edr", "rx"),
@@ -46,15 +50,63 @@ API_PATHS = (
     "/api/v1/risks?limit=1&offset=0",
     "/api/v1/rules",
 )
+MAX_API_RESPONSE_BYTES = 65_536
+API_TIMEOUT_SECONDS = 3.0
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def build_api_opener():
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        NoRedirectHandler(),
+    )
+
+
+@contextlib.contextmanager
+def request_deadline(seconds: float):
+    if seconds <= 0:
+        raise ValueError("request deadline must be positive")
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("request deadline requires the main thread")
+    if signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+        raise RuntimeError("request deadline cannot replace an active timer")
+
+    def timeout_handler(_signum, _frame):
+        raise TimeoutError("HTTP request exceeded total deadline")
+
+    previous_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def parse_port(value: str) -> int:
+    if not value or not value.isascii() or not value.isdecimal():
+        raise ValueError("port must contain only ASCII decimal digits")
+    port = int(value)
+    if port < 1 or port > 65_535:
+        raise ValueError("port must be between 1 and 65535")
+    return port
 
 
 def verify_path_records(records: Mapping[str, Mapping[str, str]]) -> list[str]:
     errors: list[str] = []
-    for path, owner, group, mode in PATH_CONTRACT:
+    for path, object_type, owner, group, mode in PATH_CONTRACT:
         observed = records.get(path)
         if observed is None:
             errors.append(f"{path}: missing")
             continue
+        if observed.get("type") != object_type:
+            errors.append(
+                f"{path}: expected {object_type}, observed {observed.get('type')}"
+            )
         actual = f"{observed.get('owner')}:{observed.get('group')} {observed.get('mode')}"
         expected = f"{owner}:{group} {mode}"
         if actual != expected:
@@ -104,13 +156,29 @@ def verify_api_documents(documents: Mapping[str, Any], expected_version: str) ->
 def collect_path_records() -> tuple[dict[str, dict[str, str]], list[str]]:
     records: dict[str, dict[str, str]] = {}
     errors: list[str] = []
-    for path, _, _, _ in PATH_CONTRACT:
+    for path, _, _, _, _ in PATH_CONTRACT:
         try:
             metadata = os.lstat(path)
             if stat.S_ISLNK(metadata.st_mode):
                 errors.append(f"{path}: symlink is not permitted")
                 continue
+            if stat.S_ISREG(metadata.st_mode):
+                object_type = "regular"
+            elif stat.S_ISDIR(metadata.st_mode):
+                object_type = "directory"
+            elif stat.S_ISFIFO(metadata.st_mode):
+                object_type = "fifo"
+            elif stat.S_ISCHR(metadata.st_mode) or stat.S_ISBLK(metadata.st_mode):
+                object_type = "device"
+            elif stat.S_ISSOCK(metadata.st_mode):
+                object_type = "socket"
+            else:
+                object_type = "unknown"
+            if object_type not in ("regular", "directory"):
+                errors.append(f"{path}: unsupported object type: {object_type}")
+                continue
             records[path] = {
+                "type": object_type,
                 "owner": pwd.getpwuid(metadata.st_uid).pw_name,
                 "group": grp.getgrgid(metadata.st_gid).gr_name,
                 "mode": f"{stat.S_IMODE(metadata.st_mode):04o}",
@@ -146,17 +214,37 @@ def collect_access_observations() -> tuple[dict[tuple[str, str], bool], list[str
     return observations, errors
 
 
-def collect_api_documents(base_url: str) -> tuple[dict[str, Any], list[str]]:
+def collect_api_documents(port: int, opener=None) -> tuple[dict[str, Any], list[str]]:
     documents: dict[str, Any] = {}
     errors: list[str] = []
+    if type(port) is not int or port < 1 or port > 65_535:
+        return documents, ["invalid loopback API port"]
+    if opener is None:
+        opener = build_api_opener()
     for path in API_PATHS:
+        expected_url = f"http://127.0.0.1:{port}{path}"
         try:
-            request = urllib.request.Request(base_url + path, method="GET")
-            with urllib.request.urlopen(request, timeout=3) as response:
-                if response.status != 200:
-                    errors.append(f"{path}: expected HTTP 200, observed {response.status}")
-                    continue
-                documents[path] = json.load(response)
+            request = urllib.request.Request(expected_url, method="GET")
+            with request_deadline(API_TIMEOUT_SECONDS):
+                with opener.open(request, timeout=API_TIMEOUT_SECONDS) as response:
+                    if response.status != 200:
+                        errors.append(
+                            f"{path}: expected HTTP 200, observed {response.status}"
+                        )
+                        continue
+                    if response.geturl() != expected_url:
+                        errors.append(f"{path}: final URL mismatch")
+                        continue
+                    if response.headers.get_content_type() != "application/json":
+                        errors.append(f"{path}: Content-Type must be application/json")
+                        continue
+                    body = response.read(MAX_API_RESPONSE_BYTES + 1)
+                    if len(body) > MAX_API_RESPONSE_BYTES:
+                        errors.append(
+                            f"{path}: response exceeds {MAX_API_RESPONSE_BYTES} bytes"
+                        )
+                        continue
+                    documents[path] = json.loads(body.decode("utf-8"))
         except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeError) as error:
             errors.append(f"{path}: request failed: {error}")
     return documents, errors
@@ -198,7 +286,7 @@ def verify_service_identity() -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-version", required=True)
-    parser.add_argument("--base-url", default="http://127.0.0.1:8787")
+    parser.add_argument("--port", type=parse_port, default=8787)
     args = parser.parse_args()
 
     records, errors = collect_path_records()
@@ -207,7 +295,7 @@ def main() -> int:
     errors.extend(access_errors)
     errors.extend(verify_access_observations(observations))
     errors.extend(verify_service_identity())
-    documents, api_errors = collect_api_documents(args.base_url)
+    documents, api_errors = collect_api_documents(args.port)
     errors.extend(api_errors)
     errors.extend(verify_api_documents(documents, args.expected_version))
 

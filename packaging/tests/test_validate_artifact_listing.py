@@ -27,6 +27,7 @@ class DebListingPolicyTests(unittest.TestCase):
                 "drwxr-xr-x root/root 0 2026-08-09 00:00 ./",
                 "drwxr-xr-x root/root 0 2026-08-09 00:00 ./usr/bin/",
                 "-rwxr-xr-x root/root 42 2026-08-09 00:00 ./usr/bin/skynet-edr",
+                "-rwxr-xr-x root/root 42 2026-08-09 00:00 ./usr/libexec/skynet-edr/deploy-verify",
                 "drwxr-x--- root/skynet-edr 0 2026-08-09 00:00 ./etc/skynet-edr/",
                 "-rw-r----- root/skynet-edr 42 2026-08-09 00:00 ./etc/skynet-edr/config.toml",
                 "drwxr-xr-x root/root 0 2026-08-09 00:00 ./var/lib/",
@@ -34,6 +35,20 @@ class DebListingPolicyTests(unittest.TestCase):
             )
         )
         self.assertEqual(self.validator.validate_deb_listing(listing), [])
+
+    def test_requires_root_owned_non_writable_installed_verifier(self) -> None:
+        missing = "drwxr-xr-x root/root 0 2026-08-09 00:00 ./"
+        errors = self.validator.validate_deb_listing(missing)
+        self.assertIn("missing required payload path 'usr/libexec/skynet-edr/deploy-verify'", errors)
+
+        wrong_mode = "\n".join(
+            (
+                missing,
+                "-rwxrwxr-x root/root 42 2026-08-09 00:00 ./usr/libexec/skynet-edr/deploy-verify",
+            )
+        )
+        errors = self.validator.validate_deb_listing(wrong_mode)
+        self.assertTrue(any("deploy-verify" in error and "mode" in error for error in errors), errors)
 
     def test_rejects_absolute_parent_and_unexpected_paths(self) -> None:
         for path in ("/var/lib/skynet-edr", "./usr/../var/lib/skynet-edr", "./home/operator/.ssh/key"):

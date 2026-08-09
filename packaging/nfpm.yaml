@@ -95,6 +95,12 @@ contents:
       mode: 0755
       owner: root
       group: root
+  - src: ./packaging/scripts/deploy-verify.py
+    dst: /usr/libexec/skynet-edr/deploy-verify
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
   - src: ./docs/INSTALL.md
     dst: /usr/share/doc/skynet-edr/INSTALL.md
   - src: ./docs/PACKAGING.md
