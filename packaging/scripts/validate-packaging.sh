@@ -6,6 +6,7 @@ README.md
 LICENSE
 docs/INSTALL.md
 docs/PACKAGING.md
+docs/DEPLOYMENT.md
 packaging/nfpm.yaml
 packaging/config/config.toml
 packaging/systemd/skynet-edr.service
@@ -21,6 +22,8 @@ packaging/scripts/validate-s2.sh
 packaging/tests/test_validate_s2.py
 packaging/scripts/stage-hermes-plugin-payload.sh
 packaging/scripts/inspect-artifacts.sh
+packaging/scripts/validate-artifact-listing.py
+packaging/scripts/deploy-verify.py
 packaging/scripts/smoke-install-artifacts.sh
 packaging/scripts/verify-public-release.sh
 packaging/scripts/package-postinstall.sh
@@ -30,6 +33,8 @@ packaging/scripts/skynet-edr-hermes-enroll.py
 packaging/scripts/skynet-edr-hermes-enrollment-adapter.py
 packaging/tests/test_hermes_enrollment.py
 packaging/tests/test_hermes_enrollment_adapter.py
+packaging/tests/test_validate_artifact_listing.py
+packaging/tests/test_deploy_verify.py
 packaging/scripts/vm-smoke.sh
 integrations/hermes/skynet-edr/plugin.yaml
 integrations/hermes/skynet-edr/__init__.py
@@ -39,6 +44,7 @@ integrations/hermes/skynet-edr/dashboard/plugin_api.py
 integrations/hermes/skynet-edr/desktop/plugin.js
 integrations/hermes/skynet-edr/README.md
 .github/workflows/packaging-release.yml
+.github/workflows/release-artifacts.yml
 "
 
 for file in $required_files; do
@@ -55,7 +61,7 @@ else
 fi
 python3 -m unittest discover -s packaging/tests -p 'test_*.py'
 
-for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/validate-s2.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/skynet-edr-hermes-enroll.py packaging/scripts/skynet-edr-hermes-enrollment-adapter.py packaging/scripts/vm-smoke.sh; do
+for script in packaging/tarball/install.sh packaging/tarball/uninstall.sh packaging/scripts/build-tarball.sh packaging/scripts/build-packages.sh packaging/scripts/stage-hermes-plugin-payload.sh packaging/scripts/inspect-artifacts.sh packaging/scripts/validate-artifact-listing.py packaging/scripts/deploy-verify.py packaging/scripts/smoke-install-artifacts.sh packaging/scripts/verify-public-release.sh packaging/scripts/validate-packaging.sh packaging/scripts/validate-s2.sh packaging/scripts/package-postinstall.sh packaging/scripts/package-postremove.sh packaging/scripts/skynet-edr-install-hermes-plugin.sh packaging/scripts/skynet-edr-hermes-enroll.py packaging/scripts/skynet-edr-hermes-enrollment-adapter.py packaging/scripts/vm-smoke.sh; do
   if [ ! -x "$script" ]; then
     echo "packaging script must be executable: $script" >&2
     exit 1
@@ -106,6 +112,7 @@ grep -q '/usr/share/skynet-edr/hermes-plugin/skynet-edr' packaging/nfpm.yaml
 grep -q 'dist/staging/nfpm/hermes-plugin/skynet-edr' packaging/nfpm.yaml
 grep -q '/usr/bin/skynet-edr-install-hermes-plugin' packaging/nfpm.yaml
 grep -q '/usr/bin/skynet-edr-hermes-enroll' packaging/nfpm.yaml
+grep -q 'dst: /usr/libexec/skynet-edr/deploy-verify' packaging/nfpm.yaml
 grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-tarball.sh
 grep -q 'stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr' packaging/scripts/build-packages.sh
 python3 - <<'PY'
@@ -196,7 +203,35 @@ fi
 grep -q 'packaging/scripts/build-tarball.sh' .github/workflows/packaging-release.yml
 grep -q 'packaging/scripts/build-packages.sh' .github/workflows/packaging-release.yml
 grep -q 'packaging/scripts/inspect-artifacts.sh' .github/workflows/packaging-release.yml
+grep -q 'packaging/scripts/vm-smoke.sh' .github/workflows/packaging-release.yml
+grep -q 'packaging/scripts/vm-smoke.sh' .github/workflows/release-artifacts.yml
+grep -q 'SKYNET_EDR_RUNNER_ENVIRONMENT: \${{ runner.environment }}' .github/workflows/packaging-release.yml .github/workflows/release-artifacts.yml
+grep -q 'SKYNET_EDR_DISPOSABLE_SMOKE: "1"' .github/workflows/packaging-release.yml .github/workflows/release-artifacts.yml
 grep -q 'actions/upload-artifact@' .github/workflows/packaging-release.yml
+
+grep -q 'validate-artifact-listing.py' packaging/scripts/inspect-artifacts.sh
+grep -q 'dpkg-deb --info' packaging/scripts/inspect-artifacts.sh
+if grep -Eq 'dpkg-deb --control|dpkg-deb -x|rpm2cpio|cpio' packaging/scripts/inspect-artifacts.sh; then
+  echo "artifact inspection must not extract package payloads or control archives" >&2
+  exit 1
+fi
+grep -q 'apt-get install' packaging/scripts/vm-smoke.sh
+grep -q 'cmp -s .*deploy-verify.py.*/usr/libexec/skynet-edr/deploy-verify' packaging/scripts/vm-smoke.sh
+grep -q 'dpkg -V skynet-edr' packaging/scripts/vm-smoke.sh
+grep -q '^/usr/libexec/skynet-edr/deploy-verify \\' packaging/scripts/vm-smoke.sh
+grep -q './usr/libexec/skynet-edr/deploy-verify' packaging/scripts/inspect-artifacts.sh
+if grep -q -- '--skip-purge' packaging/scripts/vm-smoke.sh; then
+  echo "authoritative deployment gate must always purge its disposable guest" >&2
+  exit 1
+fi
+if grep -q -- '--base-url' packaging/scripts/deploy-verify.py; then
+  echo "deployment verifier must not accept an arbitrary base URL" >&2
+  exit 1
+fi
+if grep -Eq 'dpkg -i|rpm -i|chown -R|chmod -R' packaging/scripts/vm-smoke.sh packaging/scripts/deploy-verify.py; then
+  echo "deployment gate must use the package manager and contain no recursive repair" >&2
+  exit 1
+fi
 
 # Release/security hardening regression checks. Keep these narrow and explicit.
 if grep -q 'directory: "/integrations/hermes/python"' .github/dependabot.yml; then
@@ -259,7 +294,7 @@ text = pathlib.Path('packaging/nfpm.yaml').read_text()
 for key in ['name:', 'arch:', 'platform:', 'version:', 'contents:']:
     if key not in text:
         raise SystemExit(f'nfpm config missing key: {key}')
-for path in ['/usr/bin/skynet-edr', '/usr/bin/skynet-edr-daemon', '/etc/skynet-edr/config.toml', '/usr/lib/systemd/system/skynet-edr.service']:
+for path in ['/usr/bin/skynet-edr', '/usr/bin/skynet-edr-daemon', '/etc/skynet-edr/config.toml', '/usr/libexec/skynet-edr/deploy-verify', '/usr/lib/systemd/system/skynet-edr.service']:
     if f'dst: {path}' not in text:
         raise SystemExit(f'nfpm config missing destination: {path}')
 PY

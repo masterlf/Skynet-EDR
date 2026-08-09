@@ -98,6 +98,18 @@ jobs:
       - name: Smoke DEB/tarball in clean containers and validate RPM/Arch
         run: packaging/scripts/smoke-install-artifacts.sh dist
 
+      - name: Authoritative disposable DEB/systemd deployment gate
+        env:
+          SKYNET_EDR_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          SKYNET_EDR_DISPOSABLE_SMOKE: "1"
+        run: |
+          deb=$(find dist -maxdepth 1 -type f -name 'skynet-edr_*.deb' -print -quit)
+          test -n "$deb"
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            SKYNET_EDR_RUNNER_ENVIRONMENT="$SKYNET_EDR_RUNNER_ENVIRONMENT" \
+            SKYNET_EDR_DISPOSABLE_SMOKE="$SKYNET_EDR_DISPOSABLE_SMOKE" \
+            packaging/scripts/vm-smoke.sh --deb "$deb" --repo "$GITHUB_WORKSPACE"
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

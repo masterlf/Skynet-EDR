@@ -69,6 +69,31 @@ const canonicalStatus = {
   event_count: 1,
 };
 
+function releasedStatusWithHistoricalError(category = 'invalid_event') {
+  return {
+    ...canonicalStatus,
+    version: '0.4.1',
+    ingestion: {
+      state: 'healthy', role_identity_assurance: 'authorized_uid_self_reported', listener_live: true,
+      transport_heartbeat_state: 'fresh', hook_event_state: 'not_observed', hook_event_freshness_affects_state: false,
+      last_event_received_at_unix_ms: null, last_event_received_age_ms: null,
+      last_event_committed_at_unix_ms: null, last_event_committed_age_ms: null,
+      required_reported_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
+      sources: [{
+        source_id: 'uid:1000:gateway:gate-a1', authenticated_uid: 1000,
+        runtime_role: 'gateway', instance_id: 'gate-a1', producer_reported_at_unix_ms: 1,
+        producer_report_age_ms: 0, transport_state: 'available', backlog_bytes: 0,
+        last_error_category: null, last_error_at_unix_ms: null, last_error_age_ms: null,
+      }, {
+        source_id: 'uid:1000', authenticated_uid: 1000,
+        runtime_role: 'legacy', instance_id: null, producer_reported_at_unix_ms: null,
+        producer_report_age_ms: null, transport_state: 'unknown', backlog_bytes: null,
+        last_error_category: category, last_error_at_unix_ms: 1, last_error_age_ms: 60001,
+      }],
+    },
+  };
+}
+
 const canonicalRules = {
   schema_version: 'skynet.rules.v1',
   read_only: true,
@@ -366,6 +391,47 @@ test('status validator accepts bounded runtime health and rejects hostile attrib
   assert.doesNotMatch(textOf(harness.render()), /cmdline/);
 });
 
+test('released healthy status with a historical invalid event stays visibly online', async () => {
+  const releasedStatus = releasedStatusWithHistoricalError();
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': releasedStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  const tree = harness.render();
+
+  assert.match(textOf(tree), /EDR 0\.4\.1/);
+  assert.equal(findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator').props.tone, 'success');
+  assert.equal(findNode(tree, (node) => textOf(node) === 'Passive mode', 'passive mode indicator').props.tone, 'warning');
+  assert.equal(findNode(tree, (node) => textOf(node) === 'Passive projection online', 'online backend indicator').props.tone, 'success');
+  assert.match(textOf(tree), /Telemetry healthy/);
+});
+
+test('status validator accepts only error categories emitted by the Rust ingestion source', async () => {
+  const emittedCategories = [
+    'frame_timeout', 'storage', 'transaction', 'incident_collision',
+    'invalid_event', 'malformed_frame', 'frame_size',
+  ];
+  for (const category of emittedCategories) {
+    const harness = createHarness({
+      '/api/plugins/skynet-edr/status': releasedStatusWithHistoricalError(category),
+      '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    });
+    harness.render();
+    await harness.flushEffects();
+    assert.match(textOf(harness.render()), /Engine Online/, category);
+  }
+
+  const hostileHarness = createHarness({
+    '/api/plugins/skynet-edr/status': releasedStatusWithHistoricalError('attacker_controlled'),
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  hostileHarness.render();
+  await hostileHarness.flushEffects();
+  assert.match(textOf(hostileHarness.render()), /Backend unavailable/);
+});
+
 test('status validator rejects contradictory healthy ingestion objects', async () => {
   const base = structuredClone(canonicalStatus);
   base.ingestion = {
@@ -387,11 +453,11 @@ test('status validator rejects contradictory healthy ingestion objects', async (
     (value) => { value.ingestion.transport_heartbeat_state = 'stale'; },
     (value) => { value.ingestion.required_reported_roles[0].state = 'absent'; },
     (value) => { value.ingestion.sources[0].transport_state = 'degraded'; },
-    (value) => {
-      value.ingestion.sources[0].last_error_category = 'storage';
+    ...['frame_timeout', 'storage', 'transaction', 'incident_collision'].map((category) => (value) => {
+      value.ingestion.sources[0].last_error_category = category;
       value.ingestion.sources[0].last_error_at_unix_ms = 1;
       value.ingestion.sources[0].last_error_age_ms = 0;
-    },
+    }),
     (value) => { value.ingestion.role_identity_assurance = 'attested'; },
   ];
   for (const contradict of contradictions) {

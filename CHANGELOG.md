@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-08-09
+
+- Added listing-only DEB inspection policy and banned privileged package extraction on live or persistent hosts.
+- Added a read-only, fail-closed verifier for exact filesystem tuples, service-user access, real systemd process identity, installed executable identity, and status/risks/rules API contracts.
+- Promoted the disposable Ubuntu DEB/systemd vertical smoke into PR and release workflows, including writable-state proof and an injected root-owned-state regression.
+- Added a package-manager-only DEB deployment and rollback runbook; RPM, Arch, non-systemd, automatic repair, and database restore remain outside this hotfix's qualified boundary.
+
 ## 0.5.0 - 2026-08-06
 
 - Added fail-closed, transactional Hermes 0.19.0 enrollment for the exact Ubuntu 24.04 amd64/systemd/default-profile compatibility cell, including package-owned payload validation and exact producer attestation.
