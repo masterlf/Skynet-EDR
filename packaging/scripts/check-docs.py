@@ -18,6 +18,7 @@ REQUIRED_DOCS = [
     "docs/ARCHITECTURE.md",
     "docs/EVENT_SCHEMA.md",
     "docs/INTEGRATIONS.md",
+    "docs/HERMES_PLUGIN_TELEMETRY.md",
     "docs/DETECTIONS.md",
     "docs/OPERATIONS.md",
     "docs/RELEASE_PROCESS.md",

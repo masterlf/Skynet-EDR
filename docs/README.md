@@ -68,7 +68,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 Current event schema: `skynet.event.v0`.
 
-Current documentation structure target: v0.4.1. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. The [MVP public support contract](MVP_SUPPORT_MATRIX.md) is the release-facing source for current support and capability status; if another page blurs that line, fix the page before building on it.
+Current documentation structure target: v0.5.0. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. The [MVP public support contract](MVP_SUPPORT_MATRIX.md) is the release-facing source for current support and capability status; if another page blurs that line, fix the page before building on it.
 
 ## Structured attribute safety
 

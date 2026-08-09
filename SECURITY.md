@@ -1,10 +1,10 @@
 # Security Policy
 ## Supported versions
-Skynet-EDR v0.4.1 is an installable prerelease for evaluation and lab use. No production version is supported yet; see the [MVP public support contract](docs/MVP_SUPPORT_MATRIX.md) for the narrow evidence-backed scope.
+Skynet-EDR v0.5.0 is an installable prerelease for evaluation and lab use. No production version is supported yet; see the [MVP public support contract](docs/MVP_SUPPORT_MATRIX.md) for the narrow evidence-backed scope.
 | Version | Supported | Notes |
 |---|---:|---|
 | `main` | Best effort | Active development only |
-| `v0.4.1` prerelease | Best effort | Functional evaluation release; not production-supported |
+| `v0.5.0` prerelease | Best effort | Functional evaluation release; not production-supported |
 ## Reporting a vulnerability
 Do not publish sensitive vulnerability details in public issues if they include working exploit chains, private credentials, bypass techniques, or active attacker infrastructure.
 For now, report privately to the project owner through GitHub. A dedicated security contact and advisory flow will be added before a production-supported release.

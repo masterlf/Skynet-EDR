@@ -48,7 +48,8 @@ The fallback, checkpoint, and log are user-private where supported.
 | `SKYNET_EDR_MAX_LOG_BYTES` | Rotate log to `.1` after this size. |
 | `HERMES_SESSION_ID` / `HERMES_SESSION` | Optional Hermes trace/session ID; otherwise a process-local UUID fallback is used. |
 | `HERMES_RUNTIME_ROLE` | Fixed self-reported operational role for this process (`gateway`, `dashboard`, `worker`, or `unknown`); configure per unit, never globally. |
-| `SKYNET_EDR_RUNTIME_INSTANCE` | Optional stable bounded process-instance label; otherwise a fresh fallback is generated when the process starts. |
+| `SKYNET_EDR_PLUGIN_GENERATION` | Required lowercase 64-hex installed plugin generation for protocol-v3 transport. |
+| `SKYNET_EDR_RUNTIME_INSTANCE` | Legacy version-2 compatibility label; not eligible for S3 attribution. |
 
 ## Security posture
 
@@ -96,7 +97,7 @@ add its numeric UID to `ingest.allowed_uids` in `/etc/skynet-edr/config.toml`.
 Restart the user's session after changing supplementary groups, then restart the
 daemon. Root is denied unless `ingest.allow_root = true` is explicitly reviewed.
 
-When enabled, registration starts exactly one background worker and attempts an immediate health frame before waiting for hook activity. Configure `HERMES_RUNTIME_ROLE` in separate per-unit systemd user drop-ins for the reviewed gateway and dashboard units; do not use a global user-manager environment. `ingest.required_reported_roles = ["gateway"]` is an operational enrollment gate: a correctly configured dashboard report cannot satisfy it. The runtime role and instance are still self-reported by an authorized UID, not process attestation. Same-UID compromise, an enabled root producer in the shared trust domain, or mistaken/global assignment can forge attribution. See [Continuous ingestion operations](../../../docs/OPERATIONS.md#continuous-ingestion-operations) for approved reload/restart and verification steps.
+When enabled, registration starts exactly one background worker and attempts an immediate protocol-v3 health frame before waiting for hook activity. Configure `HERMES_RUNTIME_ROLE` and `SKYNET_EDR_PLUGIN_GENERATION` in the reviewed per-unit systemd drop-in; do not use a global user-manager environment. The plugin generates an independent cryptographic 64-hex nonce in memory for each process import and never loads it from persistent configuration. Canonical events are nested in a v3 transport envelope without changing their `skynet.event.v0` payload. Missing or invalid v3 identity fails closed for socket delivery and leaves events in the bounded fallback. The runtime role, generation, and nonce remain assertions by an authorized UID, not protection from same-UID compromise. The daemon separately exposes kernel peer PID/start evidence. See [Continuous ingestion operations](../../../docs/OPERATIONS.md#continuous-ingestion-operations) for approved reload/restart and verification steps.
 
 The legacy `skynet-edr events ingest-spool` command remains available for
 explicit manual import. The daemon does not poll the plugin's historical

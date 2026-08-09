@@ -3820,6 +3820,11 @@ fn project_continuous_event(
             TrustLevel::SensorObservation,
             "Hermes LLM call requested",
         ),
+        "agent.telemetry.attestation" => (
+            &[SourceKind::Sensor][..],
+            TrustLevel::SensorObservation,
+            "Hermes telemetry attestation verified",
+        ),
         "agent.content.ingested" => (
             &[SourceKind::McpTool][..],
             TrustLevel::UntrustedContent,
@@ -3901,9 +3906,10 @@ fn project_continuous_event(
         );
     let indicator = |name| bool_attribute(&attributes, name) == Some(true);
     let severity = match input.event_type.as_str() {
-        "agent.session.started" | "agent.session.ended" | "agent.llm.call.requested" => {
-            Severity::Informational
-        }
+        "agent.session.started"
+        | "agent.session.ended"
+        | "agent.llm.call.requested"
+        | "agent.telemetry.attestation" => Severity::Informational,
         "agent.content.ingested" => {
             if indicator("contains_instructional_attack") {
                 Severity::Medium
@@ -4169,6 +4175,34 @@ fn project_p0_exception_attributes(
     ]))
 }
 
+fn project_telemetry_attestation_attributes(
+    input: &BTreeMap<String, serde_json::Value>,
+) -> Result<BTreeMap<String, serde_json::Value>, CanonicalEventError> {
+    require_exact_keys(
+        input,
+        &[
+            "hook",
+            "producer_bound",
+            "content_omitted",
+            "argument_count",
+            "keyword_count",
+            "message_count",
+        ],
+        &[],
+    )?;
+    require_string(input, "hook", "register")?;
+    require_bool(input, "producer_bound", Some(true))?;
+    require_bool(input, "content_omitted", Some(true))?;
+    for key in ["argument_count", "keyword_count", "message_count"] {
+        require_counter(input, key, 0)?;
+    }
+    let mut output = input.clone();
+    for key in ["hook", "argument_count", "keyword_count", "message_count"] {
+        output.remove(key);
+    }
+    Ok(output)
+}
+
 fn project_continuous_attributes(
     event: &CanonicalEventEnvelope,
 ) -> Result<BTreeMap<String, serde_json::Value>, CanonicalEventError> {
@@ -4210,6 +4244,7 @@ fn project_continuous_attributes(
             output.remove("hook");
             Ok(output)
         }
+        "agent.telemetry.attestation" => project_telemetry_attestation_attributes(input),
         "agent.content.ingested" => {
             require_exact_keys(
                 input,

@@ -104,13 +104,13 @@ Download packages from the GitHub Releases page:
 https://github.com/masterlf/Skynet-EDR/releases
 ```
 
-For `v0.4.1`, the expected Linux `amd64` artifacts are:
+For `v0.5.0`, the expected Linux `amd64` artifacts are:
 
 ```text
-skynet-edr_0.4.1_amd64.deb
-skynet-edr-0.4.1-1.x86_64.rpm
-skynet-edr-0.4.1-1-x86_64.pkg.tar.zst
-skynet-edr-0.4.1-x86_64-unknown-linux-gnu.tar.gz
+skynet-edr_0.5.0_amd64.deb
+skynet-edr-0.5.0-1.x86_64.rpm
+skynet-edr-0.5.0-1-x86_64.pkg.tar.zst
+skynet-edr-0.5.0-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
 ```
 
@@ -126,7 +126,7 @@ After downloading the `.deb` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo apt install ./skynet-edr_0.4.1_amd64.deb
+sudo apt install ./skynet-edr_0.5.0_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -144,25 +144,21 @@ journalctl -u skynet-edr.service -n 100 --no-pager
 
 Current caveat: the service starts the conservative passive daemon path. Review `/etc/skynet-edr/config.toml` before enablement; privileged sensors remain disabled and unsupported by the MVP service.
 
-## Install the Hermes plugin
+## Enroll the Hermes plugin
 
-Skynet-EDR v0.4 packages ship a passive Hermes Agent plugin template plus a
-per-user installer. Run the installer as the Hermes user, not through the
-`skynet-edr` service account:
+The historical advisory copier has been removed because copied bytes and a
+successful enable command cannot prove enrollment. `skynet-edr-install-hermes-plugin`
+now delegates to the machine-readable `skynet-edr-hermes-enroll` transaction.
+See [Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md) for its exact request,
+manifest, observation, adapter, rollback, and clean-host gate contracts.
 
-```bash
-skynet-edr-install-hermes-plugin
-hermes plugins enable skynet-edr  # if Hermes requires explicit opt-in
-```
-
-Authorize the Hermes producer explicitly, then restart its login session and
-the daemon (replace `1000` with the reviewed Hermes user's numeric UID):
-
-```bash
-sudo usermod -aG skynet-edr-ingest "$USER"
-# Edit /etc/skynet-edr/config.toml: allowed_uids = [1000]
-sudo systemctl restart skynet-edr
-```
+The repository ships the transaction, deterministic boundary fixtures, and the
+root-owned adapter at `/usr/libexec/skynet-edr/hermes-enrollment-adapter.py`.
+The adapter's exact Hermes 0.19.0 CLI/read-back and booted-systemd contract has
+not yet passed the disposable clean-host gate. Therefore no live deployment may
+yet claim autonomous `ENROLLED`; the current operational verdict is
+`S3_ADAPTER_BLOCK`. Do not recreate the removed copy/enable/manual-restart
+sequence as a parallel success path.
 
 The plugin worker sends to `/run/skynet-edr-ingest/ingest.sock`. During daemon
 outages it writes a private versioned fallback under:
@@ -191,7 +187,7 @@ After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo dnf install ./skynet-edr-0.4.1-1.x86_64.rpm
+sudo dnf install ./skynet-edr-0.5.0-1.x86_64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -214,7 +210,7 @@ After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo pacman -U ./skynet-edr-0.4.1-1-x86_64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-0.5.0-1-x86_64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```
@@ -238,6 +234,7 @@ skynet-edr-VERSION-TARGET/
   install.sh
   uninstall.sh
   skynet-edr-install-hermes-plugin.sh
+  skynet-edr-hermes-enroll.py
   integrations/hermes/skynet-edr/plugin.yaml
   integrations/hermes/skynet-edr/__init__.py
   integrations/hermes/skynet-edr/README.md
@@ -377,7 +374,7 @@ sudo systemctl disable --now skynet-edr.service || true
 sudo pacman -R skynet-edr
 ```
 
-Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default. Destructive purge must be explicit.
+Uninstall should preserve `/etc/skynet-edr` and `/var/lib/skynet-edr` by default. Destructive purge must be explicit. Package-manager and tarball removal fail closed while a Hermes adapter transaction snapshot is active; upgrades remain allowed. Run bounded `unenroll` first rather than orphaning group, daemon, or user-unit state.
 
 ## Troubleshooting
 

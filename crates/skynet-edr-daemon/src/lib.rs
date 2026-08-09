@@ -8,8 +8,8 @@ mod ingest_unix;
 
 #[cfg(target_os = "linux")]
 pub use ingest_unix::{
-    bind_ingest_listener, peer_uid, process_ingest_connection, IngestionHealth,
-    IngestionHealthSnapshot, ProducerRole, UnixIngestConfig,
+    authenticate_ingest_peer, bind_ingest_listener, process_ingest_connection, AuthenticatedPeer,
+    IngestionHealth, IngestionHealthSnapshot, ProducerRole, UnixIngestConfig,
 };
 
 use std::{

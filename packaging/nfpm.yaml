@@ -1,7 +1,7 @@
 name: skynet-edr
 arch: ${NFPM_ARCH:-amd64}
 platform: linux
-version: ${SKYNET_EDR_VERSION:-0.4.1}
+version: ${SKYNET_EDR_VERSION:-0.5.0}
 section: security
 priority: optional
 maintainer: Skynet-EDR Maintainers <maintainers@example.invalid>
@@ -71,8 +71,26 @@ contents:
       mode: 0644
       owner: root
       group: root
+  - src: ./dist/staging/nfpm/hermes-plugin/manifest.json
+    dst: /usr/share/skynet-edr/hermes-plugin/manifest.json
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
   - src: ./packaging/scripts/skynet-edr-install-hermes-plugin.sh
     dst: /usr/bin/skynet-edr-install-hermes-plugin
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+  - src: ./packaging/scripts/skynet-edr-hermes-enroll.py
+    dst: /usr/bin/skynet-edr-hermes-enroll
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+  - src: ./packaging/scripts/skynet-edr-hermes-enrollment-adapter.py
+    dst: /usr/libexec/skynet-edr/hermes-enrollment-adapter.py
     file_info:
       mode: 0755
       owner: root
@@ -89,6 +107,12 @@ contents:
       mode: 0750
       owner: skynet-edr
       group: skynet-edr
+  - dst: /var/lib/skynet-edr-hermes-enrollment
+    type: dir
+    file_info:
+      mode: 0700
+      owner: root
+      group: root
   - dst: /var/log/skynet-edr
     type: dir
     file_info:
@@ -105,6 +129,20 @@ contents:
 depends:
   - systemd
 
+overrides:
+  deb:
+    depends:
+      - systemd
+      - python3
+  rpm:
+    depends:
+      - systemd
+      - python3
+  archlinux:
+    depends:
+      - systemd
+      - python
+
 deb:
   fields:
     Bugs: https://github.com/masterlf/Skynet-EDR/issues
@@ -115,4 +153,5 @@ archlinux:
 
 scripts:
   postinstall: ./packaging/scripts/package-postinstall.sh
+  preremove: ./packaging/scripts/package-preremove.sh
   postremove: ./packaging/scripts/package-postremove.sh

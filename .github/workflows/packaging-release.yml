@@ -59,7 +59,18 @@ jobs:
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             export SKYNET_EDR_EXPECTED_VERSION="${GITHUB_REF_NAME#v}"
           fi
-          packaging/scripts/validate-packaging.sh
+          if [[ -n "${SKYNET_EDR_EXPECTED_VERSION:-}" ]]; then
+            sudo -n env "HOME=/root" "PATH=$PATH" \
+              "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+              "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+              "SKYNET_EDR_EXPECTED_VERSION=$SKYNET_EDR_EXPECTED_VERSION" \
+              packaging/scripts/validate-packaging.sh
+          else
+            sudo -n env "HOME=/root" "PATH=$PATH" \
+              "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+              "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+              packaging/scripts/validate-packaging.sh
+          fi
 
       - name: Validate package version override
         run: |

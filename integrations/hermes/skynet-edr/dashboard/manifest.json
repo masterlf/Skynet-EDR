@@ -3,7 +3,7 @@
   "label": "Skynet-EDR",
   "description": "Passive read-only Risk Explorer for validated, redacted Skynet-EDR projections.",
   "icon": "Shield",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "tab": {
     "path": "/skynet-edr/risks",
     "position": "after:logs",

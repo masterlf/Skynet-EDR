@@ -22,7 +22,9 @@ authenticated daemon transaction (event + correlation + receipt)
 local events, incidents, API, MCP handler library
 ```
 
-The same authenticated socket accepts strict, bounded `producer_health` control frames. Version 2 adds only an allowlisted runtime role (`gateway`, `dashboard`, `worker`, or `unknown`) and a 64-byte lowercase alphanumeric/hyphen process-instance identifier to the version-1 checkpoint/backlog counters and fixed transport state. Kernel DAC and `SO_PEERCRED` remain the authorization boundary. Role and instance are authorized-UID self-reported operational attribution, never authentication or process attestation: same-UID compromise, a malicious root process in the shared trust domain, or a global/mistaken role assignment can forge them. A correctly configured per-unit dashboard role cannot satisfy a required reported gateway role, but this is enrollment evidence rather than security-grade role attestation. Legacy version-1 frames remain observable separately and cannot satisfy an explicitly required reported role. Paths, labels, event payloads, commands, PIDs, and secrets are neither accepted nor exposed.
+The authenticated socket accepts strict, bounded protocol-v3 `producer_health` and `canonical_event` envelopes. Both require an allowlisted runtime role (`gateway`, `dashboard`, `worker`, or `unknown`), the exact lowercase 64-hex installed plugin generation, and an independent cryptographic lowercase 64-hex nonce generated in memory for each plugin process import. The event nested in `canonical_event` remains an unchanged `skynet.event.v0` payload. Kernel DAC and a single accept-time `SO_PEERCRED` capture remain the authorization boundary. The daemon obtains the socket peer's kernel `SO_PEERPIDFD`, verifies it matches the positive credential PID, anchors process-start evidence to an opened `/proc/<pid>` directory, and revalidates both before accepting each v3 frame. Missing kernel support, malformed evidence, peer exit, or changed process identity is rejected without creating an eligible source. Status exposes only the bounded PID/start-tick evidence, never process paths or command lines.
+
+The exact v3 source key is `(authenticated UID, runtime role, plugin generation, runtime nonce)`. A source becomes S3-eligible only after valid v3 health for that exact key and valid kernel identity evidence; event receipt alone is not eligibility. Only a durably `persisted` event advances that source's commit sequence. Duplicate and collision outcomes remain observable without advancing it. Version-1 health, version-2 role/instance health, and raw canonical events remain compatible and observable but are explicitly ineligible for S3. Role, generation, nonce, and event truth are producer assertions inside the authorized UID boundary: same-UID compromise or a malicious root process in the trust domain can still forge them.
 
 ## Installed files
 
@@ -148,7 +150,8 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 | `SKYNET_EDR_MAX_FIELD_CHARS` | Bound safe preview field size. |
 | `SKYNET_EDR_MAX_LOG_BYTES` | Rotate sanitized log above this size. |
 | `HERMES_RUNTIME_ROLE` | Fixed runtime role: `gateway`, `dashboard`, `worker`, or `unknown`; any other value fails safely to `unknown`. |
-| `SKYNET_EDR_RUNTIME_INSTANCE` | Optional non-sensitive lowercase alphanumeric/hyphen instance ID (1–64 bytes); invalid values use a process-local random identifier. |
+| `SKYNET_EDR_PLUGIN_GENERATION` | Required lowercase 64-hex installed plugin generation for protocol-v3 transport. |
+| `SKYNET_EDR_RUNTIME_INSTANCE` | Legacy version-2-only non-sensitive instance label; ignored by protocol v3 and ineligible for S3 attribution. |
 | `HERMES_SESSION_ID` / `HERMES_SESSION` | Optional Hermes-provided trace/session ID used for event correlation; absent these, the plugin generates a process-local UUID fallback. |
 
 ## Detection limits
@@ -206,7 +209,7 @@ allowed_uids = [1000] # replace with the reviewed producer UID
 allow_root = false
 ```
 
-The worker sends an immediate health frame when the enabled plugin registers, before waiting for hook activity, then sends bounded periodic heartbeats and reports after delivery work. It replays only its producer-owned `events-v1.jsonl`, in order, and advances `events-v1.offset` only after a versioned terminal ACK for the matching event ID. The daemon never polls producer homes or the historical `events.jsonl`. Queue, socket, and fallback failures are bounded but can drop newest telemetry; they do not block Hermes. For enrollment, counter semantics, backlog measurement, failure/restart behavior, the harmless canary, and rollback, use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
+The worker sends an immediate v3 health frame when the enabled plugin registers, before waiting for hook activity, then sends bounded periodic heartbeats and reports after delivery work. It wraps outbound canonical events in the matching v3 source identity and replays only its producer-owned `events-v1.jsonl`, in order. Missing or invalid v3 generation/nonce, unavailable socket transport, and retryable or malformed ACKs preserve the canonical event in the private durable fallback; `events-v1.offset` advances only after a versioned terminal ACK for the matching event ID. The daemon never polls producer homes or the historical `events.jsonl`. Queue, socket, and fallback failures are bounded but can drop newest telemetry; they do not block Hermes. For enrollment, counter semantics, backlog measurement, failure/restart behavior, the harmless canary, and rollback, use [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
 
 ## Security boundaries
 

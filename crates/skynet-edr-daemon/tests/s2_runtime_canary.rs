@@ -271,6 +271,11 @@ candidate_limit = 10000
         .arg(&fault_plugin_state)
         .arg(&output_path)
         .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("HERMES_RUNTIME_ROLE", "gateway")
+        .env(
+            "SKYNET_EDR_PLUGIN_GENERATION",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
         .output()
         .expect("Python producer canary runs");
     if !output.status.success() {

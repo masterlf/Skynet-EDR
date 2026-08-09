@@ -2,9 +2,9 @@
 
 This page is the authoritative milestone map. [Implementation plan](IMPLEMENTATION_PLAN.md) remains the long-form architecture and historical design record.
 
-## Shipped baseline: v0.4.1
+## Shipped baseline: v0.5.0
 
-v0.4.1 is a passive Linux-first prerelease. Within the narrow evidence-backed scope in the [MVP public support contract](MVP_SUPPORT_MATRIX.md), it provides:
+v0.5.0 is a passive Linux-first prerelease. Within the narrow evidence-backed scope in the [MVP public support contract](MVP_SUPPORT_MATRIX.md), it provides:
 
 - canonical event schema and local redacted storage;
 - Hermes trace and canonical JSONL spool ingestion;
@@ -15,9 +15,9 @@ v0.4.1 is a passive Linux-first prerelease. Within the narrow evidence-backed sc
 
 It does **not** provide inline pause, approval, blocking, or active containment.
 
-## Current milestone: v0.4.1 reliable passive prerelease
+## Current milestone: v0.5.0 Passive Public MVP
 
-The v0.4.1 milestone completes the P1 reliability and continuous-coverage work on top of v0.4.0:
+The v0.5.0 milestone carries forward the v0.4.1 reliability baseline and adds the bounded S3 Hermes enrollment path:
 
 - deterministic sequence-capable correlation and the reviewed high-signal AI-agent rule pack;
 - `skynet-edr doctor` and private, redaction-safe diagnostics collection;
@@ -28,16 +28,16 @@ The v0.4.1 milestone completes the P1 reliability and continuous-coverage work o
 - public download, checksum, extraction, and version verification;
 - green Rust, Python, documentation, SAST, secret-scanning, dependency, and packaging gates;
 - release notes that separate implemented behavior from limitations.
+- exact Ubuntu 24.04 amd64/systemd, Hermes 0.19.0, default-profile enrollment compatibility;
+- package-owned payload validation, exact process/producer attestation, and a correlated persisted harmless canary;
+- private root-owned enrollment state with non-destructive retained quarantine and manual recovery;
+- explicit account-wide user-manager restart authorization and blast-radius documentation.
 
-The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, repeatable runtime upgrade/rollback proof, and a bounded Hermes compatibility contract remain open.
+The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host S3 gate.
 
-## Next milestone: v0.5.0 Passive Public MVP
+## Next milestone: S4 hardening
 
-v0.5.0 remains passive. It will turn the v0.4.1 prerelease baseline into a
-clearer public evaluation milestone without adding a control plane. Planned
-work includes durable local alert/evidence presentation and release-facing
-support documentation; it does not include outbound webhook, email, or SIEM
-delivery, inline pause, approval, blocking, or containment.
+S4 will address descriptor-relative hardening against hostile concurrent root replacement and crash-idempotent quarantine cleanup policy. It does not include outbound webhook, email, or SIEM delivery, inline pause, approval, blocking, or containment.
 
 ## v0.6+ candidate: guard mode design
 

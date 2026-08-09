@@ -41,7 +41,11 @@ jobs:
           sudo install -m 0755 nfpm /usr/local/bin/nfpm
           nfpm --version
       - name: Validate packaging baseline
-        run: packaging/scripts/validate-packaging.sh
+        run: >-
+          sudo -n env "HOME=/root" "PATH=$PATH"
+          "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
+          "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+          packaging/scripts/validate-packaging.sh
       - name: Build package artifacts
         run: |
           rm -rf dist

@@ -17,7 +17,7 @@ use std::{
 
 use skynet_edr_core::{ingest_canonical_jsonl_spool, LocalStore, ProductInfo};
 use skynet_edr_daemon::{
-    bind_ingest_listener, handle_console_request, handle_http_request, peer_uid,
+    authenticate_ingest_peer, bind_ingest_listener, handle_console_request, handle_http_request,
     process_ingest_connection, HttpMethod, IngestionHealth, ProducerRole, UnixIngestConfig,
 };
 
@@ -161,7 +161,7 @@ fn start_ingestion_if_enabled(
                 let _ = stream.shutdown(std::net::Shutdown::Both);
                 continue;
             }
-            let Ok(uid) = peer_uid(&stream) else {
+            let Ok(peer) = authenticate_ingest_peer(&stream) else {
                 active.fetch_sub(1, Ordering::AcqRel);
                 health.record_peer_credential_error();
                 let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -174,7 +174,7 @@ fn start_ingestion_if_enabled(
             thread::spawn(move || {
                 let _ = process_ingest_connection(
                     stream,
-                    uid,
+                    &peer,
                     &worker_ingest,
                     &worker_db,
                     &worker_health,
