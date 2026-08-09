@@ -15,13 +15,29 @@ use std::{
 
 use skynet_edr_core::LocalStore;
 use skynet_edr_daemon::{
-    authenticate_ingest_peer, bind_ingest_listener, process_ingest_connection,
-    process_ingest_connection_with_alert_sink, AlertNoticeSink, IngestionHealth, ProducerRole,
-    UnixIngestConfig,
+    authenticate_ingest_peer, bind_ingest_listener, ingestion_error_category_contract,
+    process_ingest_connection, process_ingest_connection_with_alert_sink, AlertNoticeSink,
+    IngestionHealth, ProducerRole, UnixIngestConfig,
 };
 
 const CANONICAL_EVENT: &str =
     include_str!("../../skynet-edr-core/tests/fixtures/canonical_event_v0.json");
+const ALERT_DELIVERY_STATUS: &str = include_str!("fixtures/status_alert_delivery_degraded.json");
+
+#[test]
+fn producer_error_category_contract_matches_packaged_status_fixture() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(ALERT_DELIVERY_STATUS).expect("status fixture is valid JSON");
+    assert_eq!(
+        fixture["ingestion"]["error_category_contract"],
+        ingestion_error_category_contract()
+    );
+    assert_eq!(fixture["ingestion"]["state"], "degraded");
+    assert_eq!(
+        fixture["ingestion"]["sources"][0]["last_error_category"],
+        "alert_delivery"
+    );
+}
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(

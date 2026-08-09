@@ -33,6 +33,8 @@
   const MAX_TRACE_IDS = 10;
   const MAX_EVIDENCE_ITEMS = 50;
   const CONTRACT_ERROR = "Invalid read-only risk projection";
+  const ERROR_CATEGORY_CONTRACT_SCHEMA = "skynet.ingestion-error-categories.v1";
+  const ERROR_CATEGORY_CONTRACT_GENERATION = "fnv1a64-9e53ed39e2296140";
   const SEVERITIES = new Set(["critical", "high", "medium", "low", "informational"]);
   const STATUSES = new Set(["open", "investigating", "contained", "resolved", "dismissed"]);
   const SOURCE_KINDS = new Set(["sensor", "process", "file", "network", "mcp_tool", "configuration", "scheduled_task", "messaging"]);
@@ -113,7 +115,9 @@
   }
 
   function failContract() {
-    throw new Error(CONTRACT_ERROR);
+    const error = new Error(CONTRACT_ERROR);
+    error.name = "SkynetContractError";
+    throw error;
   }
 
   function boundedString(value, max) {
@@ -303,6 +307,25 @@
       return;
     }
     if (!["healthy", "degraded"].includes(data.state) || typeof data.listener_live !== "boolean") failContract();
+    const contract = data.error_category_contract;
+    if (!isPlainObject(contract) || Object.keys(contract).sort().join(",") !== "categories,generation,schema_version") failContract();
+    if (contract.schema_version !== ERROR_CATEGORY_CONTRACT_SCHEMA || contract.generation !== ERROR_CATEGORY_CONTRACT_GENERATION) failContract();
+    if (!Array.isArray(contract.categories) || contract.categories.length < 1 || contract.categories.length > 16) failContract();
+    const errorCategories = new Map();
+    const signature = [];
+    contract.categories.forEach(function (category) {
+      if (!isPlainObject(category) || Object.keys(category).sort().join(",") !== "degrades,name") failContract();
+      if (typeof category.name !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(category.name)) failContract();
+      if (typeof category.degrades !== "boolean" || errorCategories.has(category.name)) failContract();
+      errorCategories.set(category.name, category.degrades);
+      signature.push(category.name + ":" + (category.degrades ? "1" : "0"));
+    });
+    let generation = 0xcbf29ce484222325n;
+    Array.from(signature.join("|")).forEach(function (character) {
+      generation ^= BigInt(character.charCodeAt(0));
+      generation = BigInt.asUintN(64, generation * 0x100000001b3n);
+    });
+    if ("fnv1a64-" + generation.toString(16).padStart(16, "0") !== contract.generation) failContract();
     if (!["fresh", "stale", "not_observed"].includes(data.transport_heartbeat_state)) failContract();
     if (!["fresh", "stale", "not_observed"].includes(data.hook_event_state) || data.hook_event_freshness_affects_state !== false) failContract();
     [
@@ -335,15 +358,14 @@
       if ((source.producer_reported_at_unix_ms === null) !== (source.producer_report_age_ms === null)) failContract();
       if (!["available", "degraded", "stale", "unknown"].includes(source.transport_state)) failContract();
       if (source.backlog_bytes !== null && !boundedSafeInteger(source.backlog_bytes)) failContract();
-      const errorCategories = ["frame_timeout", "storage", "transaction", "incident_collision", "invalid_event", "malformed_frame", "frame_size"];
       if (source.last_error_category === null) {
         if (source.last_error_at_unix_ms !== null || source.last_error_age_ms !== null) failContract();
-      } else if (!errorCategories.includes(source.last_error_category)
+      } else if (!errorCategories.has(source.last_error_category)
           || !boundedSafeInteger(source.last_error_at_unix_ms)
           || !boundedSafeInteger(source.last_error_age_ms)) {
         failContract();
       }
-      const recentSourceError = ["frame_timeout", "storage", "transaction", "incident_collision"].includes(source.last_error_category)
+      const recentSourceError = errorCategories.get(source.last_error_category) === true
         && source.last_error_age_ms <= 30000;
       const reported = source.producer_report_age_ms !== null;
       const fresh = reported && source.producer_report_age_ms <= 30000;
@@ -431,7 +453,7 @@
 
   function usePollingResource(loader, resourceKey, enabled) {
     const [state, setState] = useState(function () {
-      return { key: resourceKey, data: null, loading: enabled, refreshing: false, error: false };
+      return { key: resourceKey, data: null, loading: enabled, refreshing: false, error: null };
     });
     const [reloadToken, setReloadToken] = useState(0);
     const latestRequest = useRef(0);
@@ -442,7 +464,7 @@
     useEffect(function () {
       if (!enabled) {
         latestRequest.current += 1;
-        setState({ key: resourceKey, data: null, loading: false, refreshing: false, error: false });
+        setState({ key: resourceKey, data: null, loading: false, refreshing: false, error: null });
         return undefined;
       }
       let active = true;
@@ -458,14 +480,15 @@
           .then(loader)
           .then(function (data) {
             if (active && requestGeneration === latestRequest.current) {
-              setState({ key: resourceKey, data: data, loading: false, refreshing: false, error: false });
+              setState({ key: resourceKey, data: data, loading: false, refreshing: false, error: null });
             }
           })
-          .catch(function () {
+          .catch(function (error) {
             if (!active || requestGeneration !== latestRequest.current) return;
             setState(function (previous) {
               const cached = previous.key === resourceKey ? previous.data : null;
-              return { key: resourceKey, data: cached, loading: false, refreshing: false, error: true };
+              const kind = error && error.name === "SkynetContractError" ? "contract" : "transport";
+              return { key: resourceKey, data: cached, loading: false, refreshing: false, error: kind };
             });
           });
       }
@@ -478,7 +501,7 @@
       };
     }, [loader, resourceKey, enabled, reloadToken]);
 
-    const current = state.key === resourceKey ? state : { key: resourceKey, data: null, loading: enabled, refreshing: false, error: false };
+    const current = state.key === resourceKey ? state : { key: resourceKey, data: null, loading: enabled, refreshing: false, error: null };
     return { data: current.data, loading: current.loading, refreshing: current.refreshing, error: current.error, reload: reload };
   }
 
@@ -831,6 +854,7 @@
 
   function backendHealth(status, page) {
     if ((status.loading && status.data === null) || (page.loading && page.data === null)) return "Checking read-only backend";
+    if (status.error === "contract" || page.error === "contract") return "Projection contract incompatible";
     if ((status.error && status.data === null) || (page.error && page.data === null)) return "Backend unavailable";
     if (status.error || page.error) return "Stale validated data";
     if (!status.data || !page.data) return "Backend not verified";
@@ -1033,6 +1057,7 @@
     }
 
     const engineChecking = health.loading && health.data === null;
+    const engineIncompatible = health.error === "contract";
     const engineOnline = Boolean(health.data) && !health.error;
     const trustedHealth = health.data && !health.error ? health.data : null;
     const mode = trustedHealth ? trustedHealth.run_mode : null;
@@ -1043,7 +1068,7 @@
         h("div", { className: "max-w-3xl" },
           h("div", { className: "mb-2 flex flex-wrap gap-2" },
             h(Badge, { tone: "outline" }, versionLabel),
-            h(Badge, badgeToneProps(engineChecking ? "outline" : (engineOnline ? "success" : "destructive"), { className: engineChecking ? "text-muted-foreground" : undefined }), engineChecking ? "Engine checking" : (engineOnline ? "Engine Online" : "Engine Offline")),
+            h(Badge, badgeToneProps(engineChecking || engineIncompatible ? "outline" : (engineOnline ? "success" : "destructive"), { className: engineChecking || engineIncompatible ? "text-muted-foreground" : undefined }), engineChecking ? "Engine checking" : (engineIncompatible ? "Engine contract incompatible" : (engineOnline ? "Engine Online" : "Engine Offline"))),
             h(Badge, { tone: mode === "active" ? "success" : (mode === "passive" ? "warning" : "outline"), className: mode ? undefined : "text-muted-foreground" }, mode ? labelFor(mode).replace(/^./, function (value) { return value.toUpperCase(); }) + " mode" : "Mode unavailable"),
             h(Badge, badgeToneProps(health.error || risks.error ? "destructive" : (health.data && risks.data ? "success" : "outline")), backendHealth(health, risks))
           ),

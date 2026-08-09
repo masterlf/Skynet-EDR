@@ -6,7 +6,11 @@ import vm from 'node:vm';
 
 const pluginUrl = new URL('./plugin.js', import.meta.url);
 const manifestUrl = new URL('./manifest.json', import.meta.url);
+const alertDeliveryFixtureUrl = new URL('../../../../crates/skynet-edr-daemon/tests/fixtures/status_alert_delivery_degraded.json', import.meta.url);
 const source = readFileSync(pluginUrl, 'utf8');
+const alertDeliveryStatus = JSON.parse(readFileSync(alertDeliveryFixtureUrl, 'utf8'));
+const producerErrorCategoryContract = alertDeliveryStatus.ingestion.error_category_contract;
+const producerErrorCategories = producerErrorCategoryContract.categories;
 
 function canonicalRisk(id = 'risk-1') {
   return {
@@ -75,6 +79,7 @@ function releasedStatusWithHistoricalError(category = 'invalid_event') {
     version: '0.4.1',
     ingestion: {
       state: 'healthy', role_identity_assurance: 'authorized_uid_self_reported', listener_live: true,
+      error_category_contract: structuredClone(producerErrorCategoryContract),
       transport_heartbeat_state: 'fresh', hook_event_state: 'not_observed', hook_event_freshness_affects_state: false,
       last_event_received_at_unix_ms: null, last_event_received_age_ms: null,
       last_event_committed_at_unix_ms: null, last_event_committed_age_ms: null,
@@ -355,6 +360,7 @@ test('status validator accepts bounded runtime health and rejects hostile attrib
   const valid = structuredClone(canonicalStatus);
   valid.ingestion = {
     state: 'healthy', role_identity_assurance: 'authorized_uid_self_reported', listener_live: true, transport_heartbeat_state: 'fresh',
+    error_category_contract: structuredClone(producerErrorCategoryContract),
     hook_event_state: 'not_observed', hook_event_freshness_affects_state: false,
     last_event_received_at_unix_ms: null, last_event_received_age_ms: null,
     last_event_committed_at_unix_ms: null, last_event_committed_age_ms: null,
@@ -387,8 +393,8 @@ test('status validator accepts bounded runtime health and rejects hostile attrib
   });
   harness.render();
   await harness.flushEffects();
-  assert.match(textOf(harness.render()), /Backend unavailable/);
-  assert.doesNotMatch(textOf(harness.render()), /cmdline/);
+  assert.match(textOf(harness.render()), /Projection contract incompatible/);
+  assert.doesNotMatch(textOf(harness.render()), /Engine Offline|cmdline/);
 });
 
 test('released healthy status with a historical invalid event stays visibly online', async () => {
@@ -408,11 +414,23 @@ test('released healthy status with a historical invalid event stays visibly onli
   assert.match(textOf(tree), /Telemetry healthy/);
 });
 
-test('status validator accepts only error categories emitted by the Rust ingestion source', async () => {
-  const emittedCategories = [
-    'frame_timeout', 'storage', 'transaction', 'incident_collision',
-    'invalid_event', 'malformed_frame', 'frame_size',
-  ];
+test('alpha.1 alert delivery regression stays online with degraded telemetry', async () => {
+  const harness = createHarness({
+    '/api/plugins/skynet-edr/status': alertDeliveryStatus,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  harness.render();
+  await harness.flushEffects();
+  const tree = harness.render();
+
+  assert.equal(findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator').props.tone, 'success');
+  assert.equal(findNode(tree, (node) => textOf(node) === 'Passive projection online', 'online backend indicator').props.tone, 'success');
+  assert.match(textOf(tree), /Telemetry degraded/);
+  assert.doesNotMatch(textOf(tree), /Engine Offline|Backend unavailable/);
+});
+
+test('status validator accepts only categories from the producer-owned contract', async () => {
+  const emittedCategories = producerErrorCategories.map(({ name }) => name);
   for (const category of emittedCategories) {
     const harness = createHarness({
       '/api/plugins/skynet-edr/status': releasedStatusWithHistoricalError(category),
@@ -429,13 +447,26 @@ test('status validator accepts only error categories emitted by the Rust ingesti
   });
   hostileHarness.render();
   await hostileHarness.flushEffects();
-  assert.match(textOf(hostileHarness.render()), /Backend unavailable/);
+  assert.match(textOf(hostileHarness.render()), /Projection contract incompatible/);
+  assert.doesNotMatch(textOf(hostileHarness.render()), /Engine Offline/);
+
+  const selfDeclared = releasedStatusWithHistoricalError('attacker_controlled');
+  selfDeclared.ingestion.error_category_contract.categories.push({ name: 'attacker_controlled', degrades: false });
+  const selfDeclaredHarness = createHarness({
+    '/api/plugins/skynet-edr/status': selfDeclared,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  selfDeclaredHarness.render();
+  await selfDeclaredHarness.flushEffects();
+  assert.match(textOf(selfDeclaredHarness.render()), /Projection contract incompatible/);
+  assert.doesNotMatch(textOf(selfDeclaredHarness.render()), /Engine Online|Engine Offline/);
 });
 
 test('status validator rejects contradictory healthy ingestion objects', async () => {
   const base = structuredClone(canonicalStatus);
   base.ingestion = {
     state: 'healthy', role_identity_assurance: 'authorized_uid_self_reported',
+    error_category_contract: structuredClone(producerErrorCategoryContract),
     listener_live: true, transport_heartbeat_state: 'fresh',
     hook_event_state: 'not_observed', hook_event_freshness_affects_state: false,
     last_event_received_at_unix_ms: null, last_event_received_age_ms: null,
@@ -453,7 +484,7 @@ test('status validator rejects contradictory healthy ingestion objects', async (
     (value) => { value.ingestion.transport_heartbeat_state = 'stale'; },
     (value) => { value.ingestion.required_reported_roles[0].state = 'absent'; },
     (value) => { value.ingestion.sources[0].transport_state = 'degraded'; },
-    ...['frame_timeout', 'storage', 'transaction', 'incident_collision'].map((category) => (value) => {
+    ...producerErrorCategories.filter(({ degrades }) => degrades).map(({ name: category }) => (value) => {
       value.ingestion.sources[0].last_error_category = category;
       value.ingestion.sources[0].last_error_at_unix_ms = 1;
       value.ingestion.sources[0].last_error_age_ms = 0;
@@ -469,7 +500,8 @@ test('status validator rejects contradictory healthy ingestion objects', async (
     });
     harness.render();
     await harness.flushEffects();
-    assert.match(textOf(harness.render()), /Backend unavailable/);
+    assert.match(textOf(harness.render()), /Projection contract incompatible/);
+    assert.doesNotMatch(textOf(harness.render()), /Engine Offline/);
   }
 
   const degraded = structuredClone(base);
@@ -509,7 +541,8 @@ test('disabled ingestion schema is exact and visibly separate from backend avail
   });
   harness.render();
   await harness.flushEffects();
-  assert.match(textOf(harness.render()), /Backend unavailable/);
+  assert.match(textOf(harness.render()), /Projection contract incompatible/);
+  assert.doesNotMatch(textOf(harness.render()), /Engine Offline/);
 });
 
 test('renders loading, empty and generic fail-closed error states', async () => {
@@ -1100,10 +1133,10 @@ test('header uses semantic host badge tones for engine and mode status', async (
   invalidHarness.render();
   await invalidHarness.flushEffects();
   const invalidTree = invalidHarness.render();
-  const offline = findNode(invalidTree, (node) => textOf(node) === 'Engine Offline', 'offline engine indicator');
-  assert.equal(offline.props.tone, 'destructive');
-  assert.equal(offline.props.className, undefined);
-  assert.equal(offline.props.style.backgroundColor, 'transparent');
+  const incompatible = findNode(invalidTree, (node) => textOf(node) === 'Engine contract incompatible', 'incompatible engine indicator');
+  assert.equal(incompatible.props.tone, 'outline');
+  assert.equal(incompatible.props.className, 'text-muted-foreground');
+  assert.doesNotMatch(textOf(invalidTree), /Engine Offline/);
   assert.equal(findNode(invalidTree, (node) => textOf(node) === 'Mode unavailable', 'unavailable mode indicator').props.tone, 'outline');
   assert.equal(findNode(invalidTree, (node) => textOf(node) === 'EDR version unavailable', 'unavailable version indicator').props.tone, 'outline');
   assert.doesNotMatch(textOf(invalidTree), /script|bad/);

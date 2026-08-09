@@ -1,0 +1,55 @@
+{
+  "product": "Skynet-EDR",
+  "binary": "skynet-edr",
+  "version": "0.6.0-alpha.2",
+  "run_mode": "passive",
+  "server": "skynet-edr-mcp",
+  "read_only": true,
+  "tool_count": 6,
+  "incident_count": 1,
+  "event_count": 1,
+  "ingestion": {
+    "state": "degraded",
+    "role_identity_assurance": "authorized_uid_self_reported",
+    "listener_live": true,
+    "error_category_contract": {
+      "schema_version": "skynet.ingestion-error-categories.v1",
+      "generation": "fnv1a64-9e53ed39e2296140",
+      "categories": [
+        { "name": "frame_timeout", "degrades": true },
+        { "name": "storage", "degrades": true },
+        { "name": "transaction", "degrades": true },
+        { "name": "incident_collision", "degrades": true },
+        { "name": "alert_delivery", "degrades": true },
+        { "name": "invalid_event", "degrades": false },
+        { "name": "malformed_frame", "degrades": false },
+        { "name": "frame_size", "degrades": false }
+      ]
+    },
+    "transport_heartbeat_state": "fresh",
+    "hook_event_state": "not_observed",
+    "hook_event_freshness_affects_state": false,
+    "last_event_received_at_unix_ms": null,
+    "last_event_received_age_ms": null,
+    "last_event_committed_at_unix_ms": null,
+    "last_event_committed_age_ms": null,
+    "required_reported_roles": [
+      { "runtime_role": "gateway", "state": "fresh" }
+    ],
+    "sources": [
+      {
+        "source_id": "uid:1000:gateway:gate-a1",
+        "authenticated_uid": 1000,
+        "runtime_role": "gateway",
+        "instance_id": "gate-a1",
+        "producer_reported_at_unix_ms": 1,
+        "producer_report_age_ms": 0,
+        "transport_state": "available",
+        "backlog_bytes": 0,
+        "last_error_category": "alert_delivery",
+        "last_error_at_unix_ms": 1,
+        "last_error_age_ms": 0
+      }
+    ]
+  }
+}

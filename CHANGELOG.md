@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0-alpha.2 - 2026-08-09
+
+- Replaced the dashboard's copied ingestion-error allowlist with the bounded producer-owned category/degradation contract, including `alert_delivery`.
+- Kept transport unavailable, status-contract incompatible, telemetry degraded, and healthy backend states visibly distinct.
+- Advanced canonical product, plugin, package, and documentation identities to `0.6.0-alpha.2`; deployability remains gated by follow-up PR B and live deployment.
+
 ## 0.6.0-alpha.1 - 2026-08-09
 
 - Added one compact server-redacted `skynet.alert.notice.v1` stdout line for each incident newly committed by continuous ingestion; duplicate replay emits no second notice.

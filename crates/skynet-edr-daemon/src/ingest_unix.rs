@@ -26,7 +26,7 @@ use nix::{
 };
 use serde::{
     de::{MapAccess, SeqAccess, Visitor},
-    Deserialize,
+    Deserialize, Serialize,
 };
 use serde_json::{json, value::RawValue};
 use skynet_edr_core::{
@@ -173,7 +173,7 @@ struct SourceHealth {
     events_collision_total: u64,
     producer_reported_at_unix_ms: Option<u64>,
     transport_state: Option<ProducerTransportState>,
-    last_error_category: Option<&'static str>,
+    last_error_category: Option<SourceErrorCategory>,
     last_error_at_unix_ms: Option<u64>,
     last_persisted_canary_event_id: Option<String>,
     last_persisted_canary_receipt_status: Option<&'static str>,
@@ -257,6 +257,83 @@ impl AuthenticatedPeer {
 enum ProducerTransportState {
     Available,
     Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceErrorCategory {
+    FrameTimeout,
+    Storage,
+    Transaction,
+    IncidentCollision,
+    AlertDelivery,
+    InvalidEvent,
+    MalformedFrame,
+    FrameSize,
+}
+
+impl SourceErrorCategory {
+    const ALL: [Self; 8] = [
+        Self::FrameTimeout,
+        Self::Storage,
+        Self::Transaction,
+        Self::IncidentCollision,
+        Self::AlertDelivery,
+        Self::InvalidEvent,
+        Self::MalformedFrame,
+        Self::FrameSize,
+    ];
+
+    const fn degrades(self) -> bool {
+        matches!(
+            self,
+            Self::FrameTimeout
+                | Self::Storage
+                | Self::Transaction
+                | Self::IncidentCollision
+                | Self::AlertDelivery
+        )
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FrameTimeout => "frame_timeout",
+            Self::Storage => "storage",
+            Self::Transaction => "transaction",
+            Self::IncidentCollision => "incident_collision",
+            Self::AlertDelivery => "alert_delivery",
+            Self::InvalidEvent => "invalid_event",
+            Self::MalformedFrame => "malformed_frame",
+            Self::FrameSize => "frame_size",
+        }
+    }
+}
+
+/// Return the bounded producer-owned source-error category contract.
+#[must_use]
+pub fn ingestion_error_category_contract() -> serde_json::Value {
+    let mut signature = String::new();
+    for (index, category) in SourceErrorCategory::ALL.iter().enumerate() {
+        if index > 0 {
+            signature.push('|');
+        }
+        signature.push_str(category.as_str());
+        signature.push(':');
+        signature.push(if category.degrades() { '1' } else { '0' });
+    }
+    let generation = signature
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    json!({
+        "schema_version": "skynet.ingestion-error-categories.v1",
+        "generation": format!("fnv1a64-{generation:016x}"),
+        "categories": SourceErrorCategory::ALL
+            .into_iter()
+            .map(|category| json!({"name": category, "degrades": category.degrades()}))
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[derive(Debug)]
@@ -779,6 +856,7 @@ impl IngestionHealth {
                 None => "not_observed",
             },
             "hook_event_freshness_affects_state": false,
+            "error_category_contract": ingestion_error_category_contract(),
             "last_event_received_at_unix_ms": last_received,
             "last_event_received_age_ms": last_received.map(|at| now.saturating_sub(at)),
             "last_event_committed_at_unix_ms": last_committed,
@@ -804,14 +882,14 @@ impl IngestionHealth {
         })
     }
 
-    fn record_source_error(&self, key: &SourceKey, category: &'static str) {
+    fn record_source_error(&self, key: &SourceKey, category: SourceErrorCategory) {
         self.record_source_error_for_peer(key, category, None);
     }
 
     fn record_source_error_for_peer(
         &self,
         key: &SourceKey,
-        category: &'static str,
+        category: SourceErrorCategory,
         peer: Option<KernelPeerIdentity>,
     ) {
         let mut sources = self
@@ -830,13 +908,13 @@ impl IngestionHealth {
             }
             source.last_error_category = Some(category);
             source.last_error_at_unix_ms = Some(unix_ms_now());
-            if category == "malformed_frame" {
+            if category == SourceErrorCategory::MalformedFrame {
                 source.daemon_events_malformed_total =
                     source.daemon_events_malformed_total.saturating_add(1);
             }
         }
         drop(sources);
-        if is_degrading_error(category) {
+        if category.degrades() {
             self.record_degradation();
         }
     }
@@ -950,7 +1028,7 @@ impl IngestionHealth {
             Ordering::Relaxed,
             |value| Some(value.saturating_add(1)),
         );
-        self.record_source_error(key, "alert_delivery");
+        self.record_source_error(key, SourceErrorCategory::AlertDelivery);
     }
 
     fn record_degradation(&self) {
@@ -992,13 +1070,6 @@ fn valid_attestation_event_id(value: &str) -> bool {
     value
         .strip_prefix("evt_skynet_attest_")
         .is_some_and(valid_hex_identity)
-}
-
-fn is_degrading_error(category: &str) -> bool {
-    matches!(
-        category,
-        "frame_timeout" | "storage" | "transaction" | "incident_collision" | "alert_delivery"
-    )
 }
 
 fn unix_ms_now() -> u64 {
@@ -1055,7 +1126,7 @@ fn source_status_json(
         }
     };
     let recent_degrading_error = source.last_error_category.is_some_and(|category| {
-        is_degrading_error(category)
+        category.degrades()
             && source
                 .last_error_at_unix_ms
                 .is_some_and(|at| now.saturating_sub(at) <= stale_after_ms)
@@ -1419,7 +1490,9 @@ fn commit_event_and_ack(
             .health
             .storage_errors
             .fetch_add(1, Ordering::Relaxed);
-        context.health.record_source_error(source_key, "storage");
+        context
+            .health
+            .record_source_error(source_key, SourceErrorCategory::Storage);
         return write_ack(
             stream,
             &json!({"version":1,"status":"retry_later","reason":"storage"}),
@@ -1468,7 +1541,7 @@ fn commit_event_and_ack(
             context.health.invalid.fetch_add(1, Ordering::Relaxed);
             context
                 .health
-                .record_source_error(source_key, "invalid_event");
+                .record_source_error(source_key, SourceErrorCategory::InvalidEvent);
             write_ack(
                 stream,
                 &json!({"version":1,"event_id":event.event_id.as_str(),"status":"rejected_permanent","reason":"invalid_event"}),
@@ -1481,7 +1554,7 @@ fn commit_event_and_ack(
                 .fetch_add(1, Ordering::Relaxed);
             context
                 .health
-                .record_source_error(source_key, "incident_collision");
+                .record_source_error(source_key, SourceErrorCategory::IncidentCollision);
             write_ack(
                 stream,
                 &json!({"version":1,"event_id":event.event_id.as_str(),"status":"rejected_permanent","reason":"incident_collision"}),
@@ -1494,7 +1567,7 @@ fn commit_event_and_ack(
                 .fetch_add(1, Ordering::Relaxed);
             context
                 .health
-                .record_source_error(source_key, "transaction");
+                .record_source_error(source_key, SourceErrorCategory::Transaction);
             write_ack(
                 stream,
                 &json!({"version":1,"event_id":event.event_id.as_str(),"status":"retry_later","reason":"transaction"}),
@@ -1557,10 +1630,10 @@ pub fn process_ingest_connection_with_alert_sink(
     if let Err(error) = read_exact_until(&mut stream, &mut header, read_deadline) {
         if is_timeout(&error) {
             health.timed_out.fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(&legacy_key, "frame_timeout");
+            health.record_source_error(&legacy_key, SourceErrorCategory::FrameTimeout);
         } else {
             health.invalid.fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(&legacy_key, "malformed_frame");
+            health.record_source_error(&legacy_key, SourceErrorCategory::MalformedFrame);
         }
         return Ok(());
     }
@@ -1568,7 +1641,7 @@ pub fn process_ingest_connection_with_alert_sink(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame length is unsupported"))?;
     if declared == 0 || declared > config.max_frame_bytes {
         health.oversized.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(&legacy_key, "frame_size");
+        health.record_source_error(&legacy_key, SourceErrorCategory::FrameSize);
         return write_ack(
             &mut stream,
             &json!({"version":1,"status":"rejected_permanent","reason":"frame_size"}),
@@ -1579,17 +1652,17 @@ pub fn process_ingest_connection_with_alert_sink(
     if let Err(error) = read_exact_until(&mut stream, &mut body, read_deadline) {
         if is_timeout(&error) {
             health.timed_out.fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(&legacy_key, "frame_timeout");
+            health.record_source_error(&legacy_key, SourceErrorCategory::FrameTimeout);
         } else {
             health.invalid.fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(&legacy_key, "malformed_frame");
+            health.record_source_error(&legacy_key, SourceErrorCategory::MalformedFrame);
         }
         return Ok(());
     }
     health.received.fetch_add(1, Ordering::Relaxed);
     let Ok(text) = std::str::from_utf8(&body) else {
         health.invalid.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(&legacy_key, "malformed_frame");
+        health.record_source_error(&legacy_key, SourceErrorCategory::MalformedFrame);
         return write_ack(
             &mut stream,
             &json!({"version":1,"status":"rejected_permanent","reason":"invalid_event"}),
@@ -1609,7 +1682,7 @@ pub fn process_ingest_connection_with_alert_sink(
     if message_type.as_deref() == Some("canonical_event") {
         let Some((role, generation, nonce, raw_event)) = parse_v3_event_transport(text) else {
             health.invalid.fetch_add(1, Ordering::Relaxed);
-            health.record_source_error(&legacy_key, "malformed_frame");
+            health.record_source_error(&legacy_key, SourceErrorCategory::MalformedFrame);
             return write_ack(
                 &mut stream,
                 &json!({"version":1,"status":"rejected_permanent","reason":"invalid_event"}),
@@ -1631,7 +1704,7 @@ pub fn process_ingest_connection_with_alert_sink(
             health.invalid.fetch_add(1, Ordering::Relaxed);
             health.record_source_error_for_peer(
                 &source_key,
-                "malformed_frame",
+                SourceErrorCategory::MalformedFrame,
                 Some(kernel_identity),
             );
             return write_ack(
@@ -1654,7 +1727,7 @@ pub fn process_ingest_connection_with_alert_sink(
     }
     let Ok(event) = parse_canonical_event_json(text) else {
         health.invalid.fetch_add(1, Ordering::Relaxed);
-        health.record_source_error(&legacy_key, "malformed_frame");
+        health.record_source_error(&legacy_key, SourceErrorCategory::MalformedFrame);
         return write_ack(
             &mut stream,
             &json!({"version":1,"status":"rejected_permanent","reason":"invalid_event"}),
