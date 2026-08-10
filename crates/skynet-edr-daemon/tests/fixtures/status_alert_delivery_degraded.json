@@ -1,0 +1,74 @@
+{
+  "product": "Skynet-EDR",
+  "binary": "skynet-edr",
+  "version": "0.6.0-alpha.2",
+  "run_mode": "passive",
+  "server": "skynet-edr-mcp",
+  "read_only": true,
+  "tool_count": 6,
+  "incident_count": 1,
+  "event_count": 1,
+  "ingestion": {
+    "state": "degraded",
+    "role_identity_assurance": "authorized_uid_self_reported",
+    "listener_live": true,
+    "error_category_contract": {
+      "schema_version": "skynet.ingestion-error-categories.v1",
+      "generation": "fnv1a64-9e53ed39e2296140",
+      "categories": [
+        { "name": "frame_timeout", "degrades": true },
+        { "name": "storage", "degrades": true },
+        { "name": "transaction", "degrades": true },
+        { "name": "incident_collision", "degrades": true },
+        { "name": "alert_delivery", "degrades": true },
+        { "name": "invalid_event", "degrades": false },
+        { "name": "malformed_frame", "degrades": false },
+        { "name": "frame_size", "degrades": false }
+      ]
+    },
+    "transport_heartbeat_state": "fresh",
+    "hook_event_state": "fresh",
+    "hook_event_freshness_affects_state": false,
+    "last_event_received_at_unix_ms": 1,
+    "last_event_received_age_ms": 0,
+    "last_event_committed_at_unix_ms": 1,
+    "last_event_committed_age_ms": 0,
+    "required_reported_roles": [
+      { "runtime_role": "gateway", "state": "fresh" }
+    ],
+    "sources": [
+      {
+        "source_id": "uid:1000:gateway:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "authenticated_uid": 1000,
+        "runtime_role": "gateway",
+        "protocol_version": 3,
+        "s3_eligible": true,
+        "instance_id": null,
+        "plugin_generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runtime_instance_nonce": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kernel_peer_pid": 1234,
+        "kernel_peer_start_ticks": 1,
+        "commit_sequence": 1,
+        "events_persisted_total": 1,
+        "last_event_received_at_unix_ms": 1,
+        "last_event_committed_at_unix_ms": 1,
+        "producer_checkpoint_bytes": 0,
+        "backlog_bytes": 0,
+        "backlog_age_ms": null,
+        "events_malformed_total": 0,
+        "events_dropped_total": 0,
+        "events_duplicate_total": 0,
+        "events_collision_total": 0,
+        "last_error_category": "alert_delivery",
+        "last_error_at_unix_ms": 1,
+        "last_error_age_ms": 0,
+        "producer_reported_at_unix_ms": 1,
+        "producer_report_age_ms": 0,
+        "transport_state": "available",
+        "last_persisted_canary_event_id": null,
+        "last_persisted_canary_receipt_status": null,
+        "last_persisted_canary_incidents_opened": null
+      }
+    ]
+  }
+}

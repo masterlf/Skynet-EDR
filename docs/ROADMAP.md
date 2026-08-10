@@ -15,9 +15,9 @@ v0.5.0 is a passive Linux-first prerelease. Within the narrow evidence-backed sc
 
 It does **not** provide inline pause, approval, blocking, or active containment.
 
-## Current milestone: v0.6.0-alpha.1 Local Incident Notifications
+## Current milestone: v0.6.0-alpha.2 Status Contract Compatibility
 
-The v0.6.0-alpha.1 milestone carries forward the v0.5.1 passive deployment-integrity/S3 baseline and adds the smallest local incident-notification path:
+The v0.6.0-alpha.2 milestone carries forward the v0.6.0-alpha.1 local incident-notification path and repairs its producer/consumer status contract:
 
 - deterministic sequence-capable correlation and the reviewed high-signal AI-agent rule pack;
 - `skynet-edr doctor` and private, redaction-safe diagnostics collection;
@@ -55,7 +55,7 @@ Guard mode requires a real pre-execution control point in each supported agent r
 - degradation behavior when Skynet-EDR is unavailable;
 - explicit compatibility contracts for Hermes and other runtimes.
 
-No user-facing surface may claim guard mode before those controls are implemented and exercised end to end. Guard mode is not part of v0.6.0-alpha.1.
+No user-facing surface may claim guard mode before those controls are implemented and exercised end to end. Guard mode is not part of v0.6.0-alpha.2.
 
 ## Later milestones
 
