@@ -215,7 +215,8 @@ def forbidden_literals() -> set[bytes]:
 def seal(stage: Path) -> None:
     expected = ALLOWED_FILES | {f"logs/{name}.log" for name in (
         "docs", "packaging", "fmt", "clippy", "rust-workspace", "hermes-python",
-        "producer-corpus", "dashboard-node", "desktop-node", "corpus", "runtime-canary"
+        "producer-corpus", "dashboard-node", "desktop-node", "corpus", "threat-validation",
+        "runtime-canary"
     )}
     actual = {str(path.relative_to(stage)) for path in stage.rglob("*") if path.is_file()}
     if actual != expected:
@@ -257,7 +258,8 @@ def seal_fd(output: Path, token: dict[str, object]) -> None:
         f"{name}.log"
         for name in (
             "docs", "packaging", "fmt", "clippy", "rust-workspace", "hermes-python",
-            "producer-corpus", "dashboard-node", "desktop-node", "corpus", "runtime-canary",
+            "producer-corpus", "dashboard-node", "desktop-node", "corpus", "threat-validation",
+            "runtime-canary",
         )
     }
     if set(os.listdir(stage_fd)) != ALLOWED_FILES | {"logs"}:

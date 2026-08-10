@@ -1,4 +1,6 @@
-# M4a S2 validation floor
+# M4a/S2 validation
+
+For v0.6.0-beta.1, this deep S2 procedure includes the bounded [Threat Validation Suite](THREAT_VALIDATION.md). The suite is the reusable CI/release contract; this document retains the deeper runtime-canary and report-sealing procedure.
 
 S2 is a deterministic, synthetic-only quality floor for the passive Hermes integration. It does not install packages, mutate a live host, contact external services, or prove compatibility with the actual Hermes dispatcher.
 
@@ -41,7 +43,7 @@ The report therefore records `real_hermes_runtime=false` and `package_install_ru
 
 ## Gates and metrics
 
-The command runs documentation and packaging validation, Rust format/clippy/workspace tests, Hermes Python tests, both Node suites, and dedicated corpus/producer/runtime-canary gates. Each gate records status, wall/user/system time, maximum RSS, and discovered test count.
+The command runs documentation and packaging validation, Rust format/clippy/workspace tests, Hermes Python tests, both Node suites, the threat-validation contract, and dedicated corpus/producer/runtime-canary gates. Each gate records status, wall/user/system time, maximum RSS, and discovered test count.
 
 The no-fault runtime canary counts callback-generated events and successful `put_nowait` queue insertions independently, records the terminal ACK histogram, and queries durable SQLite receipts. It maps each of the seven malicious trigger ACK event/rule pairs to its deterministic Risk ID and polls each corresponding Risk visibility timestamp, yielding seven ACK-to-corresponding-Risk samples. Isolated real fault phases force a queue drop, AF_UNIX socket failure plus durable fallback backlog, an event-ID collision with terminal collision ACK and SQLite evidence, and bounded-correlation truncation with durable degraded incidents; the sealed summary preserves those nonzero fault counters while the no-fault acceptance counters remain zero. Per-path numerator/denominator data contains identifiers and counts only, never raw payloads. Dashboard fetch-contract time and the separately timed shipped Desktop projection validator are named independently; neither is UI paint latency. Callback duration has a correctness ceiling of 50 ms. Transport, API, CPU, RSS, and store-growth observations are characterization only, not production SLOs.
 

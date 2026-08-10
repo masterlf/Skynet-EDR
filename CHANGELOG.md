@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0-beta.1 - 2026-08-10
+
+- Added the deterministic offline Threat Validation Suite, strict versioned scenario/evidence contracts, and fail-closed public matrix drift validation.
+- Consolidated the existing S2 corpus into malicious, benign, hostile-malformed, and explicitly skipped evidence paths without adding detection behavior for fixture convenience.
+- Published exact v0.6.0-beta.1 protection claims and limitations, integrated the bounded suite into CI/release gates, and advanced coherent product/package version surfaces.
+
 ## 0.6.0-alpha.3 - 2026-08-09
 
 - Replaced the dashboard's copied ingestion-error allowlist with the bounded producer-owned category/degradation contract, including `alert_delivery`.

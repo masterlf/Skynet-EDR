@@ -135,7 +135,7 @@ Later enforcement candidates:
 
 ## Deployment modes
 
-### Passive mode (current v0.4.1 and planned v0.5.0)
+### Passive mode (current v0.6.0-beta.1)
 
 Reads logs, config, and network metadata. Does not block.
 

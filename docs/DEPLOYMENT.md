@@ -31,7 +31,7 @@ Package installation and service restart are separate approvals. If the installe
 
 ```sh
 sudo systemctl restart skynet-edr.service
-sudo /usr/libexec/skynet-edr/deploy-verify --expected-product-version 0.6.0-alpha.3 --expected-deb-version 0.6.0~alpha.3
+sudo /usr/libexec/skynet-edr/deploy-verify --expected-product-version 0.6.0-beta.1 --expected-deb-version 0.6.0~beta.1
 sudo dpkg -V skynet-edr
 ```
 

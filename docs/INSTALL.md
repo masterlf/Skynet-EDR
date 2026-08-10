@@ -104,17 +104,17 @@ Download packages from the GitHub Releases page:
 https://github.com/masterlf/Skynet-EDR/releases
 ```
 
-For `v0.6.0-alpha.3`, the expected Linux `amd64` artifacts are:
+For `v0.6.0-beta.1`, the expected Linux `amd64` artifacts are:
 
 ```text
-skynet-edr_0.6.0-alpha.3_amd64.deb
-skynet-edr-0.6.0-alpha.3-1.x86_64.rpm
-skynet-edr-0.6.0-alpha.3-1-x86_64.pkg.tar.zst
-skynet-edr-0.6.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz
+skynet-edr_0.6.0-beta.1_amd64.deb
+skynet-edr-0.6.0-beta.1-1.x86_64.rpm
+skynet-edr-0.6.0-beta.1-1-x86_64.pkg.tar.zst
+skynet-edr-0.6.0-beta.1-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
 ```
 
-Artifact filenames retain the canonical release version. Native package metadata uses each ecosystem's prerelease ordering syntax: DEB and RPM report `0.6.0~alpha.3` (RPM release `1`), while Arch reports `0.6.0.alpha.3-1`. The packaging inspection gate rejects metadata that drops or misstates the prerelease.
+Artifact filenames retain the canonical release version. Native package metadata uses each ecosystem's prerelease ordering syntax: DEB and RPM report `0.6.0~beta.1` (RPM release `1`), while Arch reports `0.6.0.beta.1-1`. The packaging inspection gate rejects metadata that drops or misstates the prerelease.
 
 Verify downloaded files before installation:
 
@@ -128,7 +128,7 @@ After downloading the `.deb` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo apt install ./skynet-edr_0.6.0-alpha.3_amd64.deb
+sudo apt install ./skynet-edr_0.6.0-beta.1_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -189,7 +189,7 @@ After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo dnf install ./skynet-edr-0.6.0-alpha.3-1.x86_64.rpm
+sudo dnf install ./skynet-edr-0.6.0-beta.1-1.x86_64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -212,7 +212,7 @@ After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo pacman -U ./skynet-edr-0.6.0-alpha.3-1-x86_64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-0.6.0-beta.1-1-x86_64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```

@@ -419,7 +419,7 @@ test('released healthy status with a historical invalid event stays visibly onli
   assert.match(textOf(tree), /Telemetry healthy/);
 });
 
-test('alpha.3 alert delivery regression stays online with degraded telemetry', async () => {
+test('beta.1 alert delivery regression stays online with degraded telemetry', async () => {
   const harness = createHarness({
     '/api/plugins/skynet-edr/status': alertDeliveryStatus,
     '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
@@ -428,7 +428,7 @@ test('alpha.3 alert delivery regression stays online with degraded telemetry', a
   await harness.flushEffects();
   const tree = harness.render();
 
-  assert.match(textOf(tree), /EDR 0\.6\.0-alpha\.3/);
+  assert.match(textOf(tree), /EDR 0\.6\.0-beta\.1/);
   assert.equal(findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator').props.tone, 'success');
   assert.equal(findNode(tree, (node) => textOf(node) === 'Backend available', 'online backend indicator').props.tone, 'success');
   assert.match(textOf(tree), /Telemetry degraded/);

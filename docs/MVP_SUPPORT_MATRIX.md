@@ -2,7 +2,7 @@
 
 ## Audience and purpose
 
-This page is the public contract for the installable Skynet-EDR `v0.4.1` prerelease at source baseline `f128bfb505bc77bff1a4322bba185ba79f7d642b`. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. It is for evaluation and lab use, not a production support commitment.
+This page is the public contract for the installable Skynet-EDR `v0.6.0-beta.1` prerelease. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. It is for evaluation and lab use, not a production support commitment. Exact rule claims and scenario evidence are in the [v0.6.0-beta.1 protection matrix](PROTECTION_MATRIX_v0.6.0-beta.1.md).
 
 ## Product boundary
 
@@ -14,7 +14,7 @@ The product does not replace endpoint EDR, SIEM, IAM, DLP, runtime guardrails, o
 
 | Tier | Scope | Evidence at this baseline | Contract |
 |---|---|---|---|
-| Tier 1 | Ubuntu 24.04 `x86_64`/`amd64`; `.deb` and custom tarball package paths | Clean-container install/remove/purge checks without service start | Evaluation support for the proven package lifecycle only. Daemon operation, producer enrollment, upgrade, rollback, and response outcomes still require operator validation in the target environment. |
+| Tier 1 | Ubuntu 24.04 `x86_64`/`amd64`; `.deb` and custom tarball package paths | Clean-container lifecycle plus disposable DEB/systemd service, identity, writable-state, and read-only API gate | Evaluation support for the exact exercised package/runtime path only. Upgrade, rollback, and response outcomes still require operator validation in the target environment. |
 | Tier 2 | Published `x86_64`/`amd64` artifacts outside Tier 1: Debian, Linux Mint, RHEL-compatible Linux, Fedora, Arch, and custom tarball targets | Artifact publication exists; no corresponding native runtime proof at this baseline | Lab/advanced-user availability only. It is not a verified runtime-support promise. |
 
 Unsupported or unproven: `arm64`/`aarch64`, musl/Alpine, non-systemd hosts, Windows, macOS, and any distribution or architecture not listed above. RPM and Arch artifacts do not establish RHEL/Fedora/Arch runtime compatibility. The tarball installer does not provision the `skynet-edr-ingest` group or sysusers/tmpfiles state needed for authenticated continuous ingress; do not infer ingress readiness from a successful tarball installation.
@@ -27,7 +27,7 @@ Published checksums provide integrity checking, but this prerelease has no packa
 |---|---|---|
 | Canonical schema, redaction, local SQLite storage, CLI, loopback read-only HTTP visibility | Live | Implemented local surfaces subject to their documented validation and availability limits. |
 | Hermes lifecycle plugin and authenticated AF_UNIX ingestion | Live producer | The only shipped live producer path. It is passive and depends on explicit local enrollment, producer-supplied facts, successful ingestion, and bounded queues/checkpoints. |
-| Autonomous Hermes enrollment | Unproven / blocked | A fail-closed transaction, package-owned privileged adapter, and deterministic boundary fixtures exist for Ubuntu 24.04 amd64/systemd plus Hermes 0.19.0, but no disposable clean-host real-Hermes/systemd gate has passed. No host may yet be claimed autonomously `ENROLLED`; all other Hermes versions/platform cells are unsupported. |
+| Autonomous Hermes enrollment | Narrow compatibility cell | Fail-closed transaction evidence covers Ubuntu 24.04 amd64/systemd, Hermes 0.19.0, default profile, and Skynet-EDR plugin 0.6.0-beta.1. The separate Hermes 0.20.0 browser gate does not widen enrollment support. |
 | `EDR-MCP-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-CRON-001` | Live, narrow | Exact Hermes producer shapes only; cron coverage is limited to authoritative successful built-in `cronjob` create/update outcomes. |
 | `EDR-EXFIL-001`, `EDR-MALWARE-001` | Live, narrow | Exact reviewed event shapes, joins, ordering, and bounded correlation only. Absence of an incident is not proof that an action was safe. |
 | Canonical JSONL from another producer and normalized Hermes trace import | Producer-dependent | The engine can evaluate documented input, but coverage exists only when an external producer supplies valid redacted events. |
@@ -37,7 +37,7 @@ Published checksums provide integrity checking, but this prerelease has no packa
 | `EDR-CONFIG-001`, `EDR-SCOPE-001`, `EDR-PERSIST-001` through the shipped Hermes producer | Dark | Required authoritative post-mutation evidence is not available, so the producer intentionally does not emit the triggering events. |
 | `EDR-SECRET-001` standalone secret-access detection | Unsupported | It is a roadmap candidate; no standalone shipped correlator exists. |
 
-"Live" means the exact shipped path can produce and evaluate the stated narrow shape. "Producer-dependent" means evaluation requires an external conforming producer. "Dark" means a rule may exist but the named shipped producer intentionally cannot prove its trigger. "Unsupported" means no shipped implementation is available for that capability.
+"Live" means the exact shipped path can produce and evaluate the stated narrow shape. "Producer-dependent" means evaluation requires an external conforming producer. "Dark" means a rule may exist but the named shipped producer intentionally cannot prove its trigger. "Unsupported" means no shipped implementation is available for that capability. These legacy labels map to the versioned matrix statuses; the versioned matrix is authoritative for detection evidence.
 
 ## Data, trust, and availability limits
 
@@ -52,7 +52,7 @@ end-to-end validation before they can be claimed: guard or enforcement mode;
 automated containment; privileged/kernel/eBPF sensors; fleet or remote
 administration; external/outbound webhook, email, or SIEM delivery; supported
 non-Hermes producers; Windows or macOS sensors; signed supply-chain artifacts;
-and production support/SLA commitments. This exclusion does not rule out the
-planned v0.5.0 passive local durable alert/evidence presentation.
+and production support/SLA commitments. Local durable alert/evidence presentation
+remains passive and does not narrow these exclusions.
 
 For rule-level detail, see [Detections](DETECTIONS.md#rule-to-producer-coverage-matrix). For installation evidence and caveats, see [Install](INSTALL.md) and [Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md). For future work, see [Current roadmap](ROADMAP.md).

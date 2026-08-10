@@ -106,7 +106,7 @@ class DetectionCorpusProducerConformance(unittest.TestCase):
     def test_dark_and_unsupported_rules_are_not_live_producer_cases(self):
         corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
         self.assertEqual(
-            {case["rule_id"] for case in corpus["cases"] if case["category"] == "producer_dark"},
+            {case["rule_id"] for case in corpus["cases"] if case["execution"] == "skipped"},
             {"EDR-CONFIG-001", "EDR-SCOPE-001", "EDR-PERSIST-001"},
         )
         self.assertNotIn("EDR-SECRET-001", corpus["live_rules"])

@@ -99,7 +99,7 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertNotIn("localeCompare", browser)
         self.assertIn("a < b ? -1 : a > b ? 1 : 0", browser)
         self.assertIn("headless: true", browser)
-        self.assertIn("0.6.0-alpha.3", browser)
+        self.assertIn("0.6.0-beta.1", browser)
         self.assertIn("Engine Online", browser)
         self.assertIn("Backend available", browser)
         self.assertIn("Telemetry degraded", browser)

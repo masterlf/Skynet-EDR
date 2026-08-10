@@ -1,0 +1,21 @@
+{
+  "boundary": "Passive detection and evidence only. No prevention, blocking, containment, quarantine, approval, or guard mode is provided.",
+  "matrix_version": "0.6.0-beta.1",
+  "schema_version": "skynet.protection-matrix.v1",
+  "rules": [
+    {"id":"EDR-CRON-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_cron","near_miss_cron"],"evidence":"offline engine replay plus shipped Hermes producer fixture","limitation":"Only authoritative successful built-in cronjob create/update results."},
+    {"id":"EDR-EXFIL-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_exfil","near_miss_exfil","secret_exfil_redaction"],"evidence":"offline bounded correlator replay plus shipped Hermes producer fixture","limitation":"Reviewed narrow shapes, same source/join, ordering, and 60-second window only."},
+    {"id":"EDR-MALWARE-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_malware","near_miss_malware"],"evidence":"offline bounded correlator replay plus shipped Hermes producer fixture","limitation":"Exact allowlisted safe marker and reviewed omitted-output shape only."},
+    {"id":"EDR-MCP-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_mcp","near_miss_mcp"],"evidence":"offline canonical sequence replay plus shipped Hermes producer fixture","limitation":"Recognized network-capable MCP request in the same trace only."},
+    {"id":"EDR-MSG-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_msg","near_miss_msg","secret_message_redaction"],"evidence":"offline canonical sequence replay plus shipped Hermes producer fixture","limitation":"Recognized sensitive delivery request shape only."},
+    {"id":"EDR-NET-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_net","near_miss_net"],"evidence":"offline canonical sequence replay plus shipped Hermes producer fixture","limitation":"Recognized explicit IPv4 destination with direct_ip=true only."},
+    {"id":"EDR-PI-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_pi","near_miss_pi"],"evidence":"offline canonical sequence replay plus shipped Hermes producer fixture","limitation":"Typed instructional attack followed by sensitive network tool request only."},
+    {"id":"EDR-CONFIG-001","status":"NOT_COVERED","scenario_ids":["dark_edr_config_001"],"evidence":"documented skipped scenario","limitation":"Shipped Hermes producer has no authoritative post-save event."},
+    {"id":"EDR-PERSIST-001","status":"NOT_COVERED","scenario_ids":["dark_edr_persist_001"],"evidence":"documented skipped scenario","limitation":"Shipped Hermes producer has no authoritative persistence mutation event."},
+    {"id":"EDR-SCOPE-001","status":"NOT_COVERED","scenario_ids":["dark_edr_scope_001"],"evidence":"documented skipped scenario","limitation":"Shipped Hermes hook precedes persisted scope expansion."},
+    {"id":"EDR-SECRET-001","status":"NOT_COVERED","scenario_ids":[],"evidence":"no shipped standalone correlator","limitation":"Roadmap candidate only."},
+    {"id":"EXTERNAL-CANONICAL-PRODUCER","status":"PARTIAL","scenario_ids":[],"evidence":"engine unit fixtures only","limitation":"Requires an external conforming redacted producer; no shipped live adapter."},
+    {"id":"HOSTILE-MALFORMED","status":"DETECTED_AND_TESTED","scenario_ids":["hostile_bounded_recursive","hostile_malformed_json","hostile_truncated_frame","hostile_unknown_type"],"evidence":"offline strict canonical parser rejection fixtures","limitation":"Bounded representative malformed inputs; not an exhaustive parser proof."},
+    {"id":"REAL-HERMES-DISPATCHER-ABI","status":"NOT_TESTED","scenario_ids":[],"evidence":"callbacks are invoked directly by fixtures","limitation":"This suite does not exercise real Hermes discovery or dispatcher ABI."}
+  ]
+}
