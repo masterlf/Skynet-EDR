@@ -45,7 +45,7 @@ def main() -> int:
     ).hexdigest()
     document = {
         "schema": 1,
-        "payload_version": "0.6.0-alpha.2",
+        "payload_version": "0.6.0-alpha.3",
         "generation": generation,
         "files": files,
     }

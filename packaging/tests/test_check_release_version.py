@@ -22,10 +22,12 @@ FIXTURE_FILES = (
     "crates/skynet-edr-cli/Cargo.toml",
     "crates/skynet-edr-daemon/Cargo.toml",
     "crates/skynet-edr-mcp/Cargo.toml",
-    "docs/releases/v0.6.0-alpha.2.md",
+    "docs/releases/v0.6.0-alpha.3.md",
     "README.md",
     "docs/ROADMAP.md",
     "docs/INSTALL.md",
+    "docs/HERMES_ENROLLMENT.md",
+    "packaging/scripts/skynet-edr-hermes-enroll.py",
     "CHANGELOG.md",
     "SECURITY.md",
     "docs/README.md",
@@ -69,17 +71,17 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             "skynet-edr-core": "",
             "skynet-edr-cli": (
                 "[dependencies]\n"
-                'skynet-edr-core = { version = "0.6.0-alpha.2", path = "../skynet-edr-core" }\n'
+                'skynet-edr-core = { version = "0.6.0-alpha.3", path = "../skynet-edr-core" }\n'
             ),
             "skynet-edr-daemon": (
                 "[dependencies]\n"
-                'skynet-edr-core = { version = "0.6.0-alpha.2", path = "../skynet-edr-core" }\n'
-                'skynet-edr-mcp = { version = "0.6.0-alpha.2", path = "../skynet-edr-mcp" }\n'
+                'skynet-edr-core = { version = "0.6.0-alpha.3", path = "../skynet-edr-core" }\n'
+                'skynet-edr-mcp = { version = "0.6.0-alpha.3", path = "../skynet-edr-mcp" }\n'
                 "\n[dev-dependencies]\n"
             ),
             "skynet-edr-mcp": (
                 "[dependencies]\n"
-                'skynet-edr-core = { version = "0.6.0-alpha.2", path = "../skynet-edr-core" }\n'
+                'skynet-edr-core = { version = "0.6.0-alpha.3", path = "../skynet-edr-core" }\n'
             ),
         }
         for package_name, dependencies in manifests.items():
@@ -113,7 +115,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
     def test_rejects_duplicate_python_plugin_version_assignments(self) -> None:
         plugin = self.fixture_root / "integrations/hermes/skynet-edr/__init__.py"
         duplicate_assignments = (
-            'PLUGIN_VERSION = "0.6.0-alpha.2"',
+            'PLUGIN_VERSION = "0.6.0-alpha.3"',
             'PLUGIN_VERSION = "9.9.9"',
             'if True:\n    PLUGIN_VERSION = "9.9.9"',
             'PLUGIN_VERSION += ".hostile"',
@@ -196,7 +198,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
     def test_rejects_duplicate_plugin_yaml_version_keys(self) -> None:
         manifest = self.fixture_root / "integrations/hermes/skynet-edr/plugin.yaml"
         for duplicate_key, duplicate_value in (
-            ("version", '"0.6.0-alpha.2"'),
+            ("version", '"0.6.0-alpha.3"'),
             ("version", '"9.9.9"'),
             ("version", "9.9.9"),
             ('"version"', '"9.9.9"'),
@@ -229,7 +231,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
     def test_rejects_duplicate_nfpm_version_keys(self) -> None:
         manifest = self.fixture_root / "packaging/nfpm.yaml"
         for duplicate_key, duplicate_value in (
-            ("version", "${SKYNET_EDR_VERSION:-0.6.0-alpha.2}"),
+            ("version", "${SKYNET_EDR_DEB_VERSION:-0.6.0~alpha.3}"),
             ("version", "${SKYNET_EDR_VERSION:-9.9.9}"),
             ("version", "9.9.9"),
             ('"version"', "9.9.9"),
@@ -243,7 +245,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                 try:
                     with self.assertRaises(SystemExit) as failure:
                         self.run_checker()
-                    self.assertIn("duplicate nFPM default version", str(failure.exception))
+                    self.assertIn("duplicate nFPM DEB default version", str(failure.exception))
                 finally:
                     manifest.write_text(original, encoding="utf-8")
 
@@ -261,13 +263,13 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             self.fixture_root
             / "integrations/hermes/skynet-edr/dashboard/manifest.json"
         )
-        for duplicate_version in ("0.6.0-alpha.2", "9.9.9"):
+        for duplicate_version in ("0.6.0-alpha.3", "9.9.9"):
             with self.subTest(duplicate_version=duplicate_version):
                 original = manifest.read_text(encoding="utf-8")
                 manifest.write_text(
                     original.replace(
-                        '"version": "0.6.0-alpha.2",',
-                        '"version": "0.6.0-alpha.2",\n'
+                        '"version": "0.6.0-alpha.3",',
+                        '"version": "0.6.0-alpha.3",\n'
                         f'  "version": "{duplicate_version}",',
                         1,
                     ),
@@ -308,7 +310,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                 original = manifest.read_text(encoding="utf-8")
                 manifest.write_text(
                     original.replace(
-                        f'{dependency} = {{ version = "0.6.0-alpha.2"',
+                        f'{dependency} = {{ version = "0.6.0-alpha.3"',
                         f'{dependency} = {{ version = "9.9.9"',
                     ),
                     encoding="utf-8",
@@ -323,19 +325,19 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
 
     def test_rejects_explicit_empty_expected_version(self) -> None:
         with self.assertRaises(SystemExit) as failure:
-            self.run_checker("--expected", "")
+            self.run_checker("--expected-product", "")
 
         self.assertIn("invalid release version", str(failure.exception))
 
     def test_accepts_prerelease_versions(self) -> None:
-        for version in ("0.6.0-alpha.2", "1.0.0-rc.1", "2.3.4"):
+        for version in ("0.6.0-alpha.3", "1.0.0-rc.1", "2.3.4"):
             with self.subTest(version=version):
                 self.assertTrue(self.checker.is_canonical_release_version(version))
 
     def test_rejects_malformed_or_noncanonical_semver_prerelease(self) -> None:
         for version in (
             "",
-            "v0.6.0-alpha.2",
+            "v0.6.0-alpha.3",
             "01.6.0-alpha.1",
             "0.06.0-alpha.1",
             "0.6.00-alpha.1",
@@ -343,31 +345,49 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             "0.6.0-alpha..1",
             "0.6.0-alpha.01",
             "0.6.0+build.1",
-            "0.6.0-alpha.2+build.1",
+            "0.6.0-alpha.3+build.1",
         ):
             with self.subTest(version=version):
                 self.assertFalse(self.checker.is_canonical_release_version(version))
 
     def test_rejects_stale_authoritative_current_version_docs(self) -> None:
         for relative, current_marker in (
-            ("SECURITY.md", "Skynet-EDR v0.6.0-alpha.2 is an installable prerelease"),
-            ("SECURITY.md", "| `v0.6.0-alpha.2` prerelease |"),
-            ("docs/README.md", "Current documentation structure target: v0.6.0-alpha.2."),
+            ("SECURITY.md", "Skynet-EDR v0.6.0-alpha.3 is an installable prerelease"),
+            ("SECURITY.md", "| `v0.6.0-alpha.3` prerelease |"),
+            ("docs/README.md", "Current documentation structure target: v0.6.0-alpha.3."),
         ):
             with self.subTest(relative=relative):
                 path = self.fixture_root / relative
                 original = path.read_text(encoding="utf-8")
                 path.write_text(
-                    original.replace(current_marker, current_marker.replace("0.6.0-alpha.2", "9.9.9")),
+                    original.replace(current_marker, current_marker.replace("0.6.0-alpha.3", "9.9.9")),
                     encoding="utf-8",
                 )
                 try:
                     with self.assertRaises(SystemExit) as failure:
                         self.run_checker()
                     self.assertIn(
-                        f"{relative} does not reference current release 0.6.0-alpha.2",
+                        f"{relative} does not reference current release 0.6.0-alpha.3",
                         str(failure.exception),
                     )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_rejects_stale_install_enrollment_and_enroller_versions(self) -> None:
+        cases = (
+            ("docs/INSTALL.md", "DEB and RPM report `0.6.0~alpha.3`", "DEB and RPM report `9.9.9`"),
+            ("docs/INSTALL.md", "Arch reports `0.6.0.alpha.3-1`", "Arch reports `9.9.9-1`"),
+            ("docs/HERMES_ENROLLMENT.md", "Skynet-EDR plugin `0.6.0-alpha.3`", "Skynet-EDR plugin `9.9.9`"),
+            ("packaging/scripts/skynet-edr-hermes-enroll.py", 'PAYLOAD_VERSION = "0.6.0-alpha.3"', 'PAYLOAD_VERSION = "9.9.9"'),
+        )
+        for relative, marker, stale in cases:
+            with self.subTest(relative=relative, marker=marker):
+                path = self.fixture_root / relative
+                original = path.read_text(encoding="utf-8")
+                path.write_text(original.replace(marker, stale), encoding="utf-8")
+                try:
+                    with self.assertRaises(SystemExit):
+                        self.run_checker()
                 finally:
                     path.write_text(original, encoding="utf-8")
 
@@ -395,7 +415,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as failure:
                         self.run_checker()
                     self.assertIn(
-                        f"{relative} does not reference current release 0.6.0-alpha.2",
+                        f"{relative} does not reference current release 0.6.0-alpha.3",
                         str(failure.exception),
                     )
                 finally:
@@ -405,7 +425,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.6.0-alpha.2", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.6.0-alpha.3", path = "../skynet-edr-core" }',
                 'skynet-edr-core = { path = "../skynet-edr-core", version = "9.9.9" }',
             ),
             encoding="utf-8",
@@ -433,7 +453,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.6.0-alpha.2", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.6.0-alpha.3", path = "../skynet-edr-core" }',
                 'skynet-edr-core = { path = "../skynet-edr-core" }',
             ),
             encoding="utf-8",
@@ -454,7 +474,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.6.0-alpha.2", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.6.0-alpha.3", path = "../skynet-edr-core" }',
                 "skynet-edr-core = { workspace = true }",
             ),
             encoding="utf-8",
@@ -475,7 +495,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                 "version.workspace = true\n"
                 "edition.workspace = true\n"
                 "\n[dependencies]\n"
-                'skynet-edr-core = { path = "crates/skynet-edr-core", version = ">=0.6.0-alpha.2" }\n'
+                'skynet-edr-core = { path = "crates/skynet-edr-core", version = ">=0.6.0-alpha.3" }\n'
             )
         source_directory = self.fixture_root / "src"
         source_directory.mkdir()
@@ -485,7 +505,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as failure:
             self.run_checker()
 
-        self.assertIn("skynet-edr-root dependencies skynet-edr-core=>=0.6.0-alpha.2", str(failure.exception))
+        self.assertIn("skynet-edr-root dependencies skynet-edr-core=>=0.6.0-alpha.3", str(failure.exception))
 
     def test_rejects_internal_dependency_in_implicit_path_member(self) -> None:
         self.make_cargo_fixture_self_contained()
@@ -498,7 +518,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             "version.workspace = true\n"
             "edition.workspace = true\n"
             "\n[dependencies]\n"
-            'skynet-edr-core = { path = "../skynet-edr-core", version = ">=0.6.0-alpha.2" }\n',
+            'skynet-edr-core = { path = "../skynet-edr-core", version = ">=0.6.0-alpha.3" }\n',
             encoding="utf-8",
         )
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
@@ -506,7 +526,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             daemon_manifest.read_text(encoding="utf-8").replace(
                 "[dev-dependencies]\n",
                 "[dev-dependencies]\n"
-                'skynet-edr-implicit = { path = "../skynet-edr-implicit", version = "0.6.0-alpha.2" }\n',
+                'skynet-edr-implicit = { path = "../skynet-edr-implicit", version = "0.6.0-alpha.3" }\n',
             ),
             encoding="utf-8",
         )
@@ -516,7 +536,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             self.run_checker()
 
         self.assertIn(
-            "skynet-edr-implicit dependencies skynet-edr-core=>=0.6.0-alpha.2",
+            "skynet-edr-implicit dependencies skynet-edr-core=>=0.6.0-alpha.3",
             str(failure.exception),
         )
 
@@ -581,7 +601,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         daemon_manifest = self.fixture_root / "crates/skynet-edr-daemon/Cargo.toml"
         daemon_manifest.write_text(
             daemon_manifest.read_text(encoding="utf-8").replace(
-                'skynet-edr-core = { version = "0.6.0-alpha.2", path = "../skynet-edr-core" }',
+                'skynet-edr-core = { version = "0.6.0-alpha.3", path = "../skynet-edr-core" }',
                 'skynet_edr_core = { version = ">=0.4", path = "../skynet-edr-core" }',
             ),
             encoding="utf-8",
@@ -612,7 +632,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
 
     def test_rejects_duplicate_internal_cargo_lock_entries(self) -> None:
         lockfile = self.fixture_root / "Cargo.lock"
-        current_entry = '[[package]]\nname = "skynet-edr-core"\nversion = "0.6.0-alpha.2"'
+        current_entry = '[[package]]\nname = "skynet-edr-core"\nversion = "0.6.0-alpha.3"'
         lockfile.write_text(
             lockfile.read_text(encoding="utf-8").replace(
                 current_entry,

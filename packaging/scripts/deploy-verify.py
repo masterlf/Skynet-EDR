@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -18,6 +20,19 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
+
+PLUGIN_ROOT = Path("/usr/share/skynet-edr/hermes-plugin/skynet-edr")
+PLUGIN_MANIFEST = PLUGIN_ROOT.parent / "manifest.json"
+PLUGIN_FILES = (
+    "plugin.yaml", "__init__.py", "README.md", "dashboard/manifest.json",
+    "dashboard/plugin.js", "dashboard/plugin_api.py", "desktop/plugin.js",
+)
+PLUGIN_DIRECTORIES = {
+    "": {"plugin.yaml", "__init__.py", "README.md", "dashboard", "desktop"},
+    "dashboard": {"manifest.json", "plugin.js", "plugin_api.py"},
+    "desktop": {"plugin.js"},
+}
+MAX_PLUGIN_FILE_BYTES = 2_097_152
 
 PATH_CONTRACT = (
     ("/etc/skynet-edr", "directory", "root", "skynet-edr", "0750"),
@@ -153,6 +168,303 @@ def verify_api_documents(documents: Mapping[str, Any], expected_version: str) ->
     return errors
 
 
+def verify_version_identity(
+    expected_product_version: str,
+    expected_deb_version: str,
+    installed_deb_version: str,
+    cli_version: str,
+    daemon_version: str,
+) -> list[str]:
+    errors: list[str] = []
+    if installed_deb_version != expected_deb_version:
+        errors.append("dpkg package version mismatch")
+    if cli_version.strip() != f"skynet-edr {expected_product_version}":
+        errors.append("CLI version mismatch")
+    if daemon_version.strip() != f"skynet-edr-daemon {expected_product_version}":
+        errors.append("daemon version mismatch")
+    return errors
+
+
+def verify_plugin_manifest(manifest: Any, files: Mapping[str, bytes], expected_version: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(manifest, dict) or set(manifest) != {"schema", "payload_version", "generation", "files"}:
+        return ["Hermes plugin manifest schema mismatch"]
+    if manifest.get("schema") != 1 or manifest.get("payload_version") != expected_version:
+        errors.append("Hermes plugin manifest version mismatch")
+    records = manifest.get("files")
+    if not isinstance(records, dict) or set(records) != set(PLUGIN_FILES):
+        return errors + ["Hermes plugin manifest file allowlist mismatch"]
+    if set(files) != set(PLUGIN_FILES):
+        errors.append("installed Hermes plugin file allowlist mismatch")
+    for relative in PLUGIN_FILES:
+        record = records.get(relative)
+        data = files.get(relative)
+        if not isinstance(record, dict) or set(record) != {"sha256", "size", "mode", "owner"}:
+            errors.append(f"{relative}: manifest record mismatch")
+            continue
+        if record.get("mode") != 0o644 or record.get("owner") != 0:
+            errors.append(f"{relative}: manifest metadata mismatch")
+        if not isinstance(data, bytes):
+            errors.append(f"{relative}: installed bytes missing")
+            continue
+        if record.get("size") != len(data):
+            errors.append(f"{relative}: size mismatch")
+        if record.get("sha256") != hashlib.sha256(data).hexdigest():
+            errors.append(f"{relative}: sha256 mismatch")
+    generation = hashlib.sha256(
+        json.dumps(records, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    if manifest.get("generation") != generation:
+        errors.append("Hermes plugin manifest generation mismatch")
+    dashboard_bytes = files.get("dashboard/manifest.json")
+    bundle = files.get("dashboard/plugin.js")
+    if isinstance(dashboard_bytes, bytes) and isinstance(bundle, bytes):
+        try:
+            dashboard = json.loads(dashboard_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            errors.append("dashboard manifest is not valid UTF-8 JSON")
+        else:
+            sri = "sha384-" + base64.b64encode(hashlib.sha384(bundle).digest()).decode("ascii")
+            if dashboard.get("version") != expected_version:
+                errors.append("dashboard manifest version mismatch")
+            if dashboard.get("integrity") != sri:
+                errors.append("dashboard bundle integrity mismatch")
+    return errors
+
+
+def verify_loaded_generation(status_document: Any, expected_generation: str) -> list[str]:
+    ingestion = status_document.get("ingestion") if isinstance(status_document, dict) else None
+    if isinstance(ingestion, dict) and ingestion.get("state") == "disabled":
+        return []
+    sources = ingestion.get("sources") if isinstance(ingestion, dict) else None
+    if not isinstance(sources, list):
+        return ["/api/status: loaded Hermes plugin generation unavailable"]
+    generations = {
+        source.get("plugin_generation") for source in sources
+        if isinstance(source, dict) and source.get("protocol_version") == 3
+    }
+    return [] if generations == {expected_generation} else ["/api/status: loaded Hermes plugin generation mismatch"]
+
+
+def collect_version_identity() -> tuple[tuple[str, str, str] | None, list[str]]:
+    commands = (
+        ("dpkg", ["dpkg-query", "-W", "-f=${Version}", "skynet-edr"]),
+        ("CLI", ["/usr/bin/skynet-edr", "--version"]),
+        ("daemon", ["/usr/bin/skynet-edr-daemon", "--version"]),
+    )
+    values: list[str] = []
+    for label, command in commands:
+        try:
+            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None, [f"could not read {label} version"]
+        if result.returncode != 0 or not result.stdout.strip():
+            return None, [f"could not read {label} version"]
+        values.append(result.stdout.strip())
+    return (values[0], values[1], values[2]), []
+
+
+def _open_absolute_directory(
+    path: Path,
+    label: str,
+    errors: list[str],
+    allowed_owners: frozenset[int] = frozenset({0}),
+) -> int | None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    if not path.is_absolute() or ".." in path.parts:
+        errors.append(f"{label}: installed directory inspection failed")
+        return None
+    descriptor: int | None = None
+    try:
+        descriptor = os.open("/", flags)
+        for component in path.parts[1:]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            info = os.fstat(child)
+            writable = bool(info.st_mode & 0o022)
+            trusted_sticky = bool(info.st_mode & stat.S_ISVTX) and info.st_uid == 0
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in allowed_owners
+                    or (writable and not trusted_sticky)):
+                os.close(child)
+                raise OSError("unsafe directory component")
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except OSError:
+        if descriptor is not None:
+            os.close(descriptor)
+        errors.append(f"{label}: installed directory inspection failed")
+        return None
+
+
+def _open_child_directory(
+    parent_fd: int,
+    name: str,
+    label: str,
+    errors: list[str],
+    expected_owner: int = 0,
+    expected_group: int = 0,
+) -> int | None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        info = os.fstat(descriptor)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_owner
+                or info.st_gid != expected_group
+                or stat.S_IMODE(info.st_mode) != 0o755):
+            errors.append(f"{label}: installed directory metadata mismatch")
+        return descriptor
+    except OSError:
+        errors.append(f"{label}: installed directory inspection failed")
+        return None
+
+
+def _read_regular_file(
+    parent_fd: int,
+    name: str,
+    label: str,
+    errors: list[str],
+    expected_owner: int = 0,
+    expected_group: int = 0,
+) -> bytes | None:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    except OSError:
+        errors.append(f"{label}: installed file inspection failed")
+        return None
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != expected_owner or before.st_gid != expected_group
+                or stat.S_IMODE(before.st_mode) != 0o644):
+            errors.append(f"{label}: installed metadata mismatch")
+            return None
+        chunks: list[bytes] = []
+        length = 0
+        while True:
+            chunk = os.read(descriptor, min(65_536, MAX_PLUGIN_FILE_BYTES + 1 - length))
+            if not chunk:
+                break
+            length += len(chunk)
+            if length > MAX_PLUGIN_FILE_BYTES:
+                errors.append(f"{label}: installed file too large")
+                return None
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+                                  value.st_gid, value.st_nlink, value.st_size)
+        if identity(before) != identity(after) or length != after.st_size:
+            errors.append(f"{label}: installed file changed during inspection")
+            return None
+        return b"".join(chunks)
+    except OSError:
+        errors.append(f"{label}: installed file inspection failed")
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def collect_plugin_payload(
+    plugin_root: Path | None = None,
+    manifest_path: Path | None = None,
+    expected_owner: int = 0,
+    expected_group: int = 0,
+    allowed_ancestor_owners: frozenset[int] = frozenset({0}),
+) -> tuple[dict[str, Any] | None, dict[str, bytes], list[str]]:
+    root = PLUGIN_ROOT if plugin_root is None else plugin_root
+    manifest_file = PLUGIN_MANIFEST if manifest_path is None else manifest_path
+    errors: list[str] = []
+    files: dict[str, bytes] = {}
+    parent_fd = _open_absolute_directory(
+        manifest_file.parent,
+        "Hermes plugin payload root",
+        errors,
+        allowed_ancestor_owners,
+    )
+    if parent_fd is None:
+        return None, files, errors
+    plugin_fd: int | None = None
+    children: dict[str, int] = {}
+    manifest: dict[str, Any] | None = None
+    try:
+        try:
+            if set(os.listdir(parent_fd)) != {manifest_file.name, root.name}:
+                errors.append("installed Hermes plugin payload allowlist mismatch")
+        except OSError:
+            errors.append("installed Hermes plugin payload enumeration failed")
+        manifest_bytes = _read_regular_file(
+            parent_fd,
+            manifest_file.name,
+            manifest_file.name,
+            errors,
+            expected_owner,
+            expected_group,
+        )
+        if manifest_bytes is not None:
+            try:
+                candidate = json.loads(manifest_bytes.decode("ascii"))
+                manifest = candidate if isinstance(candidate, dict) else None
+            except (UnicodeError, json.JSONDecodeError):
+                pass
+            if manifest is None:
+                errors.append("could not read Hermes plugin manifest")
+        plugin_fd = _open_child_directory(
+            parent_fd,
+            root.name,
+            "Hermes plugin",
+            errors,
+            expected_owner,
+            expected_group,
+        )
+        if plugin_fd is None:
+            return manifest, files, errors
+        try:
+            if set(os.listdir(plugin_fd)) != PLUGIN_DIRECTORIES[""]:
+                errors.append("installed Hermes plugin file allowlist mismatch")
+        except OSError:
+            errors.append("installed Hermes plugin enumeration failed")
+        for directory in ("dashboard", "desktop"):
+            child = _open_child_directory(
+                plugin_fd,
+                directory,
+                directory,
+                errors,
+                expected_owner,
+                expected_group,
+            )
+            if child is not None:
+                children[directory] = child
+                try:
+                    if set(os.listdir(child)) != PLUGIN_DIRECTORIES[directory]:
+                        errors.append(f"{directory}: installed file allowlist mismatch")
+                except OSError:
+                    errors.append(f"{directory}: installed directory enumeration failed")
+        for relative in PLUGIN_FILES:
+            if "/" in relative:
+                directory, name = relative.split("/", 1)
+                descriptor = children.get(directory)
+                if descriptor is None:
+                    continue
+            else:
+                descriptor, name = plugin_fd, relative
+            data = _read_regular_file(
+                descriptor,
+                name,
+                relative,
+                errors,
+                expected_owner,
+                expected_group,
+            )
+            if data is not None:
+                files[relative] = data
+    finally:
+        for descriptor in children.values():
+            os.close(descriptor)
+        if plugin_fd is not None:
+            os.close(plugin_fd)
+        os.close(parent_fd)
+    return manifest, files, errors
+
+
 def collect_path_records() -> tuple[dict[str, dict[str, str]], list[str]]:
     records: dict[str, dict[str, str]] = {}
     errors: list[str] = []
@@ -285,19 +597,57 @@ def verify_service_identity() -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-version", required=True)
+    parser.add_argument("--expected-product-version", required=True)
+    parser.add_argument("--expected-deb-version", required=True)
+    parser.add_argument("--hermes-plugin-root", type=Path)
+    parser.add_argument("--hermes-plugin-uid", type=int)
+    parser.add_argument("--hermes-plugin-gid", type=int)
     parser.add_argument("--port", type=parse_port, default=8787)
     args = parser.parse_args()
+    copied_identity = (args.hermes_plugin_uid, args.hermes_plugin_gid)
+    if args.hermes_plugin_root is not None and (
+        None in copied_identity or any(value < 0 for value in copied_identity if value is not None)
+    ):
+        parser.error("--hermes-plugin-root requires non-negative --hermes-plugin-uid and --hermes-plugin-gid")
+    if args.hermes_plugin_root is None and copied_identity != (None, None):
+        parser.error("copied plugin UID/GID require --hermes-plugin-root")
 
     records, errors = collect_path_records()
     errors.extend(verify_path_records(records))
+    versions, version_errors = collect_version_identity()
+    errors.extend(version_errors)
+    if versions is not None:
+        errors.extend(verify_version_identity(
+            args.expected_product_version, args.expected_deb_version, *versions
+        ))
+    manifest, plugin_files, plugin_errors = collect_plugin_payload()
+    errors.extend(plugin_errors)
+    errors.extend(verify_plugin_manifest(manifest, plugin_files, args.expected_product_version))
+    if args.hermes_plugin_root is not None:
+        copied_manifest, copied_files, copied_errors = collect_plugin_payload(
+            args.hermes_plugin_root,
+            args.hermes_plugin_root.parent / "manifest.json",
+            args.hermes_plugin_uid,
+            args.hermes_plugin_gid,
+            frozenset({0, args.hermes_plugin_uid}),
+        )
+        errors.extend(copied_errors)
+        errors.extend(verify_plugin_manifest(
+            copied_manifest, copied_files, args.expected_product_version
+        ))
+        if copied_manifest != manifest or copied_files != plugin_files:
+            errors.append("HERMES_HOME plugin bytes differ from package payload")
     observations, access_errors = collect_access_observations()
     errors.extend(access_errors)
     errors.extend(verify_access_observations(observations))
     errors.extend(verify_service_identity())
     documents, api_errors = collect_api_documents(args.port)
     errors.extend(api_errors)
-    errors.extend(verify_api_documents(documents, args.expected_version))
+    errors.extend(verify_api_documents(documents, args.expected_product_version))
+    if isinstance(manifest, dict) and isinstance(manifest.get("generation"), str):
+        errors.extend(verify_loaded_generation(
+            documents.get("/api/status"), manifest["generation"]
+        ))
 
     report = {"status": "FAIL" if errors else "PASS", "errors": errors}
     print(json.dumps(report, sort_keys=True))

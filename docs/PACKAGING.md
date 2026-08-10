@@ -128,13 +128,14 @@ Local package baseline:
 cargo build --release --workspace --bins
 packaging/scripts/validate-packaging.sh
 
-SKYNET_EDR_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="skynet-edr-cli") | .version') \
+SKYNET_EDR_PRODUCT_VERSION=0.6.0-alpha.3 \
+SKYNET_EDR_DEB_VERSION=0.6.0~alpha.3 \
 NFPM_ARCH=amd64 \
-nfpm package --config packaging/nfpm.yaml --packager deb --target dist/skynet-edr.deb
+packaging/scripts/build-packages.sh
 
-SKYNET_EDR_VERSION=$SKYNET_EDR_VERSION \
+SKYNET_EDR_PRODUCT_VERSION=0.6.0-alpha.3 \
 NFPM_ARCH=amd64 \
-nfpm package --config packaging/nfpm.yaml --packager rpm --target dist/skynet-edr.rpm
+packaging/scripts/build-packages.sh
 ```
 
 Custom tarball:

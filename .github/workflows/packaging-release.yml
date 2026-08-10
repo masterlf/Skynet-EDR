@@ -3,9 +3,15 @@ name: Packaging release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Optional package version override; defaults to Cargo package version"
-        required: false
+      product_version:
+        description: "Canonical product SemVer"
+        required: true
+        default: "0.6.0-alpha.3"
+        type: string
+      deb_version:
+        description: "Native Debian package version"
+        required: true
+        default: "0.6.0~alpha.3"
         type: string
   push:
     tags:
@@ -26,9 +32,33 @@ jobs:
       NFPM_RPM_ARCH: x86_64
       NFPM_ARCHLINUX_ARCH: x86_64
       NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
-      SKYNET_EDR_VERSION: ${{ inputs.version }}
+      SKYNET_EDR_PRODUCT_VERSION: ${{ inputs.product_version || '0.6.0-alpha.3' }}
+      SKYNET_EDR_DEB_VERSION: ${{ inputs.deb_version || '0.6.0~alpha.3' }}
+      HERMES_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/skynet-edr-ms-playwright
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out the pinned official Hermes gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: f5be9236e00ddf2f2a412697f267078fc4ee068e
+          path: .ci/hermes-agent
+          persist-credentials: false
+
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: false
+
+      - name: Prepare frozen Hermes and browser dependencies before artifact build
+        run: |
+          uv sync --frozen --project "$GITHUB_WORKSPACE/.ci/hermes-agent"
+          npm ci --ignore-scripts --no-audit --no-fund --prefix packaging/browser-gate
+          npm exec --prefix packaging/browser-gate -- playwright install --with-deps chromium
+          test -x "$GITHUB_WORKSPACE/.ci/hermes-agent/.venv/bin/hermes"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -54,34 +84,23 @@ jobs:
 
       - name: Validate packaging metadata
         run: |
-          if [[ -n "${SKYNET_EDR_VERSION}" ]]; then
-            export SKYNET_EDR_EXPECTED_VERSION="${SKYNET_EDR_VERSION}"
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            export SKYNET_EDR_EXPECTED_VERSION="${GITHUB_REF_NAME#v}"
+          export SKYNET_EDR_EXPECTED_PRODUCT_VERSION="${SKYNET_EDR_PRODUCT_VERSION}"
+          export SKYNET_EDR_EXPECTED_DEB_VERSION="${SKYNET_EDR_DEB_VERSION}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "${SKYNET_EDR_PRODUCT_VERSION}" ]]; then
+            echo "tag/product version mismatch" >&2
+            exit 1
           fi
-          if [[ -n "${SKYNET_EDR_EXPECTED_VERSION:-}" ]]; then
-            sudo -n env "HOME=/root" "PATH=$PATH" \
-              "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
-              "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
-              "SKYNET_EDR_EXPECTED_VERSION=$SKYNET_EDR_EXPECTED_VERSION" \
-              packaging/scripts/validate-packaging.sh
-          else
-            sudo -n env "HOME=/root" "PATH=$PATH" \
-              "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
-              "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
-              packaging/scripts/validate-packaging.sh
-          fi
+          sudo -n env "HOME=/root" "PATH=$PATH" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "SKYNET_EDR_EXPECTED_PRODUCT_VERSION=$SKYNET_EDR_EXPECTED_PRODUCT_VERSION" \
+            "SKYNET_EDR_EXPECTED_DEB_VERSION=$SKYNET_EDR_EXPECTED_DEB_VERSION" \
+            packaging/scripts/validate-packaging.sh
 
-      - name: Validate package version override
+      - name: Validate exact alpha.3 identity planes
         run: |
-          if [ -n "${SKYNET_EDR_VERSION}" ]; then
-            case "${SKYNET_EDR_VERSION}" in
-              *[!0-9A-Za-z.+~-]*|.*|-*|*..*)
-                echo "invalid SKYNET_EDR_VERSION: ${SKYNET_EDR_VERSION}" >&2
-                exit 1
-                ;;
-            esac
-          fi
+          test "${SKYNET_EDR_PRODUCT_VERSION}" = "0.6.0-alpha.3"
+          test "${SKYNET_EDR_DEB_VERSION}" = "0.6.0~alpha.3"
 
       - name: Prepare clean dist directory
         run: rm -rf dist
@@ -103,12 +122,28 @@ jobs:
           SKYNET_EDR_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           SKYNET_EDR_DISPOSABLE_SMOKE: "1"
         run: |
+          (cd dist && sha256sum -c checksums.txt)
           deb=$(find dist -maxdepth 1 -type f -name 'skynet-edr_*.deb' -print -quit)
           test -n "$deb"
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
             SKYNET_EDR_RUNNER_ENVIRONMENT="$SKYNET_EDR_RUNNER_ENVIRONMENT" \
             SKYNET_EDR_DISPOSABLE_SMOKE="$SKYNET_EDR_DISPOSABLE_SMOKE" \
             packaging/scripts/vm-smoke.sh --deb "$deb" --repo "$GITHUB_WORKSPACE"
+          (cd dist && sha256sum -c checksums.txt)
+
+      - name: Exact artifact Hermes 0.20.0 plugin activation and browser compatibility gate
+        env:
+          SKYNET_EDR_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          (cd dist && sha256sum -c checksums.txt)
+          deb=$(find dist -maxdepth 1 -type f -name 'skynet-edr_*.deb' -print -quit)
+          test -n "$deb"
+          packaging/scripts/exact-artifact-browser-gate.sh \
+            --deb "$deb" --hermes-repo "$GITHUB_WORKSPACE/.ci/hermes-agent"
+          (cd dist && sha256sum -c checksums.txt)
+
+      - name: Verify exact gated bytes before upload or publication
+        run: (cd dist && sha256sum -c checksums.txt)
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -129,6 +164,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          (cd dist && sha256sum -c checksums.txt)
           NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
           if [ ! -f "$NOTES_FILE" ]; then
             echo "missing reviewed release notes: $NOTES_FILE" >&2

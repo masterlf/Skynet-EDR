@@ -384,7 +384,7 @@ test('status validator accepts bounded runtime health and rejects hostile attrib
   harness.render();
   await harness.flushEffects();
   const healthyText = textOf(harness.render());
-  assert.match(healthyText, /Passive projection online/);
+  assert.match(healthyText, /Backend available/);
   assert.match(healthyText, /Telemetry healthy/);
   assert.match(healthyText, /Listener live/);
   assert.match(healthyText, /Required reported roles gateway: fresh/);
@@ -415,11 +415,11 @@ test('released healthy status with a historical invalid event stays visibly onli
   assert.match(textOf(tree), /EDR 0\.4\.1/);
   assert.equal(findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator').props.tone, 'success');
   assert.equal(findNode(tree, (node) => textOf(node) === 'Passive mode', 'passive mode indicator').props.tone, 'warning');
-  assert.equal(findNode(tree, (node) => textOf(node) === 'Passive projection online', 'online backend indicator').props.tone, 'success');
+  assert.equal(findNode(tree, (node) => textOf(node) === 'Backend available', 'online backend indicator').props.tone, 'success');
   assert.match(textOf(tree), /Telemetry healthy/);
 });
 
-test('alpha.1 alert delivery regression stays online with degraded telemetry', async () => {
+test('alpha.3 alert delivery regression stays online with degraded telemetry', async () => {
   const harness = createHarness({
     '/api/plugins/skynet-edr/status': alertDeliveryStatus,
     '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
@@ -428,8 +428,9 @@ test('alpha.1 alert delivery regression stays online with degraded telemetry', a
   await harness.flushEffects();
   const tree = harness.render();
 
+  assert.match(textOf(tree), /EDR 0\.6\.0-alpha\.3/);
   assert.equal(findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator').props.tone, 'success');
-  assert.equal(findNode(tree, (node) => textOf(node) === 'Passive projection online', 'online backend indicator').props.tone, 'success');
+  assert.equal(findNode(tree, (node) => textOf(node) === 'Backend available', 'online backend indicator').props.tone, 'success');
   assert.match(textOf(tree), /Telemetry degraded/);
   assert.doesNotMatch(textOf(tree), /Engine Offline|Backend unavailable/);
 });
@@ -564,7 +565,7 @@ test('status validator rejects contradictory healthy ingestion objects', async (
   });
   degradedHarness.render();
   await degradedHarness.flushEffects();
-  assert.match(textOf(degradedHarness.render()), /Passive projection online/);
+  assert.match(textOf(degradedHarness.render()), /Backend available/);
 });
 
 test('disabled ingestion schema is exact and visibly separate from backend availability', async () => {
@@ -580,7 +581,7 @@ test('disabled ingestion schema is exact and visibly separate from backend avail
   harness.render();
   await harness.flushEffects();
   const text = textOf(harness.render());
-  assert.match(text, /Passive projection online/);
+  assert.match(text, /Backend available/);
   assert.match(text, /Telemetry disabled/);
   assert.match(text, /Listener stopped/);
 

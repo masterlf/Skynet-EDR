@@ -54,8 +54,12 @@ for file in $required_files; do
   fi
 done
 
-if [ "${SKYNET_EDR_EXPECTED_VERSION+x}" = x ]; then
-  python3 packaging/scripts/check-release-version.py --expected "$SKYNET_EDR_EXPECTED_VERSION"
+if [ "${SKYNET_EDR_EXPECTED_PRODUCT_VERSION+x}" = x ] || [ "${SKYNET_EDR_EXPECTED_DEB_VERSION+x}" = x ]; then
+  : "${SKYNET_EDR_EXPECTED_PRODUCT_VERSION:?both expected version planes are required}"
+  : "${SKYNET_EDR_EXPECTED_DEB_VERSION:?both expected version planes are required}"
+  python3 packaging/scripts/check-release-version.py \
+    --expected-product "$SKYNET_EDR_EXPECTED_PRODUCT_VERSION" \
+    --expected-deb "$SKYNET_EDR_EXPECTED_DEB_VERSION"
 else
   python3 packaging/scripts/check-release-version.py
 fi
@@ -218,7 +222,7 @@ fi
 grep -q 'apt-get install' packaging/scripts/vm-smoke.sh
 grep -q 'cmp -s .*deploy-verify.py.*/usr/libexec/skynet-edr/deploy-verify' packaging/scripts/vm-smoke.sh
 grep -q 'dpkg -V skynet-edr' packaging/scripts/vm-smoke.sh
-grep -q '^/usr/libexec/skynet-edr/deploy-verify \\' packaging/scripts/vm-smoke.sh
+grep -Eq '^(if ! )?/usr/libexec/skynet-edr/deploy-verify \\' packaging/scripts/vm-smoke.sh
 grep -q './usr/libexec/skynet-edr/deploy-verify' packaging/scripts/inspect-artifacts.sh
 if grep -q -- '--skip-purge' packaging/scripts/vm-smoke.sh; then
   echo "authoritative deployment gate must always purge its disposable guest" >&2

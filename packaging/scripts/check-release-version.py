@@ -341,27 +341,37 @@ def workspace_manifests(root: Path, cargo: dict) -> list[tuple[Path, dict]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expected", help="version required by the release tag")
+    parser.add_argument("--expected-product", help="canonical product SemVer required by the release tag")
+    parser.add_argument("--expected-deb", help="exact native Debian package version")
     args = parser.parse_args()
 
     root_manifest = resolved_manifest_path(ROOT, ROOT / "Cargo.toml", "workspace root")
     cargo = tomllib.loads(root_manifest.read_text(encoding="utf-8"))
     workspace_version = cargo["workspace"]["package"]["version"]
-    expected = workspace_version if args.expected is None else args.expected
+    expected = workspace_version if args.expected_product is None else args.expected_product
     if not is_canonical_release_version(expected):
         raise SystemExit(f"invalid release version: {expected!r}")
+    deb_default = require_unique_yaml_scalar(
+        "packaging/nfpm.yaml",
+        r"\$\{SKYNET_EDR_DEB_VERSION:-([^}]+)\}",
+        "nFPM DEB default version",
+    )
+    expected_deb = deb_default if args.expected_deb is None else args.expected_deb
+    if type(expected_deb) is not str or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+~[0-9A-Za-z.-]+", expected_deb) is None:
+        raise SystemExit(f"invalid Debian package version: {expected_deb!r}")
 
     observed = {
         "Cargo.toml workspace": workspace_version,
-        "nFPM default": require_unique_yaml_scalar(
-            "packaging/nfpm.yaml",
-            r"\$\{SKYNET_EDR_VERSION:-([^}]+)\}",
-            "nFPM default version",
-        ),
+
         "Hermes plugin Python": python_string_assignment(
             "integrations/hermes/skynet-edr/__init__.py",
             "PLUGIN_VERSION",
             "Hermes plugin version",
+        ),
+        "Hermes enrollment payload": python_string_assignment(
+            "packaging/scripts/skynet-edr-hermes-enroll.py",
+            "PAYLOAD_VERSION",
+            "Hermes enrollment payload version",
         ),
         "Hermes plugin manifest": require_unique_yaml_scalar(
             "integrations/hermes/skynet-edr/plugin.yaml",
@@ -466,6 +476,10 @@ def main() -> None:
             f"{label}={version}" for label, version in sorted(mismatches.items())
         )
         raise SystemExit(f"release version mismatch; expected {expected}: {details}")
+    if deb_default != expected_deb:
+        raise SystemExit(
+            f"Debian package version mismatch; expected {expected_deb}: nFPM DEB default={deb_default}"
+        )
 
     release_note = ROOT / "docs" / "releases" / f"v{expected}.md"
     if not release_note.is_file():
@@ -474,7 +488,14 @@ def main() -> None:
     required_docs = {
         "README.md": (f"docs/releases/v{expected}.md",),
         "docs/ROADMAP.md": (f"Current milestone: v{expected}",),
-        "docs/INSTALL.md": (f"skynet-edr_{expected}_amd64.deb",),
+        "docs/INSTALL.md": (
+            f"skynet-edr_{expected}_amd64.deb",
+            f"DEB and RPM report `{expected_deb}`",
+            f"Arch reports `{expected.replace('-', '.', 1)}-1`",
+        ),
+        "docs/HERMES_ENROLLMENT.md": (
+            f"Skynet-EDR plugin `{expected}`",
+        ),
         "CHANGELOG.md": (f"## {expected} -",),
     }
     for path, markers in required_docs.items():
@@ -496,7 +517,7 @@ def main() -> None:
         if any(re.findall(pattern, document, flags=re.MULTILINE) != [expected] for pattern in patterns):
             raise SystemExit(f"{path} does not reference current release {expected}")
 
-    print(f"release version consistency passed: {expected}")
+    print(f"release version consistency passed: product={expected} deb={expected_deb}")
 
 
 if __name__ == "__main__":
