@@ -10,6 +10,7 @@ RUNNER = ROOT / "packaging/scripts/threat-validation.py"
 MANIFEST = ROOT / "crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.json"
 MATRIX = ROOT / "docs/coverage/v0.6.0-beta.1.json"
 PUBLIC_MATRIX = ROOT / "docs/PROTECTION_MATRIX_v0.6.0-beta.1.md"
+NFPM = ROOT / "packaging/nfpm.yaml"
 
 
 class ThreatValidationTests(unittest.TestCase):
@@ -67,6 +68,54 @@ class ThreatValidationTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0, result.stdout)
 
+    def test_custom_manifest_cannot_claim_executed_pass(self):
+        source = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        malicious = next(case for case in source["cases"] if case["case_id"] == "malicious_mcp")
+        malicious.update({
+            "category": "benign",
+            "events": [],
+            "expected_incident_count": 0,
+            "expected_match": False,
+            "expected_outcome": "not_detected",
+            "producer_calls": [],
+        })
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "mutated.json"
+            output = Path(temp) / "evidence.json"
+            manifest.write_text(json.dumps(source), encoding="utf-8")
+
+            result = self.run_runner("--manifest", manifest, "--output", output)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("custom manifest", result.stderr.lower())
+            self.assertFalse(output.exists())
+
+    def test_manifest_rejects_incoherent_expected_outcome_tuples(self):
+        source = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        mutations = [
+            ("malicious_mcp", {"expected_outcome": "not_detected"}),
+            ("malicious_mcp", {"expected_match": 1}),
+            ("malicious_mcp", {"expected_incident_count": True}),
+            ("malicious_mcp", {"expected_severity": None}),
+            ("near_miss_mcp", {"expected_match": True}),
+            ("near_miss_mcp", {"expected_match": []}),
+            ("near_miss_mcp", {"expected_severity": "high"}),
+            ("hostile_malformed_json", {"expected_incident_count": 1}),
+            ("dark_edr_config_001", {"expected_outcome": "not_detected"}),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            for index, (case_id, changes) in enumerate(mutations):
+                manifest = json.loads(json.dumps(source))
+                case = next(item for item in manifest["cases"] if item["case_id"] == case_id)
+                case.update(changes)
+                path = Path(temp) / f"incoherent-{index}.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                result = self.run_runner("--validate-only", "--manifest", path)
+
+                self.assertNotEqual(result.returncode, 0, case_id)
+                self.assertIn("contract error", result.stderr.lower())
+
     def test_output_symlink_is_rejected_without_touching_target(self):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "protected"
@@ -123,6 +172,15 @@ class ThreatValidationTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("public protection matrix drift", result.stderr.lower())
+
+    def test_package_description_does_not_claim_unsupported_runtime_protection(self):
+        nfpm = NFPM.read_text(encoding="utf-8")
+        description = nfpm.split("description: |", 1)[1].split("\nvendor:", 1)[0].lower()
+
+        self.assertNotIn("protects", description)
+        for unsupported_runtime in ("openclaw", "codex", "claude code", "similar local agents"):
+            with self.subTest(runtime=unsupported_runtime):
+                self.assertNotIn(unsupported_runtime, description)
 
 
 if __name__ == "__main__":

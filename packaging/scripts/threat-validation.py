@@ -132,6 +132,37 @@ def validate_manifest(path: Path):
             raise ContractError(f"{scenario_id}: skipped execution must expect skipped")
         if case["category"] == "hostile-malformed" and "hostile_payload" not in case:
             raise ContractError(f"{scenario_id}: hostile scenario lacks payload")
+        if (
+            type(case["expected_match"]) is not bool
+            or type(case["expected_incident_count"]) is not int
+        ):
+            raise ContractError(f"{scenario_id}: incoherent expectation types")
+        expected_tuple = (
+            case["execution"], case["expected_outcome"],
+            case["expected_match"], case["expected_incident_count"],
+        )
+        coherent_tuples = {
+            "malicious": {("replay", "detected", True, 1)},
+            "benign": {
+                ("replay", "not_detected", False, 0),
+                ("skipped", "skipped", False, 0),
+            },
+            "hostile-malformed": {("hostile-parse", "rejected", False, 0)},
+        }
+        if expected_tuple not in coherent_tuples[case["category"]]:
+            raise ContractError(f"{scenario_id}: incoherent category/expectation tuple")
+        expected_severity = case["expected_severity"]
+        if case["category"] == "malicious":
+            rule_id = case["rule_id"]
+            if rule_id not in live_rules or expected_severity != live_rules[rule_id]:
+                raise ContractError(f"{scenario_id}: incoherent malicious rule/severity")
+        elif expected_severity is not None:
+            raise ContractError(f"{scenario_id}: incoherent non-malicious severity")
+        if case["execution"] == "replay" and (
+            type(case["events"]) is not list or not case["events"]
+            or type(case["producer_calls"]) is not list or not case["producer_calls"]
+        ):
+            raise ContractError(f"{scenario_id}: replay scenario lacks executable evidence")
     return manifest, ids
 
 
@@ -281,6 +312,8 @@ def main():
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     try:
+        if not args.validate_only and args.manifest.absolute() != DEFAULT_MANIFEST.absolute():
+            raise ContractError("custom manifest requires --validate-only")
         manifest, scenario_ids = validate_manifest(args.manifest)
         matrix = validate_matrix(args.matrix, manifest, scenario_ids)
         validate_public_matrix(args.public_matrix, matrix)
