@@ -11,6 +11,8 @@ const source = readFileSync(pluginUrl, 'utf8');
 const alertDeliveryStatus = JSON.parse(readFileSync(alertDeliveryFixtureUrl, 'utf8'));
 const producerErrorCategoryContract = alertDeliveryStatus.ingestion.error_category_contract;
 const producerErrorCategories = producerErrorCategoryContract.categories;
+const v3Generation = 'a'.repeat(64);
+const v3Nonce = 'b'.repeat(64);
 
 function canonicalRisk(id = 'risk-1') {
   return {
@@ -86,12 +88,14 @@ function releasedStatusWithHistoricalError(category = 'invalid_event') {
       required_reported_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
       sources: [{
         source_id: 'uid:1000:gateway:gate-a1', authenticated_uid: 1000,
-        runtime_role: 'gateway', instance_id: 'gate-a1', producer_reported_at_unix_ms: 1,
+        runtime_role: 'gateway', protocol_version: 2, instance_id: 'gate-a1',
+        plugin_generation: null, runtime_instance_nonce: null, producer_reported_at_unix_ms: 1,
         producer_report_age_ms: 0, transport_state: 'available', backlog_bytes: 0,
         last_error_category: null, last_error_at_unix_ms: null, last_error_age_ms: null,
       }, {
         source_id: 'uid:1000', authenticated_uid: 1000,
-        runtime_role: 'legacy', instance_id: null, producer_reported_at_unix_ms: null,
+        runtime_role: 'legacy', protocol_version: 1, instance_id: null,
+        plugin_generation: null, runtime_instance_nonce: null, producer_reported_at_unix_ms: null,
         producer_report_age_ms: null, transport_state: 'unknown', backlog_bytes: null,
         last_error_category: category, last_error_at_unix_ms: 1, last_error_age_ms: 60001,
       }],
@@ -367,7 +371,8 @@ test('status validator accepts bounded runtime health and rejects hostile attrib
     required_reported_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
     sources: [{
       source_id: 'uid:1000:gateway:gate-a1', authenticated_uid: 1000,
-      runtime_role: 'gateway', instance_id: 'gate-a1', producer_reported_at_unix_ms: 1,
+      runtime_role: 'gateway', protocol_version: 2, instance_id: 'gate-a1',
+      plugin_generation: null, runtime_instance_nonce: null, producer_reported_at_unix_ms: 1,
       producer_report_age_ms: 0, transport_state: 'available', backlog_bytes: 0,
       last_error_category: null, last_error_at_unix_ms: null, last_error_age_ms: null,
     }],
@@ -429,6 +434,51 @@ test('alpha.1 alert delivery regression stays online with degraded telemetry', a
   assert.doesNotMatch(textOf(tree), /Engine Offline|Backend unavailable/);
 });
 
+test('status validator enforces version-appropriate source identities', async () => {
+  const rawLegacy = releasedStatusWithHistoricalError();
+  rawLegacy.ingestion.sources[1].protocol_version = 0;
+  for (const valid of [alertDeliveryStatus, releasedStatusWithHistoricalError(), rawLegacy]) {
+    const harness = createHarness({
+      '/api/plugins/skynet-edr/status': valid,
+      '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    });
+    harness.render();
+    await harness.flushEffects();
+    assert.match(textOf(harness.render()), /Engine Online/);
+  }
+
+  const invalidMutations = [
+    (source) => { source.protocol_version = 4; },
+    (source) => { source.instance_id = 'v2-in-v3'; },
+    (source) => { source.plugin_generation = 'A'.repeat(64); },
+    (source) => { source.runtime_instance_nonce = v3Generation; },
+    (source) => { source.runtime_instance_nonce = null; },
+    (source) => { source.source_id = `uid:1000:gateway:${v3Nonce}:${v3Generation}`; },
+  ];
+  for (const mutate of invalidMutations) {
+    const invalid = structuredClone(alertDeliveryStatus);
+    mutate(invalid.ingestion.sources[0]);
+    const harness = createHarness({
+      '/api/plugins/skynet-edr/status': invalid,
+      '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+    });
+    harness.render();
+    await harness.flushEffects();
+    assert.match(textOf(harness.render()), /Projection contract incompatible/);
+    assert.doesNotMatch(textOf(harness.render()), /Engine Offline/);
+  }
+
+  const duplicate = structuredClone(alertDeliveryStatus);
+  duplicate.ingestion.sources.push(structuredClone(duplicate.ingestion.sources[0]));
+  const duplicateHarness = createHarness({
+    '/api/plugins/skynet-edr/status': duplicate,
+    '/api/plugins/skynet-edr/risks?limit=50&offset=0': canonicalPage(),
+  });
+  duplicateHarness.render();
+  await duplicateHarness.flushEffects();
+  assert.match(textOf(duplicateHarness.render()), /Projection contract incompatible/);
+});
+
 test('status validator accepts only categories from the producer-owned contract', async () => {
   const emittedCategories = producerErrorCategories.map(({ name }) => name);
   for (const category of emittedCategories) {
@@ -474,7 +524,8 @@ test('status validator rejects contradictory healthy ingestion objects', async (
     required_reported_roles: [{ runtime_role: 'gateway', state: 'fresh' }],
     sources: [{
       source_id: 'uid:1000:gateway:gate-a1', authenticated_uid: 1000,
-      runtime_role: 'gateway', instance_id: 'gate-a1', producer_reported_at_unix_ms: 1,
+      runtime_role: 'gateway', protocol_version: 2, instance_id: 'gate-a1',
+      plugin_generation: null, runtime_instance_nonce: null, producer_reported_at_unix_ms: 1,
       producer_report_age_ms: 0, transport_state: 'available', backlog_bytes: 0,
       last_error_category: null, last_error_at_unix_ms: null, last_error_age_ms: null,
     }],

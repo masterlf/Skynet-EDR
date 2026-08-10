@@ -26,6 +26,8 @@ const ALERT_DELIVERY_STATUS: &str = include_str!("fixtures/status_alert_delivery
 
 #[test]
 fn producer_error_category_contract_matches_packaged_status_fixture() {
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let fixture: serde_json::Value =
         serde_json::from_str(ALERT_DELIVERY_STATUS).expect("status fixture is valid JSON");
     assert_eq!(
@@ -37,6 +39,43 @@ fn producer_error_category_contract_matches_packaged_status_fixture() {
         fixture["ingestion"]["sources"][0]["last_error_category"],
         "alert_delivery"
     );
+    let source = &fixture["ingestion"]["sources"][0];
+    assert_eq!(source["protocol_version"], 3);
+    assert_eq!(source["s3_eligible"], true);
+    assert!(source["instance_id"].is_null());
+    assert_eq!(source["plugin_generation"], GENERATION);
+    assert_eq!(source["runtime_instance_nonce"], NONCE);
+    assert_eq!(
+        source["source_id"],
+        format!("uid:1000:gateway:{GENERATION}:{NONCE}")
+    );
+
+    let db_path = temp_path("packaged-v3-status-shape.sqlite");
+    let config = config(temp_path("packaged-v3-status-shape.sock"), vec![1_000]);
+    let health = IngestionHealth::default();
+    health.record_listener_started();
+    let report = v3_health("gateway", GENERATION, NONCE);
+    let ack = exchange_with_health(
+        1_000,
+        &config,
+        &db_path,
+        &frame(&serde_json::to_vec(&report).unwrap()),
+        &health,
+    );
+    assert!(ack.contains("health_recorded"), "{ack}");
+    let serialized = health.status_json(Duration::from_secs(30));
+    let fixture_keys = source
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect::<std::collections::BTreeSet<_>>();
+    let serialized_keys = serialized["sources"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(fixture_keys, serialized_keys);
+    let _ = fs::remove_file(db_path);
 }
 
 fn temp_path(name: &str) -> PathBuf {

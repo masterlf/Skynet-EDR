@@ -349,10 +349,26 @@
     data.sources.forEach(function (source) {
       if (!isPlainObject(source) || !Number.isInteger(source.authenticated_uid) || source.authenticated_uid < 0 || source.authenticated_uid > 4294967295) failContract();
       if (typeof source.source_id !== "string" || source.source_id.length > 160 || !/^[a-z0-9:-]+$/.test(source.source_id) || sourceIds.has(source.source_id)) failContract();
-      if (!["gateway", "dashboard", "worker", "unknown", "legacy"].includes(source.runtime_role)) failContract();
-      if (source.runtime_role === "legacy") {
-        if (source.instance_id !== null) failContract();
-      } else if (typeof source.instance_id !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(source.instance_id)) failContract();
+      const attributedRole = ["gateway", "dashboard", "worker", "unknown"].includes(source.runtime_role);
+      let expectedSourceId;
+      if (source.protocol_version === 0 || source.protocol_version === 1) {
+        if (source.runtime_role !== "legacy" || source.instance_id !== null
+            || source.plugin_generation !== null || source.runtime_instance_nonce !== null) failContract();
+        expectedSourceId = "uid:" + source.authenticated_uid;
+      } else if (source.protocol_version === 2) {
+        if (!attributedRole || typeof source.instance_id !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(source.instance_id)
+            || source.plugin_generation !== null || source.runtime_instance_nonce !== null) failContract();
+        expectedSourceId = "uid:" + source.authenticated_uid + ":" + source.runtime_role + ":" + source.instance_id;
+      } else if (source.protocol_version === 3) {
+        if (!attributedRole || source.instance_id !== null
+            || typeof source.plugin_generation !== "string" || !/^[0-9a-f]{64}$/.test(source.plugin_generation)
+            || typeof source.runtime_instance_nonce !== "string" || !/^[0-9a-f]{64}$/.test(source.runtime_instance_nonce)
+            || source.plugin_generation === source.runtime_instance_nonce) failContract();
+        expectedSourceId = "uid:" + source.authenticated_uid + ":" + source.runtime_role + ":" + source.plugin_generation + ":" + source.runtime_instance_nonce;
+      } else {
+        failContract();
+      }
+      if (source.source_id !== expectedSourceId) failContract();
       if (source.producer_reported_at_unix_ms !== null && !boundedSafeInteger(source.producer_reported_at_unix_ms)) failContract();
       if (source.producer_report_age_ms !== null && !boundedSafeInteger(source.producer_report_age_ms)) failContract();
       if ((source.producer_reported_at_unix_ms === null) !== (source.producer_report_age_ms === null)) failContract();
