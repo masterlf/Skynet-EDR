@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
+import os
 import stat
 import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -134,6 +138,132 @@ class DeploymentVerifierTests(unittest.TestCase):
         }
         errors = self.verifier.verify_api_documents(documents, "0.6.0-alpha.1")
         self.assertGreaterEqual(len(errors), 6)
+
+    def test_product_and_deb_versions_are_explicit_exact_identity_planes(self) -> None:
+        self.assertEqual(
+            self.verifier.verify_version_identity(
+                "0.6.0-alpha.3",
+                "0.6.0~alpha.3",
+                "0.6.0~alpha.3",
+                "skynet-edr 0.6.0-alpha.3",
+                "skynet-edr-daemon 0.6.0-alpha.3",
+            ),
+            [],
+        )
+        for observed in (
+            "0.6.0-alpha.3",
+            "1:0.6.0~alpha.3",
+            "0.6.0~alpha.3-1",
+            "0.6.0~alpha.30",
+        ):
+            with self.subTest(observed=observed):
+                errors = self.verifier.verify_version_identity(
+                    "0.6.0-alpha.3",
+                    "0.6.0~alpha.3",
+                    observed,
+                    "skynet-edr 0.6.0-alpha.3",
+                    "skynet-edr-daemon 0.6.0-alpha.3",
+                )
+                self.assertIn("dpkg package version mismatch", errors)
+
+    def test_package_manifest_binds_exact_payload_allowlist_hashes_and_sri(self) -> None:
+        files = {
+            relative: f"fixture:{relative}\n".encode()
+            for relative in self.verifier.PLUGIN_FILES
+        }
+        files["dashboard/plugin.js"] = b"(() => {})();\n"
+        dashboard = {
+            "version": "0.6.0-alpha.3",
+            "integrity": "sha384-" + base64.b64encode(
+                hashlib.sha384(files["dashboard/plugin.js"]).digest()
+            ).decode("ascii"),
+        }
+        files["dashboard/manifest.json"] = json.dumps(dashboard).encode()
+        records = {
+            relative: {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+                "mode": 0o644,
+                "owner": 0,
+            }
+            for relative, data in files.items()
+        }
+        manifest = {
+            "schema": 1,
+            "payload_version": "0.6.0-alpha.3",
+            "generation": hashlib.sha256(
+                json.dumps(records, sort_keys=True, separators=(",", ":")).encode("ascii")
+            ).hexdigest(),
+            "files": records,
+        }
+        self.assertEqual(
+            self.verifier.verify_plugin_manifest(manifest, files, "0.6.0-alpha.3"),
+            [],
+        )
+        files["desktop/plugin.js"] += b"tamper"
+        self.assertIn(
+            "desktop/plugin.js: sha256 mismatch",
+            self.verifier.verify_plugin_manifest(manifest, files, "0.6.0-alpha.3"),
+        )
+
+    def test_descriptor_relative_payload_walk_rejects_extra_symlink_hardlink_writable_and_oversize(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary) / "hermes-plugin"
+            root = parent / "skynet-edr"
+            for relative in self.verifier.PLUGIN_FILES:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture")
+                path.chmod(0o644)
+            for directory in (parent, root, root / "dashboard", root / "desktop"):
+                directory.chmod(0o755)
+            manifest = parent / "manifest.json"
+            manifest.write_text("{}", encoding="ascii")
+            manifest.chmod(0o644)
+            with mock.patch.object(self.verifier, "PLUGIN_ROOT", root), mock.patch.object(
+                self.verifier, "PLUGIN_MANIFEST", manifest
+            ):
+                def collect():
+                    return self.verifier.collect_plugin_payload(
+                        expected_owner=os.getuid(),
+                        expected_group=os.getgid(),
+                        allowed_ancestor_owners=frozenset({0, os.getuid()}),
+                    )
+
+                _, files, errors = collect()
+                self.assertEqual(errors, [])
+                self.assertEqual(set(files), set(self.verifier.PLUGIN_FILES))
+
+                extra = root / "attacker"
+                extra.write_bytes(b"extra")
+                _, _, errors = collect()
+                self.assertIn("installed Hermes plugin file allowlist mismatch", errors)
+                extra.unlink()
+
+                target = root / "README.md"
+                target.unlink()
+                target.symlink_to(root / "plugin.yaml")
+                _, _, errors = collect()
+                self.assertTrue(any("README.md" in error for error in errors))
+                target.unlink()
+                target.write_bytes(b"fixture")
+                target.chmod(0o644)
+
+                hardlink = root / "desktop/plugin.js"
+                hardlink.unlink()
+                os.link(target, hardlink)
+                _, _, errors = collect()
+                self.assertTrue(any("desktop/plugin.js" in error for error in errors))
+                hardlink.unlink()
+                hardlink.write_bytes(b"fixture")
+                hardlink.chmod(0o666)
+                _, _, errors = collect()
+                self.assertTrue(any("desktop/plugin.js" in error for error in errors))
+                hardlink.chmod(0o644)
+
+                hardlink.write_bytes(b"x" * (self.verifier.MAX_PLUGIN_FILE_BYTES + 1))
+                _, _, errors = collect()
+                self.assertIn("desktop/plugin.js: installed file too large", errors)
 
     def test_port_accepts_only_strict_bounded_decimal(self) -> None:
         self.assertEqual(self.verifier.parse_port("8787"), 8787)

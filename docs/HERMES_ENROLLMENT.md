@@ -4,7 +4,7 @@
 
 The repository ships a bounded enrollment transaction, deterministic fixture contract, and a package-owned privileged adapter at `/usr/libexec/skynet-edr/hermes-enrollment-adapter.py`. Release promotion and any autonomous `ENROLLED` support claim require the exact release SHA to pass the mandatory disposable Ubuntu 24.04/Hermes 0.19.0 clean-host gate documented below; deterministic fixtures alone are insufficient.
 
-The only compatibility cell exercised by the transaction tests is Ubuntu 24.04, `x86_64`/`amd64`, systemd, Hermes `0.19.0`, Skynet-EDR plugin `0.6.0-alpha.1`. Every other distro, architecture, init system, Hermes version, dashboard-only runtime, and global-role setup is unsupported or unproven and fails closed.
+The only compatibility cell exercised by the transaction tests is Ubuntu 24.04, `x86_64`/`amd64`, systemd, Hermes `0.19.0`, Skynet-EDR plugin `0.6.0-alpha.3`. Every other distro, architecture, init system, Hermes version, dashboard-only runtime, and global-role setup is unsupported or unproven and fails closed. The separate Hermes `0.20.0` dashboard gate proves read-only plugin activation and browser compatibility only; it does not authorize autonomous enrollment or replace this transaction gate.
 
 ## Command
 

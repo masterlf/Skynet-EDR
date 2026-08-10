@@ -874,7 +874,7 @@
     if ((status.error && status.data === null) || (page.error && page.data === null)) return "Backend unavailable";
     if (status.error || page.error) return "Stale validated data";
     if (!status.data || !page.data) return "Backend not verified";
-    return "Passive projection online";
+    return "Backend available";
   }
 
   function IngestionHealthPanel(props) {

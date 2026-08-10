@@ -54,6 +54,28 @@ if [ ! -d "$REPO" ]; then
   exit 1
 fi
 
+# GitHub's disposable Ubuntu image currently exposes /usr/share as root-owned
+# mode 0777. Do not weaken the production verifier to accommodate that unsafe
+# CI baseline. This harness is already restricted to an attested disposable
+# github-hosted runner, so normalize only that exact known state and reject all
+# other ownership, mode, or symlink drift.
+if [ -L /usr/share ]; then
+  echo "refusing symlinked /usr/share on disposable runner" >&2
+  exit 1
+fi
+usr_share_metadata=$(stat -c '%u:%g %a' /usr/share)
+case "$usr_share_metadata" in
+  0:0\ 755) ;;
+  0:0\ 777)
+    chmod 0755 /usr/share
+    ;;
+  *)
+    echo "unexpected /usr/share metadata on disposable runner: $usr_share_metadata" >&2
+    exit 1
+    ;;
+esac
+test "$(stat -c '%u:%g %a' /usr/share)" = "0:0 755"
+
 RUNTIME=$(mktemp -d /tmp/skynet-edr-vm-smoke.XXXXXX)
 DB="$RUNTIME/skynet.sqlite"
 SPOOL="$REPO/crates/skynet-edr-core/tests/fixtures/hermes_agent_golden_events_v0.jsonl"
@@ -120,7 +142,7 @@ test "$(stat -c '%U:%G %a' "$PLUGIN_ENTRYPOINT")" = "root:root 644"
 
 # This directly imports the package-owned payload to exercise plugin registration
 # and its isolated log/spool transport. It does not exercise or prove enrollment.
-SKYNET_EDR_STATE_DIR="$PLUGIN_STATE" python3 - <<'PY'
+PYTHONDONTWRITEBYTECODE=1 SKYNET_EDR_STATE_DIR="$PLUGIN_STATE" python3 - <<'PY'
 import importlib.util
 import os
 import pathlib
@@ -157,6 +179,7 @@ if grep -a -F 'SKYNET_FAKE_MALWARE_TEST_STRING_DO_NOT_EXECUTE' "$PLUGIN_SPOOL" "
 fi
 
 echo "Hermes package payload/plugin transport smoke passed (not enrollment proof)"
+test -z "$(dpkg -V skynet-edr)"
 skynet-edr store init --db "$DB"
 skynet-edr events ingest-spool --db "$DB" --spool "$PLUGIN_SPOOL" --checkpoint "$RUNTIME/plugin.checkpoint"
 skynet-edr events ingest-spool --db "$DB" --spool "$SPOOL" --checkpoint "$CHECKPOINT"
@@ -201,8 +224,42 @@ done
 # The verifier checks exact owner/group/mode tuples, real systemd process UID,
 # installed executable identity, service-user DAC access, and all three HTTP 200
 # read-only contracts. It has no mutation or repair mode.
-/usr/libexec/skynet-edr/deploy-verify \
-  --expected-version "$EXPECTED_PRODUCT_VERSION"
+verify_report="$RUNTIME/deploy-verify.json"
+if ! /usr/libexec/skynet-edr/deploy-verify \
+  --expected-product-version "$EXPECTED_PRODUCT_VERSION" \
+  --expected-deb-version "$EXPECTED_PACKAGE_VERSION" >"$verify_report" 2>&1; then
+  python3 - <<'PY' >&2
+import json
+import os
+import stat
+
+paths = (
+    "/usr",
+    "/usr/share",
+    "/usr/share/skynet-edr",
+    "/usr/share/skynet-edr/hermes-plugin",
+    "/usr/share/skynet-edr/hermes-plugin/skynet-edr",
+)
+evidence = []
+for index, path in enumerate(paths):
+    try:
+        metadata = os.lstat(path)
+        evidence.append({
+            "component": index,
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "mode": oct(stat.S_IMODE(metadata.st_mode)),
+            "directory": stat.S_ISDIR(metadata.st_mode),
+            "symlink": stat.S_ISLNK(metadata.st_mode),
+        })
+    except OSError as error:
+        evidence.append({"component": index, "errno": error.errno})
+print(json.dumps({"package_payload_ancestry": evidence}, sort_keys=True))
+PY
+  cat "$verify_report" >&2
+  exit 1
+fi
+cat "$verify_report"
 runuser -u skynet-edr -- install -m 0640 /dev/null \
   /var/lib/skynet-edr/.deployment-smoke-write
 test "$(stat -c '%U:%G %a' /var/lib/skynet-edr/.deployment-smoke-write)" = \
@@ -215,7 +272,8 @@ systemctl stop skynet-edr.service
 chown root:root /var/lib/skynet-edr
 drift_report="$RUNTIME/injected-ownership-drift.json"
 if /usr/libexec/skynet-edr/deploy-verify \
-  --expected-version "$EXPECTED_PRODUCT_VERSION" >"$drift_report" 2>&1; then
+  --expected-product-version "$EXPECTED_PRODUCT_VERSION" \
+  --expected-deb-version "$EXPECTED_PACKAGE_VERSION" >"$drift_report" 2>&1; then
   echo "deployment verifier accepted injected root-owned state drift" >&2
   exit 1
 fi

@@ -91,6 +91,8 @@ class VmSmokeGateTests(unittest.TestCase):
         self.assertIn("package payload/plugin transport smoke passed", script)
         self.assertIn("not enrollment proof", script)
         self.assertNotIn("Hermes plugin install/log/spool smoke passed", script)
+        self.assertIn('PYTHONDONTWRITEBYTECODE=1 SKYNET_EDR_STATE_DIR="$PLUGIN_STATE"', script)
+        self.assertGreaterEqual(script.count('test -z "$(dpkg -V skynet-edr)"'), 2)
 
     def test_distinguishes_native_package_and_canonical_product_versions(self) -> None:
         script = SCRIPT.read_text()
@@ -100,8 +102,26 @@ class VmSmokeGateTests(unittest.TestCase):
             script,
         )
         self.assertIn('python3 - "$REPO/Cargo.toml"', script)
-        self.assertIn('--expected-version "$EXPECTED_PRODUCT_VERSION"', script)
-        self.assertNotIn('--expected-version "$EXPECTED_PACKAGE_VERSION"', script)
+        self.assertIn('--expected-product-version "$EXPECTED_PRODUCT_VERSION"', script)
+        self.assertIn('--expected-deb-version "$EXPECTED_PACKAGE_VERSION"', script)
+
+    def test_failed_verifier_emits_bounded_package_ancestry_evidence(self) -> None:
+        script = SCRIPT.read_text()
+
+        self.assertIn('if ! /usr/libexec/skynet-edr/deploy-verify', script)
+        self.assertIn('"package_payload_ancestry": evidence', script)
+        self.assertIn('"component": index', script)
+        self.assertNotIn('"path": path', script)
+
+    def test_normalizes_only_the_exact_disposable_runner_usr_share_baseline(self) -> None:
+        script = SCRIPT.read_text()
+
+        self.assertIn("if [ -L /usr/share ]", script)
+        self.assertIn("0:0\\ 755)", script)
+        self.assertIn("0:0\\ 777)", script)
+        self.assertIn("chmod 0755 /usr/share", script)
+        self.assertNotIn("chmod -R", script)
+        self.assertIn("unexpected /usr/share metadata", script)
 
 
 if __name__ == "__main__":

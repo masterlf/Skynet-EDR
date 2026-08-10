@@ -14,7 +14,7 @@ The package-owned `/usr/libexec/skynet-edr/deploy-verify` is read-only and has n
 2. Record the installed version: `dpkg-query -W -f='${Package} ${Version} ${Architecture}\n' skynet-edr`.
 3. Record `systemctl show skynet-edr.service -p ActiveState -p SubState -p MainPID -p ExecMainStartTimestampMonotonic`.
 4. Create and verify a consistent SQLite backup with SQLite's `.backup` command to a root-only backup filesystem. Never copy a live SQLite file. Backup failure blocks the change.
-5. Run `sudo /usr/libexec/skynet-edr/deploy-verify --expected-version <currently-installed-version>`. Any failure blocks the change; this command never repairs state.
+5. Run `sudo /usr/libexec/skynet-edr/deploy-verify --expected-product-version <canonical-semver> --expected-deb-version <native-deb-version>`. Both inputs use exact equality; any failure blocks the change and this command never repairs state.
 6. Obtain explicit approval for the exact DEB digest, host, window, expected restart, and rollback DEB digest.
 
 ## Deploy
@@ -31,7 +31,7 @@ Package installation and service restart are separate approvals. If the installe
 
 ```sh
 sudo systemctl restart skynet-edr.service
-sudo /usr/libexec/skynet-edr/deploy-verify --expected-version <version>
+sudo /usr/libexec/skynet-edr/deploy-verify --expected-product-version 0.6.0-alpha.3 --expected-deb-version 0.6.0~alpha.3
 sudo dpkg -V skynet-edr
 ```
 
@@ -47,7 +47,7 @@ With rollback approved and the prior checksum-verified DEB available:
 sudo systemctl stop skynet-edr.service
 sudo apt-get install --no-install-recommends ./skynet-edr_<previous-version>_amd64.deb
 sudo systemctl start skynet-edr.service
-sudo /usr/libexec/skynet-edr/deploy-verify --expected-version <previous-version>
+sudo /usr/libexec/skynet-edr/deploy-verify --expected-product-version <previous-product-version> --expected-deb-version <previous-native-deb-version>
 sudo dpkg -V skynet-edr
 ```
 

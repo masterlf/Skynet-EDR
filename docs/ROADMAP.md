@@ -15,9 +15,9 @@ v0.5.0 is a passive Linux-first prerelease. Within the narrow evidence-backed sc
 
 It does **not** provide inline pause, approval, blocking, or active containment.
 
-## Current milestone: v0.6.0-alpha.2 Status Contract Compatibility
+## Current milestone: v0.6.0-alpha.3 Deployable Passive Detection
 
-The v0.6.0-alpha.2 milestone carries forward the v0.6.0-alpha.1 local incident-notification path and repairs its producer/consumer status contract:
+The v0.6.0-alpha.3 milestone carries forward the alpha.2 producer/consumer status contract and corrects its package and deployment path:
 
 - deterministic sequence-capable correlation and the reviewed high-signal AI-agent rule pack;
 - `skynet-edr doctor` and private, redaction-safe diagnostics collection;
@@ -37,12 +37,14 @@ The v0.6.0-alpha.2 milestone carries forward the v0.6.0-alpha.1 local incident-n
 - one compact redacted `skynet.alert.notice.v1` stdout line after each newly opened continuous-ingestion incident commits;
 - duplicate suppression and visible, non-transactional alert-sink failure through `alert_delivery_errors_total` and degraded health;
 - canonical SemVer prerelease validation across Rust, plugin, dashboard, package, and release-document authorities.
+- a separate exact native Debian version plane (`0.6.0~alpha.3`) bound to package metadata and installed `dpkg` state;
+- exact package-owned Hermes payload verification and two same-DEB hosted browser lanes against pinned official Hermes.
 
-The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host S3 gate.
+The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd and browser gates. S3 deployment is not part of alpha.3.
 
 ## Next milestone: S4 hardening
 
-S4 will address descriptor-relative hardening against hostile concurrent root replacement and crash-idempotent quarantine cleanup policy. It does not include outbound webhook, email, or SIEM delivery, inline pause, approval, blocking, or containment.
+Alpha.3 handles ordinary replacement races with descriptor-relative no-follow inspection. S4 will address hostile concurrent UID 0 replacement and crash-idempotent quarantine cleanup policy. It does not include outbound webhook, email, or SIEM delivery, inline pause, approval, blocking, or containment.
 
 ## Later candidate: guard mode design
 
@@ -55,7 +57,7 @@ Guard mode requires a real pre-execution control point in each supported agent r
 - degradation behavior when Skynet-EDR is unavailable;
 - explicit compatibility contracts for Hermes and other runtimes.
 
-No user-facing surface may claim guard mode before those controls are implemented and exercised end to end. Guard mode is not part of v0.6.0-alpha.2.
+No user-facing surface may claim guard mode before those controls are implemented and exercised end to end. Guard mode is not part of v0.6.0-alpha.3.
 
 ## Later milestones
 
