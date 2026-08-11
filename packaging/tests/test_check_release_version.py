@@ -129,6 +129,9 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             "Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.",
             "Legacy trace and spool imports are offline/read-only; live ingress is passive.",
         ).replace(
+            "Canonical live JSONL spool ingestion:",
+            "Explicit canonical JSONL spool import:",
+        ).replace(
             "Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:",
             "The canonical spool CLI is an explicit offline import path.",
         ).replace(
@@ -138,6 +141,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         stale_claims = (
             "live v0.4 integrations should emit `skynet.event.v0` events directly where possible.",
             "Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.",
+            "Canonical live JSONL spool ingestion:",
             "Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:",
             "The current end-to-end MVP has two built-in correlation rules:",
         )

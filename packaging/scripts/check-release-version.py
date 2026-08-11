@@ -507,6 +507,7 @@ def main() -> None:
         "docs/HERMES_EVENT_INGESTION.md": (
             "live v0.4 integrations should emit `skynet.event.v0` events directly where possible.",
             "Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.",
+            "Canonical live JSONL spool ingestion:",
             "Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:",
             "The current end-to-end MVP has two built-in correlation rules:",
         ),

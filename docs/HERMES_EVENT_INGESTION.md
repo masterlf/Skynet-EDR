@@ -51,7 +51,7 @@ Legacy Hermes trace ingestion:
 skynet-edr events ingest-hermes --db /path/to/skynet.sqlite --trace-json /path/to/hermes-trace.json
 ```
 
-Canonical live JSONL spool ingestion:
+Explicit canonical JSONL spool import:
 
 ```bash
 skynet-edr events ingest-spool \
