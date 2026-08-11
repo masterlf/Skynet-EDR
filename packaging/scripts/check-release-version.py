@@ -511,6 +511,26 @@ def main() -> None:
         "docs/README.md": (
             rf"^Current documentation structure target: v({CANONICAL_RELEASE_VERSION_PATTERN})\.",
         ),
+        "docs/ARCHITECTURE.md": (
+            rf"ships in v({CANONICAL_RELEASE_VERSION_PATTERN})\.",
+        ),
+        "docs/CONCEPTS.md": (
+            rf"^## Current v({CANONICAL_RELEASE_VERSION_PATTERN}) scope$",
+        ),
+        "docs/HERMES_PLUGIN_TELEMETRY.md": (
+            rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) ships",
+        ),
+        "docs/INTEGRATIONS.md": (
+            rf"^This page is the v({CANONICAL_RELEASE_VERSION_PATTERN}) integration index\.",
+            rf"^\| Hermes plugin telemetry \| v({CANONICAL_RELEASE_VERSION_PATTERN}) live passive path \|",
+        ),
+        "docs/OPERATIONS.md": (
+            rf"^This page is the v({CANONICAL_RELEASE_VERSION_PATTERN}) operator index ",
+        ),
+        "integrations/hermes/skynet-edr/README.md": (
+            rf"^Passive Hermes Agent telemetry plugin for Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN})\.$",
+            rf"^- No inline blocking in v({CANONICAL_RELEASE_VERSION_PATTERN})\.$",
+        ),
     }
     for path, patterns in authoritative_doc_versions.items():
         document = text(path)

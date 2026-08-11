@@ -1,6 +1,6 @@
 # Hermes Plugin Telemetry
 
-Skynet-EDR v0.4 ships a passive Hermes Agent plugin. The plugin is the preferred
+Skynet-EDR v0.6.0-beta.1 ships a passive Hermes Agent plugin. The plugin is the preferred
 non-invasive live telemetry path for Hermes hosts.
 
 ## Positioning

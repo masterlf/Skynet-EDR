@@ -31,6 +31,12 @@ FIXTURE_FILES = (
     "CHANGELOG.md",
     "SECURITY.md",
     "docs/README.md",
+    "docs/ARCHITECTURE.md",
+    "docs/CONCEPTS.md",
+    "docs/HERMES_PLUGIN_TELEMETRY.md",
+    "docs/INTEGRATIONS.md",
+    "docs/OPERATIONS.md",
+    "integrations/hermes/skynet-edr/README.md",
 )
 
 
@@ -361,6 +367,44 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                 original = path.read_text(encoding="utf-8")
                 path.write_text(
                     original.replace(current_marker, current_marker.replace("0.6.0-beta.1", "9.9.9")),
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(SystemExit) as failure:
+                        self.run_checker()
+                    self.assertIn(
+                        f"{relative} does not reference current release 0.6.0-beta.1",
+                        str(failure.exception),
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_rejects_stale_current_product_surface_versions(self) -> None:
+        for relative, current_marker in (
+            ("docs/ARCHITECTURE.md", "ships in v0.6.0-beta.1"),
+            ("docs/CONCEPTS.md", "## Current v0.6.0-beta.1 scope"),
+            ("docs/HERMES_PLUGIN_TELEMETRY.md", "Skynet-EDR v0.6.0-beta.1 ships"),
+            ("docs/INTEGRATIONS.md", "the v0.6.0-beta.1 integration index"),
+            ("docs/INTEGRATIONS.md", "v0.6.0-beta.1 live passive path"),
+            ("docs/OPERATIONS.md", "the v0.6.0-beta.1 operator index"),
+            (
+                "integrations/hermes/skynet-edr/README.md",
+                "Skynet-EDR v0.6.0-beta.1.",
+            ),
+            (
+                "integrations/hermes/skynet-edr/README.md",
+                "No inline blocking in v0.6.0-beta.1.",
+            ),
+        ):
+            with self.subTest(relative=relative, marker=current_marker):
+                path = self.fixture_root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(current_marker, original)
+                path.write_text(
+                    original.replace(
+                        current_marker,
+                        current_marker.replace("0.6.0-beta.1", "9.9.9"),
+                    ),
                     encoding="utf-8",
                 )
                 try:

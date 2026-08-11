@@ -1,7 +1,7 @@
 # Concept Architecture
 
 This is a conceptual target architecture, not a claim that every depicted
-sensor, channel, response action, or deployment mode ships in v0.4.1. The
+sensor, channel, response action, or deployment mode ships in v0.6.0-beta.1. The
 current product boundary is passive local evidence and read-only visibility;
 see the [MVP public support contract](MVP_SUPPORT_MATRIX.md).
 
