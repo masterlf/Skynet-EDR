@@ -34,6 +34,7 @@ FIXTURE_FILES = (
     "docs/ARCHITECTURE.md",
     "docs/CONCEPTS.md",
     "docs/HERMES_PLUGIN_TELEMETRY.md",
+    "docs/HERMES_EVENT_INGESTION.md",
     "docs/INTEGRATIONS.md",
     "docs/OPERATIONS.md",
     "integrations/hermes/skynet-edr/README.md",
@@ -117,6 +118,36 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             mock.patch.object(sys, "argv", [str(CHECKER_PATH), *arguments]),
         ):
             self.checker.main()
+
+    def test_rejects_stale_current_ingestion_document_claims(self) -> None:
+        document = self.fixture_root / "docs/HERMES_EVENT_INGESTION.md"
+        current = document.read_text(encoding="utf-8")
+        current = current.replace(
+            "live v0.4 integrations should emit `skynet.event.v0` events directly where possible.",
+            "v0.6.0-beta.1 uses authenticated protocol-v3 live ingress for canonical events.",
+        ).replace(
+            "Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.",
+            "Legacy trace and spool imports are offline/read-only; live ingress is passive.",
+        ).replace(
+            "Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:",
+            "The canonical spool CLI is an explicit offline import path.",
+        ).replace(
+            "The current end-to-end MVP has two built-in correlation rules:",
+            "The current detector catalog includes narrow correlators and the canonical sequence rule pack:",
+        )
+        stale_claims = (
+            "live v0.4 integrations should emit `skynet.event.v0` events directly where possible.",
+            "Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.",
+            "Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:",
+            "The current end-to-end MVP has two built-in correlation rules:",
+        )
+
+        for stale_claim in stale_claims:
+            with self.subTest(stale_claim=stale_claim):
+                document.write_text(current + f"\n{stale_claim}\n", encoding="utf-8")
+                with self.assertRaises(SystemExit) as failure:
+                    self.run_checker()
+                self.assertIn("stale current-state claim", str(failure.exception))
 
     def test_rejects_duplicate_python_plugin_version_assignments(self) -> None:
         plugin = self.fixture_root / "integrations/hermes/skynet-edr/__init__.py"

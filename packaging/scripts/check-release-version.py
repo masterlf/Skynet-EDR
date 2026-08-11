@@ -503,6 +503,19 @@ def main() -> None:
         if any(marker not in document for marker in markers):
             raise SystemExit(f"{path} does not reference current release {expected}")
 
+    stale_current_state_claims = {
+        "docs/HERMES_EVENT_INGESTION.md": (
+            "live v0.4 integrations should emit `skynet.event.v0` events directly where possible.",
+            "Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.",
+            "Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:",
+            "The current end-to-end MVP has two built-in correlation rules:",
+        ),
+    }
+    for path, stale_claims in stale_current_state_claims.items():
+        document = text(path)
+        if any(stale_claim in document for stale_claim in stale_claims):
+            raise SystemExit(f"{path} contains a stale current-state claim")
+
     authoritative_doc_versions = {
         "SECURITY.md": (
             rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) is an installable prerelease",
@@ -519,6 +532,9 @@ def main() -> None:
         ),
         "docs/HERMES_PLUGIN_TELEMETRY.md": (
             rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) ships",
+        ),
+        "docs/HERMES_EVENT_INGESTION.md": (
+            rf"^For v({CANONICAL_RELEASE_VERSION_PATTERN}), the supported ingestion paths are distinct:",
         ),
         "docs/INTEGRATIONS.md": (
             rf"^This page is the v({CANONICAL_RELEASE_VERSION_PATTERN}) integration index\.",
