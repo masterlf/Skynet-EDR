@@ -26,6 +26,7 @@ class ValidateS2Tests(unittest.TestCase):
             "cargo clippy --workspace --all-targets --all-features --offline -- -D warnings",
             "cargo test --workspace --all-features --offline",
             "test_detection_corpus.py",
+            "threat-validation.py",
             "s2_runtime_canary",
             "dashboard/plugin.test.mjs",
             "desktop/plugin.test.mjs",
@@ -179,7 +180,7 @@ class ValidateS2Tests(unittest.TestCase):
             (report / "metrics.tsv").write_text("gate\tstatus\nfixture\tpass\n", encoding="utf-8")
             gates = (
                 "docs", "packaging", "fmt", "clippy", "rust-workspace", "hermes-python",
-                "producer-corpus", "dashboard-node", "desktop-node", "corpus", "runtime-canary",
+                "producer-corpus", "dashboard-node", "desktop-node", "corpus", "threat-validation", "runtime-canary",
             )
             for gate in gates:
                 (report / "logs" / f"{gate}.log").write_text(

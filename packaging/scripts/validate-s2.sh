@@ -89,6 +89,7 @@ run_gate producer-corpus python3 -m unittest integrations/hermes/tests/test_dete
 run_gate dashboard-node node --test integrations/hermes/skynet-edr/dashboard/plugin.test.mjs
 run_gate desktop-node node --test integrations/hermes/skynet-edr/desktop/plugin.test.mjs
 run_gate corpus cargo test -p skynet-edr-core --test detection_corpus --all-features --offline
+run_gate threat-validation python3 packaging/scripts/threat-validation.py --output "$TMPROOT/threat-validation-evidence.json"
 run_gate runtime-canary cargo test -p skynet-edr-daemon --test s2_runtime_canary --all-features --offline -- --nocapture
 ENDED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

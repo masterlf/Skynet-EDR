@@ -2,13 +2,13 @@
 
 Phase 12 adds an ingestion and MVP detection boundary for already-recorded Hermes agent traces. It converts session/tool-call records into normalized Skynet-EDR events, redacts them before persistence, and runs built-in MVP rules to open incidents for fake secret exfiltration and safe malware-test content supplied to an AI runtime.
 
-For new Hermes/OpenClaw adapters, prefer the canonical event envelope documented in [Canonical Event Schema](EVENT_SCHEMA.md). The legacy Hermes trace shape below remains supported as an MVP compatibility input, but live v0.4 integrations should emit `skynet.event.v0` events directly where possible.
+For v0.6.0-beta.1, the supported ingestion paths are distinct: `events ingest-hermes` is a legacy offline trace import, `events ingest-spool` is an explicit offline import of reviewed canonical JSONL, and authenticated protocol-v3 AF_UNIX transport is the live ingress path. New adapters should use the canonical event envelope documented in [Canonical Event Schema](EVENT_SCHEMA.md); the legacy Hermes trace shape below remains only a compatibility input for the explicit trace importer.
 
 Live Unix transport uses a separate strict protocol-v3 wrapper for both producer health and canonical events. Its exact source identity is the kernel-authenticated UID plus fixed runtime role, lowercase 64-hex plugin generation, and independent lowercase 64-hex runtime-instance nonce. Duplicate object keys are rejected at every wrapper and nested-event depth, and the exact raw nested canonical event is validated without normalization. Per-source commit sequence advances only after `Persisted`; `Duplicate` and `Collision` are terminal outcomes but do not prove a fresh hook commit. After a successful transaction opens a new incident, the daemon emits one bounded redacted `skynet.alert.notice.v1` stdout line; duplicate replay emits none. Legacy v1/v2 health and raw canonical frames remain observable compatibility inputs with `s3_eligible=false`.
 
 ## Security boundary
 
-- Ingestion is offline/read-only: it parses trace files and does not intercept live agent execution.
+- Legacy trace and canonical spool imports are offline/read-only. Authenticated live ingress passively observes producer events and never intercepts, approves, delays, or blocks agent execution.
 - It never executes tool arguments, shell commands, MCP output, URLs, or message content.
 - MCP/tool output is treated as hostile untrusted content.
 - Raw tool output is not stored as event details.
@@ -51,7 +51,7 @@ Legacy Hermes trace ingestion:
 skynet-edr events ingest-hermes --db /path/to/skynet.sqlite --trace-json /path/to/hermes-trace.json
 ```
 
-Canonical live JSONL spool ingestion:
+Explicit canonical JSONL spool import:
 
 ```bash
 skynet-edr events ingest-spool \
@@ -62,15 +62,7 @@ skynet-edr events ingest-spool \
 
 The spool reader streams newline-delimited records, processes only complete newline-terminated records, advances a byte checkpoint after each processed line, skips duplicate event IDs, resets stale checkpoints when a spool is truncated/replaced, and counts malformed/schema-invalid/invalid-UTF-8 complete lines as dropped events instead of aborting the whole pass. A trailing partial record, including an incomplete UTF-8 sequence, is left for the next pass.
 
-Daemon startup can poll the same canonical spool when `[spool]` is enabled in the daemon config:
-
-```toml
-[spool]
-enabled = true
-db = "/var/lib/skynet-edr/skynet.sqlite"
-path = "/var/lib/skynet-edr/events.jsonl"
-checkpoint = "/var/lib/skynet-edr/events.offset"
-```
+`events ingest-spool` is an explicit operator-run import path, not the live Hermes transport. Continuous Hermes ingestion uses authenticated protocol-v3 AF_UNIX envelopes; if socket delivery fails, the producer owns bounded replay from its versioned `events-v1.jsonl` fallback and checkpoint. Continuous ingestion never opens the historical unversioned `events.jsonl`. Import a specifically reviewed historical spool only with a separate checkpoint, and never run manual import against an active producer's `events-v1.jsonl`; see [Continuous ingestion operations](OPERATIONS.md#continuous-ingestion-operations).
 
 Output:
 
@@ -80,9 +72,13 @@ ingested N canonical event(s), dropped M malformed event(s), skipped D duplicate
 spool ingestion: ingested=N dropped=M duplicates=D checkpoint=B byte(s)
 ```
 
-## MVP correlation
+## Detection engines and built-in rules
 
-The current end-to-end MVP has two built-in correlation rules:
+The compiled detector catalog contains eight canonical sequence rules plus two narrow Hermes correlators. The authenticated protocol-v3 transaction evaluates the canonical sequence pack and the two narrow correlators; producer coverage remains rule-specific as documented in [Detections](DETECTIONS.md#rule-to-producer-coverage-matrix). The explicit legacy `events ingest-hermes` importer evaluates only its normalized-trace `EDR-EXFIL-001` and `EDR-MALWARE-001` correlators.
+
+The built-in canonical sequence pack is `EDR-MCP-001`, `EDR-CONFIG-001`, `EDR-CRON-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-SCOPE-001`, and `EDR-PERSIST-001`. A compiled rule is not proof that every producer emits its trigger shape; dark and producer-dependent paths remain explicitly limited in the coverage matrix.
+
+The two narrow Hermes correlators are:
 
 - `EDR-EXFIL-001`: a sensitive Hermes file read/access followed by network egress in the same session within 60 seconds opens a critical incident.
 - `EDR-MALWARE-001`: known safe malware-test indicators in Hermes tool output supplied to the AI runtime open a high-severity incident. Raw tool output/payload content is omitted before persistence; only structured indicator metadata is stored.

@@ -87,6 +87,8 @@ The initial alert format is documented in [Initial detection rules](DETECTION_RU
 
 ## Testing detections
 
+The reusable offline runner and exact versioned claims are documented in the [Threat Validation Suite](THREAT_VALIDATION.md) and [v0.6.0-beta.1 protection matrix](PROTECTION_MATRIX_v0.6.0-beta.1.md). Their machine-readable manifest/matrix drift check is the release-facing evidence contract; this descriptive page must not be used to inflate a `NOT_TESTED` or `NOT_COVERED` path.
+
 Use fake honeytokens and controlled sinks only:
 
 - [Linux lab testing](LINUX_LAB_TESTING.md#fake-honeytokens-only)

@@ -1,7 +1,7 @@
 # Concept Architecture
 
 This is a conceptual target architecture, not a claim that every depicted
-sensor, channel, response action, or deployment mode ships in v0.4.1. The
+sensor, channel, response action, or deployment mode ships in v0.6.0-beta.1. The
 current product boundary is passive local evidence and read-only visibility;
 see the [MVP public support contract](MVP_SUPPORT_MATRIX.md).
 
@@ -135,7 +135,7 @@ Later enforcement candidates:
 
 ## Deployment modes
 
-### Passive mode (current v0.4.1 and planned v0.5.0)
+### Passive mode (current v0.6.0-beta.1)
 
 Reads logs, config, and network metadata. Does not block.
 
@@ -149,6 +149,7 @@ Can block high-confidence exfiltration and disable malicious runtime entries.
 
 ## MVP recommendation
 
-Historical recommendation: start with passive local evidence and read-only
-visibility. v0.5.0 plans durable local alerting; guard-mode blocking is v0.6+
-work after an exercised pre-execution control point exists.
+The current v0.6.0-beta.1 scope remains passive local evidence and read-only
+visibility, with committed incidents in local SQLite and best-effort local
+notifications. Guard-mode blocking remains future work until an exercised
+pre-execution control point exists.

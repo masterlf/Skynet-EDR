@@ -2,15 +2,15 @@ name: skynet-edr
 arch: ${NFPM_ARCH:-amd64}
 platform: linux
 # Native DEB identity is intentionally distinct from canonical product SemVer.
-version: ${SKYNET_EDR_DEB_VERSION:-0.6.0~alpha.3}
+version: ${SKYNET_EDR_DEB_VERSION:-0.6.0~beta.1}
 section: security
 priority: optional
 maintainer: Skynet-EDR Maintainers <maintainers@example.invalid>
 description: |
   Skynet-EDR passive AI-agent detection and response baseline for Linux.
-  Protects Hermes Agent, OpenClaw, Codex, Claude Code, and similar local agents
-  by monitoring agent-aware runtime signals, configuration drift, sensitive file
-  access, automation, and egress metadata.
+  Ships bounded Hermes Agent telemetry and evaluates passive local evidence for
+  runtime signals, configuration drift, sensitive file access, automation, and
+  egress metadata. It does not provide prevention or other runtime integrations.
 vendor: Skynet-EDR
 homepage: https://github.com/masterlf/Skynet-EDR
 license: Apache-2.0

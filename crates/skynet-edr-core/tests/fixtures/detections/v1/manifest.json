@@ -3,6 +3,11 @@
     {
       "case_id": "malicious_mcp",
       "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -82,10 +87,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "high",
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -111,11 +122,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-MCP-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-MCP-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "near_miss_mcp",
-      "category": "near_miss",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -195,10 +213,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "not_detected",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -222,11 +246,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-MCP-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-MCP-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "malicious_pi",
       "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -307,10 +338,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "high",
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -336,11 +373,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-PI-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-PI-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "near_miss_pi",
-      "category": "near_miss",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -421,10 +465,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "not_detected",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -448,11 +498,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-PI-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-PI-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "malicious_msg",
       "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -532,10 +589,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "high",
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -562,11 +625,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-MSG-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-MSG-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "near_miss_msg",
-      "category": "near_miss",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -646,10 +716,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "not_detected",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -674,11 +750,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-MSG-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-MSG-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "malicious_net",
       "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -759,10 +842,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "high",
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -788,11 +877,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-NET-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-NET-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "near_miss_net",
-      "category": "near_miss",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -873,10 +969,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "not_detected",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -900,11 +1002,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-NET-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-NET-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "malicious_cron",
       "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -977,10 +1086,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "high",
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -1011,11 +1126,18 @@
           }
         }
       ],
-      "rule_id": "EDR-CRON-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-CRON-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "near_miss_cron",
-      "category": "near_miss",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -1088,10 +1210,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "not_detected",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -1120,11 +1248,18 @@
           }
         }
       ],
-      "rule_id": "EDR-CRON-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-CRON-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "malicious_exfil",
       "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "bounded-continuous-correlator",
       "events": [
         {
           "attributes": {
@@ -1206,10 +1341,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "critical",
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -1232,11 +1373,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-EXFIL-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-EXFIL-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "near_miss_exfil",
-      "category": "near_miss",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "bounded-continuous-correlator",
       "events": [
         {
           "attributes": {
@@ -1317,10 +1465,16 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "not_detected",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -1343,11 +1497,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-EXFIL-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-EXFIL-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "malicious_malware",
       "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "bounded-continuous-correlator",
       "events": [
         {
           "attributes": {
@@ -1393,10 +1554,16 @@
           "trust_level": "tool_output"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "high",
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -1410,11 +1577,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-MALWARE-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-MALWARE-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "near_miss_malware",
-      "category": "near_miss",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "bounded-continuous-correlator",
       "events": [
         {
           "attributes": {
@@ -1458,10 +1632,16 @@
           "trust_level": "tool_output"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "not_detected",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [
         {
           "args": [
@@ -1475,53 +1655,104 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-MALWARE-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-MALWARE-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "hostile_malformed_json",
-      "category": "hostile",
+      "category": "hostile-malformed",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-event-parser",
       "events": [],
+      "evidence_strength": "component-fixture",
+      "execution": "hostile-parse",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "rejected",
       "expected_severity": null,
       "forbidden_markers": [],
       "hostile_payload": "{\"schema_version\":",
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [],
-      "rule_id": null
+      "producer_path": "canonical-event-parser",
+      "rule_id": null,
+      "safe_synthetic": true
     },
     {
       "case_id": "hostile_truncated_frame",
-      "category": "hostile",
+      "category": "hostile-malformed",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-event-parser",
       "events": [],
+      "evidence_strength": "component-fixture",
+      "execution": "hostile-parse",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "rejected",
       "expected_severity": null,
       "forbidden_markers": [],
       "hostile_payload": "00000100{\"schema_version\":\"skynet.event.v0\"}",
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [],
-      "rule_id": null
+      "producer_path": "canonical-event-parser",
+      "rule_id": null,
+      "safe_synthetic": true
     },
     {
       "case_id": "hostile_unknown_type",
-      "category": "hostile",
+      "category": "hostile-malformed",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-event-parser",
       "events": [],
+      "evidence_strength": "component-fixture",
+      "execution": "hostile-parse",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "rejected",
       "expected_severity": null,
       "forbidden_markers": [],
       "hostile_payload": {
-        "event_type": ["hostile"],
+        "event_type": [
+          "hostile"
+        ],
         "schema_version": 0
       },
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [],
-      "rule_id": null
+      "producer_path": "canonical-event-parser",
+      "rule_id": null,
+      "safe_synthetic": true
     },
     {
       "case_id": "hostile_bounded_recursive",
-      "category": "hostile",
+      "category": "hostile-malformed",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-event-parser",
       "events": [],
+      "evidence_strength": "component-fixture",
+      "execution": "hostile-parse",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "rejected",
       "expected_severity": null,
       "forbidden_markers": [],
       "hostile_payload": {
@@ -1530,12 +1761,22 @@
         "kind": "recursive_container",
         "scalar_bytes": 4097
       },
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
+      ],
       "producer_calls": [],
-      "rule_id": null
+      "producer_path": "canonical-event-parser",
+      "rule_id": null,
+      "safe_synthetic": true
     },
     {
       "case_id": "secret_exfil_redaction",
-      "category": "synthetic_secret",
+      "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "bounded-continuous-correlator",
       "events": [
         {
           "attributes": {
@@ -1617,11 +1858,17 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "critical",
       "forbidden_markers": [
         "S2_FAKE_HONEYTOKEN_EXFIL_7Q9X"
+      ],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
       ],
       "producer_calls": [
         {
@@ -1645,11 +1892,18 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-EXFIL-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-EXFIL-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "secret_message_redaction",
-      "category": "synthetic_secret",
+      "category": "malicious",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [
         {
           "attributes": {
@@ -1729,11 +1983,17 @@
           "trust_level": "agent_action"
         }
       ],
+      "evidence_strength": "component-and-producer-fixture",
+      "execution": "replay",
       "expected_incident_count": 1,
       "expected_match": true,
+      "expected_outcome": "detected",
       "expected_severity": "high",
       "forbidden_markers": [
         "S2_FAKE_HONEYTOKEN_MSG_4M2P"
+      ],
+      "limitations": [
+        "Synthetic offline fixture; not a live Hermes dispatcher or universal security guarantee."
       ],
       "producer_calls": [
         {
@@ -1761,42 +2021,90 @@
           "kwargs": {}
         }
       ],
-      "rule_id": "EDR-MSG-001"
+      "producer_path": "hermes-plugin-af-unix",
+      "rule_id": "EDR-MSG-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "dark_edr_config_001",
-      "category": "producer_dark",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [],
+      "evidence_strength": "documented-gap",
+      "execution": "skipped",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "skipped",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "No authoritative shipped Hermes producer event exists; scenario is intentionally skipped and must not be counted as detected."
+      ],
       "producer_calls": [],
-      "rule_id": "EDR-CONFIG-001"
+      "producer_path": "external-producer-required",
+      "rule_id": "EDR-CONFIG-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "dark_edr_scope_001",
-      "category": "producer_dark",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [],
+      "evidence_strength": "documented-gap",
+      "execution": "skipped",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "skipped",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "No authoritative shipped Hermes producer event exists; scenario is intentionally skipped and must not be counted as detected."
+      ],
       "producer_calls": [],
-      "rule_id": "EDR-SCOPE-001"
+      "producer_path": "external-producer-required",
+      "rule_id": "EDR-SCOPE-001",
+      "safe_synthetic": true
     },
     {
       "case_id": "dark_edr_persist_001",
-      "category": "producer_dark",
+      "category": "benign",
+      "compatibility": {
+        "event_schema_version": "skynet.event.v0",
+        "manifest_schema_version": "skynet.threat-validation-manifest.v1"
+      },
+      "engine": "canonical-sequence",
       "events": [],
+      "evidence_strength": "documented-gap",
+      "execution": "skipped",
       "expected_incident_count": 0,
       "expected_match": false,
+      "expected_outcome": "skipped",
       "expected_severity": null,
       "forbidden_markers": [],
+      "limitations": [
+        "No authoritative shipped Hermes producer event exists; scenario is intentionally skipped and must not be counted as detected."
+      ],
       "producer_calls": [],
-      "rule_id": "EDR-PERSIST-001"
+      "producer_path": "external-producer-required",
+      "rule_id": "EDR-PERSIST-001",
+      "safe_synthetic": true
     }
   ],
+  "compatibility": {
+    "event_schema_versions": [
+      "skynet.event.v0"
+    ],
+    "evidence_schema_version": "skynet.threat-validation-evidence.v1",
+    "minimum_runner_version": "1"
+  },
   "corpus_notice": "FAKE HONEYTOKEN FOR SKYNET-EDR LAB ONLY",
   "live_rules": {
     "EDR-CRON-001": "high",
@@ -1807,5 +2115,6 @@
     "EDR-NET-001": "high",
     "EDR-PI-001": "high"
   },
-  "schema_version": "skynet.detection-corpus.v1"
+  "schema_version": "skynet.threat-validation-manifest.v1",
+  "suite_version": "0.6.0-beta.1"
 }

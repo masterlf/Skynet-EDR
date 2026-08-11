@@ -6,12 +6,12 @@ on:
       product_version:
         description: "Canonical product SemVer"
         required: true
-        default: "0.6.0-alpha.3"
+        default: "0.6.0-beta.1"
         type: string
       deb_version:
         description: "Native Debian package version"
         required: true
-        default: "0.6.0~alpha.3"
+        default: "0.6.0~beta.1"
         type: string
   push:
     tags:
@@ -32,8 +32,8 @@ jobs:
       NFPM_RPM_ARCH: x86_64
       NFPM_ARCHLINUX_ARCH: x86_64
       NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
-      SKYNET_EDR_PRODUCT_VERSION: ${{ inputs.product_version || '0.6.0-alpha.3' }}
-      SKYNET_EDR_DEB_VERSION: ${{ inputs.deb_version || '0.6.0~alpha.3' }}
+      SKYNET_EDR_PRODUCT_VERSION: ${{ inputs.product_version || '0.6.0-beta.1' }}
+      SKYNET_EDR_DEB_VERSION: ${{ inputs.deb_version || '0.6.0~beta.1' }}
       HERMES_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
       PLAYWRIGHT_BROWSERS_PATH: /tmp/skynet-edr-ms-playwright
     steps:
@@ -68,6 +68,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      - name: Prime locked Rust dependencies
+        run: cargo fetch --locked
+
+      - name: Release-candidate threat validation gate
+        run: python3 packaging/scripts/threat-validation.py --output target/threat-validation/evidence.json
+
       - name: Install package inspection tools
         run: |
           sudo apt-get update
@@ -97,10 +103,10 @@ jobs:
             "SKYNET_EDR_EXPECTED_DEB_VERSION=$SKYNET_EDR_EXPECTED_DEB_VERSION" \
             packaging/scripts/validate-packaging.sh
 
-      - name: Validate exact alpha.3 identity planes
+      - name: Validate exact beta.1 identity planes
         run: |
-          test "${SKYNET_EDR_PRODUCT_VERSION}" = "0.6.0-alpha.3"
-          test "${SKYNET_EDR_DEB_VERSION}" = "0.6.0~alpha.3"
+          test "${SKYNET_EDR_PRODUCT_VERSION}" = "0.6.0-beta.1"
+          test "${SKYNET_EDR_DEB_VERSION}" = "0.6.0~beta.1"
 
       - name: Prepare clean dist directory
         run: rm -rf dist

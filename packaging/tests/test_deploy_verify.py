@@ -142,27 +142,27 @@ class DeploymentVerifierTests(unittest.TestCase):
     def test_product_and_deb_versions_are_explicit_exact_identity_planes(self) -> None:
         self.assertEqual(
             self.verifier.verify_version_identity(
-                "0.6.0-alpha.3",
-                "0.6.0~alpha.3",
-                "0.6.0~alpha.3",
-                "skynet-edr 0.6.0-alpha.3",
-                "skynet-edr-daemon 0.6.0-alpha.3",
+                "0.6.0-beta.1",
+                "0.6.0~beta.1",
+                "0.6.0~beta.1",
+                "skynet-edr 0.6.0-beta.1",
+                "skynet-edr-daemon 0.6.0-beta.1",
             ),
             [],
         )
         for observed in (
-            "0.6.0-alpha.3",
-            "1:0.6.0~alpha.3",
-            "0.6.0~alpha.3-1",
-            "0.6.0~alpha.30",
+            "0.6.0-beta.1",
+            "1:0.6.0~beta.1",
+            "0.6.0~beta.1-1",
+            "0.6.0~beta.10",
         ):
             with self.subTest(observed=observed):
                 errors = self.verifier.verify_version_identity(
-                    "0.6.0-alpha.3",
-                    "0.6.0~alpha.3",
+                    "0.6.0-beta.1",
+                    "0.6.0~beta.1",
                     observed,
-                    "skynet-edr 0.6.0-alpha.3",
-                    "skynet-edr-daemon 0.6.0-alpha.3",
+                    "skynet-edr 0.6.0-beta.1",
+                    "skynet-edr-daemon 0.6.0-beta.1",
                 )
                 self.assertIn("dpkg package version mismatch", errors)
 
@@ -173,7 +173,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         }
         files["dashboard/plugin.js"] = b"(() => {})();\n"
         dashboard = {
-            "version": "0.6.0-alpha.3",
+            "version": "0.6.0-beta.1",
             "integrity": "sha384-" + base64.b64encode(
                 hashlib.sha384(files["dashboard/plugin.js"]).digest()
             ).decode("ascii"),
@@ -190,20 +190,20 @@ class DeploymentVerifierTests(unittest.TestCase):
         }
         manifest = {
             "schema": 1,
-            "payload_version": "0.6.0-alpha.3",
+            "payload_version": "0.6.0-beta.1",
             "generation": hashlib.sha256(
                 json.dumps(records, sort_keys=True, separators=(",", ":")).encode("ascii")
             ).hexdigest(),
             "files": records,
         }
         self.assertEqual(
-            self.verifier.verify_plugin_manifest(manifest, files, "0.6.0-alpha.3"),
+            self.verifier.verify_plugin_manifest(manifest, files, "0.6.0-beta.1"),
             [],
         )
         files["desktop/plugin.js"] += b"tamper"
         self.assertIn(
             "desktop/plugin.js: sha256 mismatch",
-            self.verifier.verify_plugin_manifest(manifest, files, "0.6.0-alpha.3"),
+            self.verifier.verify_plugin_manifest(manifest, files, "0.6.0-beta.1"),
         )
 
     def test_descriptor_relative_payload_walk_rejects_extra_symlink_hardlink_writable_and_oversize(self) -> None:

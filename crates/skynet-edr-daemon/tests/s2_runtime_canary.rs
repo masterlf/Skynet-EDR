@@ -576,8 +576,8 @@ def load(name,path):
  spec=importlib.util.spec_from_file_location(name,path);mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod);return mod
 plugin=load('skynet_s2_runtime_plugin',repo/'integrations/hermes/skynet-edr/__init__.py')
 manifest=json.loads((repo/'crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.json').read_text())
-baseline_cases=[case for case in manifest['cases'] if case['category']=='malicious']
-synthetic_cases=[case for case in manifest['cases'] if case['category']=='synthetic_secret']
+baseline_cases=[case for case in manifest['cases'] if case['category']=='malicious' and not case['forbidden_markers']]
+synthetic_cases=[case for case in manifest['cases'] if case['category']=='malicious' and case['forbidden_markers']]
 expected_baseline_by_rule=dict(collections.Counter(case['rule_id'] for case in baseline_cases))
 expected_synthetic_by_rule=dict(collections.Counter(case['rule_id'] for case in synthetic_cases))
 assert len(expected_baseline_by_rule)==7 and set(expected_baseline_by_rule.values())=={1},expected_baseline_by_rule
@@ -608,7 +608,7 @@ plugin._event_queue=ObservedQueue(plugin._event_queue);plugin._send_frame=observ
 def fetch_risks():
  started=time.monotonic();value=api._upstream('/api/v1/risks',{'limit':50,'offset':0});fetch_ms.append((time.monotonic()-started)*1000);return value
 for case in manifest['cases']:
- if case['category'] not in {'malicious','near_miss'}:continue
+ if case['execution']!='replay' or case['forbidden_markers']:continue
  plugin._session_trace_id='s2-runtime-'+case['case_id']
  start=len(canonical)
  for call in case['producer_calls']:
@@ -627,7 +627,7 @@ assert len(baseline_risks['items'])==sum(expected_baseline_by_rule.values()),bas
 baseline_details=[api._upstream('/api/v1/risks/'+urllib.parse.quote(item['id'],safe=''),{}) for item in baseline_risks['items']]
 os.environ.update(SKYNET_EDR_STATE_DIR=str(synthetic_state),SKYNET_EDR_INGEST_SOCKET=synthetic_socket,SKYNET_EDR_API_PORT=synthetic_port)
 for case in manifest['cases']:
- if case['category']!='synthetic_secret':continue
+ if case['category']!='malicious' or not case['forbidden_markers']:continue
  callback_input=json.dumps(case['producer_calls'],sort_keys=True)
  assert all(marker in callback_input for marker in case['forbidden_markers']),case['case_id']
  secret_input_markers+=len(case['forbidden_markers'])

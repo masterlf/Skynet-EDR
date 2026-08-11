@@ -22,6 +22,7 @@ Run from a clean release branch or tag candidate:
 ```bash
 git status --short
 python3 packaging/scripts/check-docs.py
+python3 packaging/scripts/threat-validation.py --output target/threat-validation/evidence.json
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features

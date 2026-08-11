@@ -34,6 +34,10 @@ const MAX_FORBIDDEN_MARKERS: usize = 64;
 #[serde(deny_unknown_fields)]
 struct Manifest {
     schema_version: String,
+    #[serde(default)]
+    suite_version: String,
+    #[serde(default)]
+    compatibility: Value,
     corpus_notice: String,
     live_rules: BTreeMap<String, String>,
     cases: Vec<Case>,
@@ -46,6 +50,22 @@ struct Case {
     id: String,
     rule_id: Option<String>,
     category: String,
+    #[serde(default)]
+    expected_outcome: String,
+    #[serde(default)]
+    engine: String,
+    #[serde(default)]
+    producer_path: String,
+    #[serde(default)]
+    evidence_strength: String,
+    #[serde(default)]
+    limitations: Vec<String>,
+    #[serde(default)]
+    compatibility: Value,
+    #[serde(default)]
+    execution: String,
+    #[serde(default)]
+    safe_synthetic: bool,
     expected_match: bool,
     expected_severity: Option<String>,
     expected_incident_count: usize,
@@ -272,7 +292,15 @@ impl<'a> JsonBounds<'a> {
 #[test]
 fn manifest_is_complete_unique_and_locks_the_live_support_set() {
     let manifest = load_manifest();
-    assert_eq!(manifest.schema_version, "skynet.detection-corpus.v1");
+    assert_eq!(
+        manifest.schema_version,
+        "skynet.threat-validation-manifest.v1"
+    );
+    assert_eq!(manifest.suite_version, "0.6.0-beta.1");
+    assert_eq!(
+        manifest.compatibility["evidence_schema_version"],
+        "skynet.threat-validation-evidence.v1"
+    );
     assert_eq!(
         manifest.corpus_notice,
         "FAKE HONEYTOKEN FOR SKYNET-EDR LAB ONLY"
@@ -295,7 +323,27 @@ fn manifest_is_complete_unique_and_locks_the_live_support_set() {
             "duplicate case_id {}",
             case.id
         );
-        assert!(!case.category.is_empty());
+        assert!(matches!(
+            case.category.as_str(),
+            "malicious" | "benign" | "hostile-malformed"
+        ));
+        assert!(matches!(
+            case.expected_outcome.as_str(),
+            "detected" | "not_detected" | "rejected" | "skipped"
+        ));
+        assert!(!case.engine.is_empty());
+        assert!(!case.producer_path.is_empty());
+        assert!(!case.evidence_strength.is_empty());
+        assert!(!case.limitations.is_empty());
+        assert_eq!(
+            case.compatibility["manifest_schema_version"],
+            "skynet.threat-validation-manifest.v1"
+        );
+        assert!(matches!(
+            case.execution.as_str(),
+            "replay" | "hostile-parse" | "skipped"
+        ));
+        assert!(case.safe_synthetic);
     }
     assert_eq!(manifest.cases.len(), 23);
     assert_eq!(
@@ -304,21 +352,21 @@ fn manifest_is_complete_unique_and_locks_the_live_support_set() {
             .iter()
             .filter(|case| case.category == "malicious")
             .count(),
-        7
+        9
     );
     assert_eq!(
         manifest
             .cases
             .iter()
-            .filter(|case| case.category == "near_miss")
+            .filter(|case| case.category == "benign")
             .count(),
-        7
+        10
     );
     assert_eq!(
         manifest
             .cases
             .iter()
-            .filter(|case| case.category == "hostile")
+            .filter(|case| case.category == "hostile-malformed")
             .count(),
         4
     );
@@ -326,15 +374,7 @@ fn manifest_is_complete_unique_and_locks_the_live_support_set() {
         manifest
             .cases
             .iter()
-            .filter(|case| case.category == "synthetic_secret")
-            .count(),
-        2
-    );
-    assert_eq!(
-        manifest
-            .cases
-            .iter()
-            .filter(|case| case.category == "producer_dark")
+            .filter(|case| case.execution == "skipped")
             .count(),
         3
     );
@@ -561,17 +601,14 @@ fn lexical_pre_scan_enforces_generic_boundaries_and_duplicate_keys() {
 fn producer_calls_are_present_only_for_supported_live_cases() {
     let manifest = load_manifest();
     for case in &manifest.cases {
-        if case.category == "malicious"
-            || case.category == "near_miss"
-            || case.category == "synthetic_secret"
-        {
+        if case.execution == "replay" {
             assert!(
                 !case.producer_calls.is_empty(),
                 "{} lacks producer callback payload",
                 case.id
             );
         }
-        if case.category == "producer_dark" {
+        if case.execution == "skipped" {
             assert!(case.events.is_empty());
             assert!(case.producer_calls.is_empty());
             assert!(!case.expected_match);
@@ -585,7 +622,7 @@ fn hostile_corpus_payloads_fail_closed_as_canonical_events() {
     for case in manifest
         .cases
         .iter()
-        .filter(|case| case.category == "hostile")
+        .filter(|case| case.category == "hostile-malformed")
     {
         let payload = case
             .hostile_payload

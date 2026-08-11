@@ -1,6 +1,6 @@
 {
   "name": "skynet-edr-browser-gate",
-  "version": "0.6.0-alpha.3",
+  "version": "0.6.0-beta.1",
   "private": true,
   "description": "Frozen Playwright runtime for the exact-artifact Hermes browser gate.",
   "dependencies": {
