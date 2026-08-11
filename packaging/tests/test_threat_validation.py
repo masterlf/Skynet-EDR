@@ -11,6 +11,9 @@ MANIFEST = ROOT / "crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.
 MATRIX = ROOT / "docs/coverage/v0.6.0-beta.1.json"
 PUBLIC_MATRIX = ROOT / "docs/PROTECTION_MATRIX_v0.6.0-beta.1.md"
 NFPM = ROOT / "packaging/nfpm.yaml"
+ARCHITECTURE = ROOT / "docs/ARCHITECTURE.md"
+DEPLOYMENT = ROOT / "docs/DEPLOYMENT.md"
+THREAT_VALIDATION_DOC = ROOT / "docs/THREAT_VALIDATION.md"
 
 
 class ThreatValidationTests(unittest.TestCase):
@@ -39,6 +42,13 @@ class ThreatValidationTests(unittest.TestCase):
             self.assertEqual(evidence["status"], "not_tested")
             self.assertEqual(
                 evidence["manifest_sha256"], hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
+            )
+            self.assertEqual(
+                evidence["matrix_sha256"], hashlib.sha256(MATRIX.read_bytes()).hexdigest()
+            )
+            self.assertEqual(
+                evidence["public_matrix_sha256"],
+                hashlib.sha256(PUBLIC_MATRIX.read_bytes()).hexdigest(),
             )
             self.assertEqual(
                 [result["scenario_id"] for result in evidence["results"]],
@@ -158,6 +168,38 @@ class ThreatValidationTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("scenario attribution", result.stderr.lower())
 
+    def test_matrix_rejects_detected_and_tested_without_executed_scenario_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
+            promoted = next(rule for rule in matrix["rules"] if rule["id"] == "EDR-SECRET-001")
+            promoted["status"] = "DETECTED_AND_TESTED"
+            matrix_path = Path(temp) / "matrix.json"
+            matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+            result = self.run_runner(
+                "--validate-only", "--matrix", matrix_path,
+                "--output", Path(temp) / "out.json",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("executed scenario evidence", result.stderr.lower())
+
+    def test_executed_mode_rejects_custom_matrix_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            matrix = Path(temp) / "matrix.json"
+            public_matrix = Path(temp) / "matrix.md"
+            matrix.write_bytes(MATRIX.read_bytes())
+            public_matrix.write_bytes(PUBLIC_MATRIX.read_bytes())
+            cases = (
+                ("--matrix", matrix, "custom matrix"),
+                ("--public-matrix", public_matrix, "custom public matrix"),
+            )
+            for option, path, diagnostic in cases:
+                with self.subTest(option=option):
+                    result = self.run_runner(option, path, "--output", Path(temp) / f"{option[2:]}.json")
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn(diagnostic, result.stderr.lower())
+
     def test_public_matrix_drift_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:
             public_matrix = Path(temp) / "matrix.md"
@@ -181,6 +223,18 @@ class ThreatValidationTests(unittest.TestCase):
         for unsupported_runtime in ("openclaw", "codex", "claude code", "similar local agents"):
             with self.subTest(runtime=unsupported_runtime):
                 self.assertNotIn(unsupported_runtime, description)
+
+    def test_public_docs_do_not_retain_stale_release_positioning(self):
+        architecture = ARCHITECTURE.read_text(encoding="utf-8")
+        deployment = DEPLOYMENT.read_text(encoding="utf-8")
+        threat_validation = THREAT_VALIDATION_DOC.read_text(encoding="utf-8")
+
+        self.assertNotIn("v0.5.0 plans durable local alerting", architecture)
+        self.assertIn("current v0.6.0-beta.1", architecture.lower())
+        self.assertNotIn("This v0.5.1 hotfix", deployment)
+        self.assertIn("This v0.6.0-beta.1 prerelease", deployment)
+        self.assertIn("manifest, matrix, and public-matrix SHA-256", threat_validation)
+        self.assertIn("custom manifests, matrices, and public matrices", threat_validation)
 
 
 if __name__ == "__main__":

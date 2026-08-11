@@ -198,6 +198,7 @@ def validate_matrix(path: Path, manifest, scenario_ids):
         status_by_rule[rule["id"]] = rule["status"]
         links_by_rule[rule["id"]] = set(rule["scenario_ids"])
     expected_by_rule = {}
+    authoritative_by_rule = {}
     for case in manifest["cases"]:
         matrix_id = case["rule_id"]
         if matrix_id is None and case["category"] == "hostile-malformed":
@@ -205,9 +206,16 @@ def validate_matrix(path: Path, manifest, scenario_ids):
         if type(matrix_id) is not str or not matrix_id:
             raise ContractError(f"scenario lacks matrix attribution: {case['case_id']}")
         expected_by_rule.setdefault(matrix_id, set()).add(case["case_id"])
+        if case["execution"] != "skipped" and case["expected_outcome"] in {"detected", "rejected"}:
+            authoritative_by_rule.setdefault(matrix_id, set()).add(case["case_id"])
     for rule_id in set(expected_by_rule) | set(links_by_rule):
         if links_by_rule.get(rule_id, set()) != expected_by_rule.get(rule_id, set()):
             raise ContractError(f"matrix scenario attribution drift: {rule_id}")
+    for rule_id, status in status_by_rule.items():
+        if status == "DETECTED_AND_TESTED" and not authoritative_by_rule.get(rule_id):
+            raise ContractError(
+                f"DETECTED_AND_TESTED rule lacks authoritative executed scenario evidence: {rule_id}"
+            )
     for rule_id in manifest["live_rules"]:
         if status_by_rule.get(rule_id) != "DETECTED_AND_TESTED":
             raise ContractError(f"live rule matrix drift: {rule_id}")
@@ -268,7 +276,9 @@ def run_check(name, command):
     return {"name": name, "status": "pass" if result.returncode == 0 else "fail", "exit_code": result.returncode}
 
 
-def evidence_document(manifest_path, manifest, selected, mode, checks):
+def evidence_document(
+    manifest_path, matrix_path, public_matrix_path, manifest, selected, mode, checks
+):
     check_failed = any(check["status"] == "fail" for check in checks)
     results = []
     for case in sorted(selected, key=lambda item: item["case_id"]):
@@ -294,7 +304,9 @@ def evidence_document(manifest_path, manifest, selected, mode, checks):
     return {
         "checks": checks,
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "matrix_sha256": hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
         "mode": mode,
+        "public_matrix_sha256": hashlib.sha256(public_matrix_path.read_bytes()).hexdigest(),
         "results": results,
         "schema_version": "skynet.threat-validation-evidence.v1",
         "status": status,
@@ -314,6 +326,10 @@ def main():
     try:
         if not args.validate_only and args.manifest.absolute() != DEFAULT_MANIFEST.absolute():
             raise ContractError("custom manifest requires --validate-only")
+        if not args.validate_only and args.matrix.absolute() != DEFAULT_MATRIX.absolute():
+            raise ContractError("custom matrix requires --validate-only")
+        if not args.validate_only and args.public_matrix.absolute() != DEFAULT_PUBLIC_MATRIX.absolute():
+            raise ContractError("custom public matrix requires --validate-only")
         manifest, scenario_ids = validate_manifest(args.manifest)
         matrix = validate_matrix(args.matrix, manifest, scenario_ids)
         validate_public_matrix(args.public_matrix, matrix)
@@ -326,7 +342,9 @@ def main():
         if not args.validate_only:
             checks.append(run_check("engine-corpus", ["cargo", "test", "-p", "skynet-edr-core", "--test", "detection_corpus", "--all-features", "--offline"]))
             checks.append(run_check("producer-corpus", ["python3", "-m", "unittest", "integrations/hermes/tests/test_detection_corpus.py"]))
-        evidence = evidence_document(args.manifest, manifest, selected, mode, checks)
+        evidence = evidence_document(
+            args.manifest, args.matrix, args.public_matrix, manifest, selected, mode, checks
+        )
         write_evidence(args.output, evidence)
         counts = {status: sum(result["status"] == status for result in evidence["results"]) for status in ("passed", "failed", "skipped", "not_tested")}
         print(f"Threat Validation Suite {manifest['suite_version']}: {evidence['status'].upper()} " + " ".join(f"{key.upper()}={value}" for key, value in counts.items() if value))

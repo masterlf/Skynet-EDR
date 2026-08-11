@@ -16,11 +16,11 @@ The runner sets Cargo offline mode and executes only fixed local commands. It ne
 python3 packaging/scripts/threat-validation.py --validate-only --output target/threat-validation/contract.json
 ```
 
-Validate-only evidence has status `not_tested`; it is never detection proof. Caller-selected custom manifests are accepted only in this mode because the fixed Rust and producer gates execute the repository-owned default manifest. `--scenario ID` rejects unknown IDs and limits reported results, although the bounded shared engine/producer gates still replay the complete corpus so cross-scenario regressions cannot be hidden.
+Validate-only evidence has status `not_tested`; it is never detection proof. Caller-selected custom manifests, matrices, and public matrices are accepted only in this mode because the fixed Rust and producer gates execute the repository-owned default corpus and claims. `--scenario ID` rejects unknown IDs and limits reported results, although the bounded shared engine/producer gates still replay the complete corpus so cross-scenario regressions cannot be hidden.
 
 ## Evidence
 
-The JSON output schema is `skynet.threat-validation-evidence.v1`. It records the suite version, exact manifest SHA-256, deterministic scenario ordering, fixed gate exit status, expected outcome, and `passed`, `failed`, `skipped`, or `not_tested` per scenario. It deliberately omits timestamps, hostnames, temporary paths, raw events, diagnostics, and environment data, so identical inputs and successful checks produce byte-identical evidence.
+The JSON output schema is `skynet.threat-validation-evidence.v1`. It records the suite version, exact manifest, matrix, and public-matrix SHA-256 values, deterministic scenario ordering, fixed gate exit status, expected outcome, and `passed`, `failed`, `skipped`, or `not_tested` per scenario. It deliberately omits timestamps, hostnames, temporary paths, raw events, diagnostics, and environment data, so identical inputs and successful checks produce byte-identical evidence.
 
 A `passed` scenario means its bounded offline fixture met its declared expectation. A `skipped` scenario is an explicit coverage gap. A green suite is not proof that arbitrary attacks are prevented or detected.
 
@@ -33,7 +33,7 @@ A `passed` scenario means its bounded offline fixture met its declared expectati
 5. Link the ID in `docs/coverage/v0.6.0-beta.1.json` and set only one approved matrix status.
 6. Add or update a failing validator/engine regression first, then run the suite twice and compare hashes.
 
-The runner fails closed on duplicate JSON keys, duplicate IDs, unknown fields/categories/outcomes/execution modes, incoherent category/outcome/match/count tuples, replay cases without executable engine and producer evidence, unsafe declarations, custom manifests in executed mode, unknown scenario selections, unknown matrix statuses, omitted links, and live/skipped status drift.
+The runner fails closed on duplicate JSON keys, duplicate IDs, unknown fields/categories/outcomes/execution modes, incoherent category/outcome/match/count tuples, replay cases without executable engine and producer evidence, unsafe declarations, custom manifests or matrices in executed mode, unknown scenario selections, unknown matrix statuses, omitted links, `DETECTED_AND_TESTED` claims without authoritative executed scenario evidence, and live/skipped status drift.
 
 ## Interpretation and limits
 
