@@ -30,7 +30,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 ### Product and security model
 
-- [Concepts](CONCEPTS.md) defines the product model, current scope, non-goals, and v0.4 vocabulary.
+- [Concepts](CONCEPTS.md) defines the product model, current scope, non-goals, and v0.6.0-beta.1 vocabulary.
 - [Project goals](GOALS.md) records mission, non-goals, milestones, and success criteria.
 - [Threat model](THREAT_MODEL.md) defines assets, trust boundaries, initial threats, assumptions, and response philosophy.
 - [Quality and security engineering](QUALITY_AND_SECURITY_ENGINEERING.md) defines the engineering baseline for secure development.
@@ -49,7 +49,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 - [Canonical event schema](EVENT_SCHEMA.md) is the source of truth for `skynet.event.v0` event envelopes.
 - [Integrations](INTEGRATIONS.md) is the integration index for Hermes, OpenClaw, the MCP handler-library contract, and local HTTP surfaces.
-- [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.4 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
+- [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.6.0-beta.1 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
 - [Hermes event ingestion](HERMES_EVENT_INGESTION.md) documents supported Hermes trace shapes and normalization.
 - [OpenClaw integration](OPENCLAW_INTEGRATION.md) documents MVP adapter requirements.
 - [Read-only MCP integration](MCP_READ_ONLY.md) documents the side-effect-free MCP handler library, not an operator-runnable MCP integration.
