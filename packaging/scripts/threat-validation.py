@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,15 @@ def write_evidence(path: Path, evidence: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
         raise ContractError("evidence output must not be a symlink")
+    try:
+        output_mode = path.stat().st_mode
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ContractError(f"invalid evidence output: {error}") from error
+    else:
+        if not stat.S_ISREG(output_mode):
+            raise ContractError("existing evidence output must be a regular file")
     payload = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8")
     temporary_name = None
     try:
