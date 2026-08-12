@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -137,6 +139,21 @@ class ThreatValidationTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+
+    @unittest.skipUnless(os.name == "posix", "special files require POSIX")
+    def test_output_special_file_is_rejected_without_replacing_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "evidence.fifo"
+            os.mkfifo(output, 0o600)
+            before = output.stat()
+
+            result = self.run_runner("--validate-only", "--output", output)
+
+            after = output.stat()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("regular file", result.stderr.lower())
+            self.assertTrue(stat.S_ISFIFO(after.st_mode))
+            self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
 
     def test_matrix_drift_and_unknown_scenario_selection_fail_closed(self):
         with tempfile.TemporaryDirectory() as temp:
