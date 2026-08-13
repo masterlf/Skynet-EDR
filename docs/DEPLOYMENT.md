@@ -31,7 +31,7 @@ Package installation and service restart are separate approvals. If the installe
 
 ```sh
 sudo systemctl restart skynet-edr.service
-sudo /usr/libexec/skynet-edr/deploy-verify --expected-product-version 0.6.0-beta.1 --expected-deb-version 0.6.0~beta.1
+sudo /usr/libexec/skynet-edr/deploy-verify --expected-product-version 0.6.0-rc.1 --expected-deb-version 0.6.0~rc.1
 sudo dpkg -V skynet-edr
 ```
 
@@ -57,4 +57,4 @@ Rollback preserves the current database and configuration. If schema compatibili
 
 Both package workflows are configured to invoke `packaging/scripts/vm-smoke.sh` only after passing the GitHub Actions, `runner.environment=github-hosted`, and explicit disposable-smoke interlocks. The configured gate is intended to pre-create root-owned state, install with APT, prove the installed verifier is byte-identical to the reviewed source and package-integrity-clean, start the real systemd unit, verify the real `skynet-edr` UID and writable state, check status/risks/rules HTTP 200 contracts, then inject root ownership drift and prove the installed verifier rejects it. Exact-final-tree hosted execution evidence remains pending until those jobs are green and retained.
 
-This v0.6.0-beta.1 prerelease does not qualify RPM, Arch, non-systemd, multi-host orchestration, database downgrade compatibility, production auto-repair, or Hermes runtime reload/enrollment. Those remain blocked until their own disposable native gates exist.
+This v0.6.0-rc.1 prerelease does not qualify RPM, Arch, non-systemd, multi-host orchestration, database downgrade compatibility, production auto-repair, or Hermes runtime reload/enrollment. Those remain blocked until their own disposable native gates exist.

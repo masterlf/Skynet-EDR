@@ -18,8 +18,8 @@ jobs:
     env:
       NFPM_VERSION: v2.46.3
       NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
-      SKYNET_EDR_PRODUCT_VERSION: 0.6.0-beta.1
-      SKYNET_EDR_DEB_VERSION: 0.6.0~beta.1
+      SKYNET_EDR_PRODUCT_VERSION: 0.6.0-rc.1
+      SKYNET_EDR_DEB_VERSION: 0.6.0~rc.1
       HERMES_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
       PLAYWRIGHT_BROWSERS_PATH: /tmp/skynet-edr-ms-playwright
     steps:

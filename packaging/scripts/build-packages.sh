@@ -2,7 +2,7 @@
 set -eu
 
 PRODUCT_VERSION="${SKYNET_EDR_PRODUCT_VERSION:-$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "skynet-edr-cli"))')}"
-DEB_VERSION="${SKYNET_EDR_DEB_VERSION:-0.6.0~beta.1}"
+DEB_VERSION="${SKYNET_EDR_DEB_VERSION:-0.6.0~rc.1}"
 DEB_ARCH="${NFPM_ARCH:-amd64}"
 RPM_ARCH="${NFPM_RPM_ARCH:-x86_64}"
 ARCHLINUX_ARCH="${NFPM_ARCHLINUX_ARCH:-x86_64}"

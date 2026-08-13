@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0-rc.1 - 2026-08-12
+
+- Promoted the beta.1 passive evaluation baseline to an RC identity without changing detection behavior, schemas, dependencies, or capability claims.
+- Carried forward the evidence-output correction that rejects existing special files instead of replacing them.
+- Advanced canonical product, plugin, package, browser-gate, current-evidence, workflow, and current-documentation identities; Debian/RPM use `0.6.0~rc.1` and Arch uses `0.6.0.rc.1-1`.
+
 ## 0.6.0-beta.1 - 2026-08-10
 
 - Added the deterministic offline Threat Validation Suite, strict versioned scenario/evidence contracts, and fail-closed public matrix drift validation.

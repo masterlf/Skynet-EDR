@@ -2,7 +2,7 @@
 
 ## Audience and purpose
 
-This page is the public contract for the installable Skynet-EDR `v0.6.0-beta.1` prerelease. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. It is for evaluation and lab use, not a production support commitment. Exact rule claims and scenario evidence are in the [v0.6.0-beta.1 protection matrix](PROTECTION_MATRIX_v0.6.0-beta.1.md).
+This page is the public contract for the installable Skynet-EDR `v0.6.0-rc.1` prerelease. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. It is for evaluation and lab use, not a production support commitment. Exact rule claims and scenario evidence are in the [v0.6.0-rc.1 protection matrix](PROTECTION_MATRIX_v0.6.0-rc.1.md).
 
 ## Product boundary
 
