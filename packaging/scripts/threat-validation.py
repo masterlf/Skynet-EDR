@@ -15,8 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT / "crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.json"
-DEFAULT_MATRIX = ROOT / "docs/coverage/v0.6.0-beta.1.json"
-DEFAULT_PUBLIC_MATRIX = ROOT / "docs/PROTECTION_MATRIX_v0.6.0-beta.1.md"
+DEFAULT_MATRIX = ROOT / "docs/coverage/v0.6.0-rc.1.json"
+DEFAULT_PUBLIC_MATRIX = ROOT / "docs/PROTECTION_MATRIX_v0.6.0-rc.1.md"
 DEFAULT_OUTPUT = ROOT / "target/threat-validation/evidence.json"
 MAX_MANIFEST_BYTES = 512 * 1024
 MAX_MATRIX_BYTES = 128 * 1024
@@ -104,7 +104,7 @@ def validate_manifest(path: Path):
         raise ContractError("manifest has missing top-level fields")
     if manifest.get("schema_version") != "skynet.threat-validation-manifest.v1":
         raise ContractError("unsupported manifest schema_version")
-    if manifest.get("suite_version") != "0.6.0-beta.1":
+    if manifest.get("suite_version") != "0.6.0-rc.1":
         raise ContractError("unsupported suite_version")
     live_rules = manifest.get("live_rules")
     if type(live_rules) is not dict or not live_rules or not all(
@@ -240,7 +240,7 @@ def render_public_matrix(matrix: dict) -> str:
     lines = [
         f"# Skynet-EDR v{matrix['matrix_version']} protection matrix",
         "",
-        "Generated from `docs/coverage/v0.6.0-beta.1.json`; direct edits fail the suite contract check.",
+        "Generated from `docs/coverage/v0.6.0-rc.1.json`; direct edits fail the suite contract check.",
         "",
         matrix["boundary"],
         "",
