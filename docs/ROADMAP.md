@@ -42,7 +42,7 @@ The v0.6.0 milestone carries forward the deployable alpha.3 passive path and the
 - deterministic offline scenario execution with versioned JSON evidence and a mechanically checked public protection matrix;
 - explicit `DETECTED_AND_TESTED`, `PARTIAL`, `NOT_TESTED`, and `NOT_COVERED` claims tied to immutable synthetic scenario IDs.
 
-The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd, browser, and threat-validation gates. Autonomous Hermes enrollment remains unproven and blocked with the literal verdict `S3_ADAPTER_BLOCK`.
+The release remains passive and is published as a pre-1.0 stable SemVer evaluation release. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd, browser, and threat-validation gates. Autonomous Hermes enrollment remains unproven and blocked with the literal verdict `S3_ADAPTER_BLOCK`.
 
 ## Next milestone: S4 hardening
 

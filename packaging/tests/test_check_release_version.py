@@ -27,6 +27,7 @@ FIXTURE_FILES = (
     "README.md",
     "docs/ROADMAP.md",
     "docs/INSTALL.md",
+    "docs/MVP_SUPPORT_MATRIX.md",
     "docs/HERMES_ENROLLMENT.md",
     "packaging/scripts/skynet-edr-hermes-enroll.py",
     "CHANGELOG.md",
@@ -84,6 +85,9 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             current = current.replace(
                 "is an installable stable SemVer evaluation release",
                 "is an installable prerelease",
+            ).replace(
+                "pre-1.0 stable SemVer evaluation release",
+                "prerelease",
             ).replace("` stable SemVer |", "` prerelease |")
             path.write_text(current, encoding="utf-8")
         for member in (
@@ -419,6 +423,52 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_prerelease_claims_in_stable_current_authorities(self) -> None:
+        with self.assertRaises(SystemExit) as failure:
+            with mock.patch.object(self.checker, "ROOT", self.fixture_root):
+                self.checker.require_current_release_kind("0.6.0")
+
+        self.assertIn("stable current release", str(failure.exception))
+
+    def test_permits_current_prerelease_authorities_for_prerelease_version(self) -> None:
+        with mock.patch.object(self.checker, "ROOT", self.fixture_root):
+            self.checker.require_current_release_kind("0.6.0-rc.1")
+
+    def test_permits_historical_and_generic_prerelease_references_for_stable_version(self) -> None:
+        replacements = {
+            "docs/INSTALL.md": (
+                ("The installable prerelease has", "The installable pre-1.0 stable SemVer evaluation release has"),
+            ),
+            "docs/README.md": (
+                (
+                    "Check what this prerelease actually supports",
+                    "Check what this pre-1.0 stable SemVer evaluation release actually supports",
+                ),
+            ),
+            "docs/MVP_SUPPORT_MATRIX.md": (
+                ("`amd64` prerelease.", "`amd64` pre-1.0 stable SemVer evaluation release."),
+                (
+                    "but this prerelease has no package signatures",
+                    "but this pre-1.0 stable SemVer evaluation release has no package signatures",
+                ),
+            ),
+            "docs/ROADMAP.md": (
+                (
+                    "published as a prerelease.",
+                    "published as a pre-1.0 stable SemVer evaluation release.",
+                ),
+            ),
+        }
+        for relative, changes in replacements.items():
+            path = self.fixture_root / relative
+            document = path.read_text(encoding="utf-8")
+            for old, new in changes:
+                document = document.replace(old, new)
+            path.write_text(document, encoding="utf-8")
+
+        with mock.patch.object(self.checker, "ROOT", self.fixture_root):
+            self.checker.require_current_release_kind("0.6.0")
 
     def test_maps_stable_and_prerelease_products_to_exact_native_versions(self) -> None:
         for product, native in (

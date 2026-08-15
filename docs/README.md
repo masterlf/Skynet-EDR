@@ -8,7 +8,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 | Need | Read |
 |---|---|
-| Check what this prerelease actually supports | [MVP public support contract](MVP_SUPPORT_MATRIX.md) |
+| Check what this pre-1.0 stable SemVer evaluation release actually supports | [MVP public support contract](MVP_SUPPORT_MATRIX.md) |
 | Install a release package | [Install](INSTALL.md) |
 | Run the MVP quickly | [Quickstart](QUICKSTART.md) |
 | Understand what Skynet-EDR is and is not | [Concepts](CONCEPTS.md) |

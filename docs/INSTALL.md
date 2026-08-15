@@ -1,6 +1,6 @@
 # Skynet-EDR Linux installation guide
 
-Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installable prerelease has a shipped live Hermes producer only; OpenClaw, Codex, Claude Code, and similar runtimes require an external conforming producer and are not shipped live integrations.
+Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installable pre-1.0 stable SemVer evaluation release has a shipped live Hermes producer only; OpenClaw, Codex, Claude Code, and similar runtimes require an external conforming producer and are not shipped live integrations.
 
 The install goal is conservative: collect and normalize local AI-agent security evidence without creating a new root-level attack surface. No privileged runtime sensor is enabled by default.
 
