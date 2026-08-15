@@ -1,6 +1,6 @@
 {
   "boundary": "Passive detection and evidence only. No prevention, blocking, containment, quarantine, approval, or guard mode is provided.",
-  "matrix_version": "0.6.0-rc.1",
+  "matrix_version": "0.6.0",
   "schema_version": "skynet.protection-matrix.v1",
   "rules": [
     {"id":"EDR-CRON-001","status":"DETECTED_AND_TESTED","scenario_ids":["malicious_cron","near_miss_cron"],"evidence":"offline engine replay plus shipped Hermes producer fixture","limitation":"Only authoritative successful built-in cronjob create/update results."},

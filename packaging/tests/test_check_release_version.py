@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,33 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             destination = self.fixture_root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPOSITORY_ROOT / relative, destination)
+        prerelease_native_replacements = {
+            "packaging/nfpm.yaml": (
+                ("${SKYNET_EDR_DEB_VERSION:-0.6.0}", "${SKYNET_EDR_DEB_VERSION:-0.6.0~rc.1}"),
+            ),
+            "docs/ROADMAP.md": (("(`0.6.0`)", "(`0.6.0~rc.1`)"),),
+            "docs/INSTALL.md": (
+                ("DEB and RPM report `0.6.0`", "DEB and RPM report `0.6.0~rc.1`"),
+                ("Arch reports `0.6.0-1`", "Arch reports `0.6.0.rc.1-1`"),
+            ),
+        }
+        for relative in FIXTURE_FILES:
+            if relative in {"CHANGELOG.md", "docs/releases/v0.6.0-rc.1.md"}:
+                continue
+            path = self.fixture_root / relative
+            current = path.read_text(encoding="utf-8")
+            for stable, prerelease in prerelease_native_replacements.get(relative, ()):
+                current = current.replace(stable, prerelease)
+            current = re.sub(
+                r"0\.6\.0(?!-(?:rc|beta|alpha|[0-9])|\.(?:rc|beta|alpha)|~|[0-9])",
+                "0.6.0-rc.1",
+                current,
+            )
+            current = current.replace(
+                "is an installable stable SemVer evaluation release",
+                "is an installable prerelease",
+            ).replace("` stable SemVer |", "` prerelease |")
+            path.write_text(current, encoding="utf-8")
         for member in (
             "skynet-edr-core",
             "skynet-edr-cli",
@@ -374,6 +402,58 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         for version in ("0.6.0-rc.1", "1.0.0-rc.1", "2.3.4"):
             with self.subTest(version=version):
                 self.assertTrue(self.checker.is_canonical_release_version(version))
+
+    def test_accepts_stable_current_repository_surfaces(self) -> None:
+        result = subprocess.run(
+            [
+                "python3",
+                str(CHECKER_PATH),
+                "--expected-product",
+                "0.6.0",
+                "--expected-deb",
+                "0.6.0",
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_maps_stable_and_prerelease_products_to_exact_native_versions(self) -> None:
+        for product, native in (
+            ("0.6.0", "0.6.0"),
+            ("0.6.0-rc.1", "0.6.0~rc.1"),
+        ):
+            with self.subTest(product=product):
+                self.assertEqual(self.checker.native_package_version(product), native)
+
+    def test_rejects_native_version_that_inverts_release_kind(self) -> None:
+        stable_result = subprocess.run(
+            [
+                sys.executable,
+                str(CHECKER_PATH),
+                "--expected-product",
+                "0.6.0",
+                "--expected-deb",
+                "0.6.0~rc.1",
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(stable_result.returncode, 0)
+        self.assertIn("invalid Debian package version", stable_result.stderr)
+
+        with self.assertRaises(SystemExit) as prerelease_failure:
+            self.run_checker(
+                "--expected-product",
+                "0.6.0-rc.1",
+                "--expected-deb",
+                "0.6.0",
+            )
+        self.assertIn("invalid Debian package version", str(prerelease_failure.exception))
 
     def test_rejects_malformed_or_noncanonical_semver_prerelease(self) -> None:
         for version in (

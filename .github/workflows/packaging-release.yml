@@ -6,12 +6,12 @@ on:
       product_version:
         description: "Canonical product SemVer"
         required: true
-        default: "0.6.0-rc.1"
+        default: "0.6.0"
         type: string
       deb_version:
         description: "Native Debian package version"
         required: true
-        default: "0.6.0~rc.1"
+        default: "0.6.0"
         type: string
   push:
     tags:
@@ -32,8 +32,8 @@ jobs:
       NFPM_RPM_ARCH: x86_64
       NFPM_ARCHLINUX_ARCH: x86_64
       NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
-      SKYNET_EDR_PRODUCT_VERSION: ${{ inputs.product_version || '0.6.0-rc.1' }}
-      SKYNET_EDR_DEB_VERSION: ${{ inputs.deb_version || '0.6.0~rc.1' }}
+      SKYNET_EDR_PRODUCT_VERSION: ${{ inputs.product_version || '0.6.0' }}
+      SKYNET_EDR_DEB_VERSION: ${{ inputs.deb_version || '0.6.0' }}
       HERMES_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
       PLAYWRIGHT_BROWSERS_PATH: /tmp/skynet-edr-ms-playwright
     steps:
@@ -71,7 +71,7 @@ jobs:
       - name: Prime locked Rust dependencies
         run: cargo fetch --locked
 
-      - name: Release-candidate threat validation gate
+      - name: Release threat validation gate
         run: python3 packaging/scripts/threat-validation.py --output target/threat-validation/evidence.json
 
       - name: Install package inspection tools
@@ -103,10 +103,10 @@ jobs:
             "SKYNET_EDR_EXPECTED_DEB_VERSION=$SKYNET_EDR_EXPECTED_DEB_VERSION" \
             packaging/scripts/validate-packaging.sh
 
-      - name: Validate exact release-candidate identity planes
+      - name: Validate exact release identity planes
         run: |
-          test "${SKYNET_EDR_PRODUCT_VERSION}" = "0.6.0-rc.1"
-          test "${SKYNET_EDR_DEB_VERSION}" = "0.6.0~rc.1"
+          test "${SKYNET_EDR_PRODUCT_VERSION}" = "0.6.0"
+          test "${SKYNET_EDR_DEB_VERSION}" = "0.6.0"
 
       - name: Prepare clean dist directory
         run: rm -rf dist
@@ -181,6 +181,11 @@ jobs:
             echo "release already exists; refusing to replace published assets: $GITHUB_REF_NAME" >&2
             exit 1
           fi
+          publication_mode=$(python3 packaging/scripts/release-publication-mode.py "${SKYNET_EDR_PRODUCT_VERSION}")
+          release_flags=()
+          if [ "$publication_mode" = "prerelease" ]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             dist/*.tar.gz \
             dist/*.deb \
@@ -189,5 +194,5 @@ jobs:
             dist/checksums.txt \
             --title "Skynet-EDR ${GITHUB_REF_NAME} — reliable passive detection" \
             --notes-file dist/release-notes.md \
-            --prerelease \
+            "${release_flags[@]}" \
             --verify-tag

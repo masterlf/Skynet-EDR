@@ -42,7 +42,7 @@ ALLOWED_FILES = (
 )
 SUPPORTED_HOST = {"id": "ubuntu", "version": "24.04", "arch": "x86_64", "init": "systemd"}
 SUPPORTED_HERMES = {"0.19.0"}
-PAYLOAD_VERSION = "0.6.0-rc.1"
+PAYLOAD_VERSION = "0.6.0"
 SYSTEM_SOURCE = Path("/usr/share/skynet-edr/hermes-plugin/skynet-edr")
 SYSTEM_MANIFEST = SYSTEM_SOURCE.parent / "manifest.json"
 SYSTEM_STATE_ROOT = Path("/var/lib/skynet-edr-hermes-enrollment")

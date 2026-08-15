@@ -1,6 +1,6 @@
 # Threat Validation Suite
 
-The repository-owned Threat Validation Suite is a deterministic, synthetic-only quality gate for Skynet-EDR v0.6.0-rc.1. It consolidates the existing S2/M4a corpus instead of creating a second fixture universe.
+The repository-owned Threat Validation Suite is a deterministic, synthetic-only quality gate for Skynet-EDR v0.6.0. It consolidates the existing S2/M4a corpus instead of creating a second fixture universe.
 
 ## Run it
 
@@ -30,7 +30,7 @@ A `passed` scenario means its bounded offline fixture met its declared expectati
 2. Use only clearly synthetic data, `.invalid` destinations, documentation-only IP ranges, and fake markers. Do not add executable malware, credentials, public egress, or dangerous commands.
 3. Declare one category: `malicious`, `benign`, or `hostile-malformed`.
 4. Declare exact `expected_outcome`, `expected_match`, incident count/severity, `rule_id`, engine, producer path, evidence strength, limitations, compatibility, and execution mode.
-5. Link the ID in `docs/coverage/v0.6.0-rc.1.json` and set only one approved matrix status.
+5. Link the ID in `docs/coverage/v0.6.0.json` and set only one approved matrix status.
 6. Add or update a failing validator/engine regression first, then run the suite twice and compare hashes.
 
 The runner fails closed on duplicate JSON keys, duplicate IDs, unknown fields/categories/outcomes/execution modes, incoherent category/outcome/match/count tuples, replay cases without executable engine and producer evidence, unsafe declarations, custom manifests or matrices in executed mode, unknown scenario selections, unknown matrix statuses, omitted links, `DETECTED_AND_TESTED` claims without authoritative executed scenario evidence, and live/skipped status drift.
@@ -42,4 +42,4 @@ The runner fails closed on duplicate JSON keys, duplicate IDs, unknown fields/ca
 - `NOT_TESTED`: no qualifying execution evidence is claimed by this suite.
 - `NOT_COVERED`: no shipped path provides the capability.
 
-All product behavior remains passive. The suite does not block, prevent, contain, quarantine, approve, or mutate agent actions. It invokes plugin callbacks directly, not the real Hermes dispatcher ABI; it does not test packages, service management, production timing distributions, unbounded inputs, every classifier bypass, or external producers. See the versioned [public protection matrix](PROTECTION_MATRIX_v0.6.0-rc.1.md).
+All product behavior remains passive. The suite does not block, prevent, contain, quarantine, approve, or mutate agent actions. It invokes plugin callbacks directly, not the real Hermes dispatcher ABI; it does not test packages, service management, production timing distributions, unbounded inputs, every classifier bypass, or external producers. See the versioned [public protection matrix](PROTECTION_MATRIX_v0.6.0.md).

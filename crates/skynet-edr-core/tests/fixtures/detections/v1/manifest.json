@@ -2116,5 +2116,5 @@
     "EDR-PI-001": "high"
   },
   "schema_version": "skynet.threat-validation-manifest.v1",
-  "suite_version": "0.6.0-rc.1"
+  "suite_version": "0.6.0"
 }

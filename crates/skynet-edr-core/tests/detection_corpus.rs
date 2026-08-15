@@ -296,7 +296,7 @@ fn manifest_is_complete_unique_and_locks_the_live_support_set() {
         manifest.schema_version,
         "skynet.threat-validation-manifest.v1"
     );
-    assert_eq!(manifest.suite_version, "0.6.0-rc.1");
+    assert_eq!(manifest.suite_version, "0.6.0");
     assert_eq!(
         manifest.compatibility["evidence_schema_version"],
         "skynet.threat-validation-evidence.v1"

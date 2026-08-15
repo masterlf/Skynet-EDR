@@ -1,6 +1,6 @@
-# Skynet-EDR v0.6.0-rc.1 protection matrix
+# Skynet-EDR v0.6.0 protection matrix
 
-Generated from `docs/coverage/v0.6.0-rc.1.json`; direct edits fail the suite contract check.
+Generated from `docs/coverage/v0.6.0.json`; direct edits fail the suite contract check.
 
 Passive detection and evidence only. No prevention, blocking, containment, quarantine, approval, or guard mode is provided.
 

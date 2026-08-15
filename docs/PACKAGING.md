@@ -128,12 +128,12 @@ Local package baseline:
 cargo build --release --workspace --bins
 packaging/scripts/validate-packaging.sh
 
-SKYNET_EDR_PRODUCT_VERSION=0.6.0-rc.1 \
-SKYNET_EDR_DEB_VERSION=0.6.0~rc.1 \
+SKYNET_EDR_PRODUCT_VERSION=0.6.0 \
+SKYNET_EDR_DEB_VERSION=0.6.0 \
 NFPM_ARCH=amd64 \
 packaging/scripts/build-packages.sh
 
-SKYNET_EDR_PRODUCT_VERSION=0.6.0-rc.1 \
+SKYNET_EDR_PRODUCT_VERSION=0.6.0 \
 NFPM_ARCH=amd64 \
 packaging/scripts/build-packages.sh
 ```
@@ -234,5 +234,5 @@ Rollback notes must accompany every release once packages are published.
 The repository now includes a conservative long-running `skynet-edr-daemon run
 --config <path>` path, authenticated local ingestion, and a loopback-only
 read-only HTTP listener. Package/service enablement remains an operator
-decision: the v0.6.0-rc.1 prerelease does not establish production runtime support,
+decision: the v0.6.0 stable SemVer evaluation release does not establish production runtime support,
 upgrade/rollback proof, or response outcomes.

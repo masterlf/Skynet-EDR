@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "packaging/scripts/threat-validation.py"
 MANIFEST = ROOT / "crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.json"
-MATRIX = ROOT / "docs/coverage/v0.6.0-rc.1.json"
-PUBLIC_MATRIX = ROOT / "docs/PROTECTION_MATRIX_v0.6.0-rc.1.md"
+MATRIX = ROOT / "docs/coverage/v0.6.0.json"
+PUBLIC_MATRIX = ROOT / "docs/PROTECTION_MATRIX_v0.6.0.md"
 NFPM = ROOT / "packaging/nfpm.yaml"
 ARCHITECTURE = ROOT / "docs/ARCHITECTURE.md"
 DEPLOYMENT = ROOT / "docs/DEPLOYMENT.md"
@@ -39,7 +39,7 @@ class ThreatValidationTests(unittest.TestCase):
             self.assertEqual(first.read_bytes(), second.read_bytes())
             evidence = json.loads(first.read_text(encoding="utf-8"))
             self.assertEqual(evidence["schema_version"], "skynet.threat-validation-evidence.v1")
-            self.assertEqual(evidence["suite_version"], "0.6.0-rc.1")
+            self.assertEqual(evidence["suite_version"], "0.6.0")
             self.assertEqual(evidence["mode"], "validate-only")
             self.assertEqual(evidence["status"], "not_tested")
             self.assertEqual(
@@ -247,9 +247,9 @@ class ThreatValidationTests(unittest.TestCase):
         threat_validation = THREAT_VALIDATION_DOC.read_text(encoding="utf-8")
 
         self.assertNotIn("v0.5.0 plans durable local alerting", architecture)
-        self.assertIn("current v0.6.0-rc.1", architecture.lower())
+        self.assertIn("current v0.6.0", architecture.lower())
         self.assertNotIn("This v0.5.1 hotfix", deployment)
-        self.assertIn("This v0.6.0-rc.1 prerelease", deployment)
+        self.assertIn("This v0.6.0 stable SemVer evaluation release", deployment)
         self.assertIn("manifest, matrix, and public-matrix SHA-256", threat_validation)
         self.assertIn("custom manifests, matrices, and public matrices", threat_validation)
 

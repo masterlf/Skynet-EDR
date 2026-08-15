@@ -1,6 +1,6 @@
 # M4a/S2 validation
 
-For v0.6.0-rc.1, this deep S2 procedure includes the bounded [Threat Validation Suite](THREAT_VALIDATION.md). The suite is the reusable CI/release contract; this document retains the deeper runtime-canary and report-sealing procedure.
+For v0.6.0, this deep S2 procedure includes the bounded [Threat Validation Suite](THREAT_VALIDATION.md). The suite is the reusable CI/release contract; this document retains the deeper runtime-canary and report-sealing procedure.
 
 S2 is a deterministic, synthetic-only quality floor for the passive Hermes integration. It does not install packages, mutate a live host, contact external services, or prove compatibility with the actual Hermes dispatcher.
 

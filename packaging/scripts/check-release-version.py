@@ -42,6 +42,12 @@ def is_canonical_release_version(value: object) -> bool:
     return type(value) is str and re.fullmatch(CANONICAL_RELEASE_VERSION_PATTERN, value) is not None
 
 
+def native_package_version(product_version: str) -> str:
+    """Map canonical product SemVer to the exact native DEB/RPM identity."""
+    release, separator, prerelease = product_version.partition("-")
+    return f"{release}~{prerelease}" if separator else release
+
+
 def text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
@@ -357,7 +363,7 @@ def main() -> None:
         "nFPM DEB default version",
     )
     expected_deb = deb_default if args.expected_deb is None else args.expected_deb
-    if type(expected_deb) is not str or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+~[0-9A-Za-z.-]+", expected_deb) is None:
+    if type(expected_deb) is not str or expected_deb != native_package_version(expected):
         raise SystemExit(f"invalid Debian package version: {expected_deb!r}")
 
     observed = {
@@ -517,10 +523,14 @@ def main() -> None:
         if any(stale_claim in document for stale_claim in stale_claims):
             raise SystemExit(f"{path} contains a stale current-state claim")
 
+    release_description = (
+        "prerelease" if "-" in expected else "stable SemVer evaluation release"
+    )
+    release_table_kind = "prerelease" if "-" in expected else "stable SemVer"
     authoritative_doc_versions = {
         "SECURITY.md": (
-            rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) is an installable prerelease",
-            rf"^\| `v({CANONICAL_RELEASE_VERSION_PATTERN})` prerelease \|",
+            rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) is an installable {re.escape(release_description)}",
+            rf"^\| `v({CANONICAL_RELEASE_VERSION_PATTERN})` {re.escape(release_table_kind)} \|",
         ),
         "docs/README.md": (
             rf"^Current documentation structure target: v({CANONICAL_RELEASE_VERSION_PATTERN})\.",
