@@ -428,7 +428,7 @@ test('rc.1 alert delivery regression stays online with degraded telemetry', asyn
   await harness.flushEffects();
   const tree = harness.render();
 
-  assert.match(textOf(tree), /EDR 0\.6\.0-rc\.1/);
+  assert.match(textOf(tree), /EDR 0\.6\.0/);
   assert.equal(findNode(tree, (node) => textOf(node) === 'Engine Online', 'online engine indicator').props.tone, 'success');
   assert.equal(findNode(tree, (node) => textOf(node) === 'Backend available', 'online backend indicator').props.tone, 'success');
   assert.match(textOf(tree), /Telemetry degraded/);

@@ -35,6 +35,22 @@ CANONICAL_RELEASE_VERSION_PATTERN = (
     rf"{SEMVER_NUMERIC_IDENTIFIER}"
     rf"(?:-{SEMVER_PRERELEASE_IDENTIFIER}(?:\.{SEMVER_PRERELEASE_IDENTIFIER})*)?"
 )
+CURRENT_RELEASE_KIND_PATTERN = r"(prerelease|pre-1\.0 stable SemVer evaluation release)"
+CURRENT_RELEASE_KIND_AUTHORITIES = {
+    "docs/INSTALL.md": (
+        rf"^Skynet-EDR is currently .* The installable {CURRENT_RELEASE_KIND_PATTERN} has ",
+    ),
+    "docs/README.md": (
+        rf"^\| Check what this {CURRENT_RELEASE_KIND_PATTERN} actually supports \|",
+    ),
+    "docs/MVP_SUPPORT_MATRIX.md": (
+        rf"^Skynet-EDR is a passive, local-first, Linux `x86_64`/`amd64` {CURRENT_RELEASE_KIND_PATTERN}\.",
+        rf"^Published checksums provide integrity checking, but this {CURRENT_RELEASE_KIND_PATTERN} has ",
+    ),
+    "docs/ROADMAP.md": (
+        rf"^The release remains passive and is published as a {CURRENT_RELEASE_KIND_PATTERN}\.",
+    ),
+}
 
 
 def is_canonical_release_version(value: object) -> bool:
@@ -42,8 +58,26 @@ def is_canonical_release_version(value: object) -> bool:
     return type(value) is str and re.fullmatch(CANONICAL_RELEASE_VERSION_PATTERN, value) is not None
 
 
+def native_package_version(product_version: str) -> str:
+    """Map canonical product SemVer to the exact native DEB/RPM identity."""
+    release, separator, prerelease = product_version.partition("-")
+    return f"{release}~{prerelease}" if separator else release
+
+
 def text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def require_current_release_kind(expected: str) -> None:
+    """Require current release authorities to agree with the SemVer release kind."""
+    required_kind = "prerelease" if "-" in expected else "pre-1.0 stable SemVer evaluation release"
+    for path, patterns in CURRENT_RELEASE_KIND_AUTHORITIES.items():
+        document = text(path)
+        for pattern in patterns:
+            observed = re.findall(pattern, document, flags=re.MULTILINE)
+            if observed != [required_kind]:
+                release_kind = "prerelease" if "-" in expected else "stable current release"
+                raise SystemExit(f"{path} misstates the {release_kind} kind")
 
 
 def require_unique_yaml_scalar(path: str, value_pattern: str, label: str) -> str:
@@ -357,7 +391,7 @@ def main() -> None:
         "nFPM DEB default version",
     )
     expected_deb = deb_default if args.expected_deb is None else args.expected_deb
-    if type(expected_deb) is not str or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+~[0-9A-Za-z.-]+", expected_deb) is None:
+    if type(expected_deb) is not str or expected_deb != native_package_version(expected):
         raise SystemExit(f"invalid Debian package version: {expected_deb!r}")
 
     observed = {
@@ -503,6 +537,8 @@ def main() -> None:
         if any(marker not in document for marker in markers):
             raise SystemExit(f"{path} does not reference current release {expected}")
 
+    require_current_release_kind(expected)
+
     stale_current_state_claims = {
         "docs/HERMES_EVENT_INGESTION.md": (
             "live v0.4 integrations should emit `skynet.event.v0` events directly where possible.",
@@ -517,10 +553,14 @@ def main() -> None:
         if any(stale_claim in document for stale_claim in stale_claims):
             raise SystemExit(f"{path} contains a stale current-state claim")
 
+    release_description = (
+        "prerelease" if "-" in expected else "stable SemVer evaluation release"
+    )
+    release_table_kind = "prerelease" if "-" in expected else "stable SemVer"
     authoritative_doc_versions = {
         "SECURITY.md": (
-            rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) is an installable prerelease",
-            rf"^\| `v({CANONICAL_RELEASE_VERSION_PATTERN})` prerelease \|",
+            rf"^Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN}) is an installable {re.escape(release_description)}",
+            rf"^\| `v({CANONICAL_RELEASE_VERSION_PATTERN})` {re.escape(release_table_kind)} \|",
         ),
         "docs/README.md": (
             rf"^Current documentation structure target: v({CANONICAL_RELEASE_VERSION_PATTERN})\.",

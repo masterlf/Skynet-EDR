@@ -8,7 +8,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 | Need | Read |
 |---|---|
-| Check what this prerelease actually supports | [MVP public support contract](MVP_SUPPORT_MATRIX.md) |
+| Check what this pre-1.0 stable SemVer evaluation release actually supports | [MVP public support contract](MVP_SUPPORT_MATRIX.md) |
 | Install a release package | [Install](INSTALL.md) |
 | Run the MVP quickly | [Quickstart](QUICKSTART.md) |
 | Understand what Skynet-EDR is and is not | [Concepts](CONCEPTS.md) |
@@ -30,7 +30,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 ### Product and security model
 
-- [Concepts](CONCEPTS.md) defines the product model, current scope, non-goals, and v0.6.0-rc.1 vocabulary.
+- [Concepts](CONCEPTS.md) defines the product model, current scope, non-goals, and v0.6.0 vocabulary.
 - [Project goals](GOALS.md) records mission, non-goals, milestones, and success criteria.
 - [Threat model](THREAT_MODEL.md) defines assets, trust boundaries, initial threats, assumptions, and response philosophy.
 - [Quality and security engineering](QUALITY_AND_SECURITY_ENGINEERING.md) defines the engineering baseline for secure development.
@@ -49,7 +49,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 - [Canonical event schema](EVENT_SCHEMA.md) is the source of truth for `skynet.event.v0` event envelopes.
 - [Integrations](INTEGRATIONS.md) is the integration index for Hermes, OpenClaw, the MCP handler-library contract, and local HTTP surfaces.
-- [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.6.0-rc.1 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
+- [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) documents the v0.6.0 passive Hermes lifecycle hook plugin, JSONL spool, and sanitized operational logs.
 - [Hermes event ingestion](HERMES_EVENT_INGESTION.md) documents supported Hermes trace shapes and normalization.
 - [OpenClaw integration](OPENCLAW_INTEGRATION.md) documents MVP adapter requirements.
 - [Read-only MCP integration](MCP_READ_ONLY.md) documents the side-effect-free MCP handler library, not an operator-runnable MCP integration.
@@ -60,7 +60,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 - [Linux lab testing](LINUX_LAB_TESTING.md) documents safe manual validation with fake honeytokens and controlled sinks.
 - [M4a S2 validation](M4A_VALIDATION.md) defines the synthetic seven-rule corpus, live-socket canary, metrics, and evidence limits.
-- [Threat Validation Suite](THREAT_VALIDATION.md) defines the reusable offline runner and contributor contract; the [v0.6.0-rc.1 protection matrix](PROTECTION_MATRIX_v0.6.0-rc.1.md) states exact public coverage and gaps.
+- [Threat Validation Suite](THREAT_VALIDATION.md) defines the reusable offline runner and contributor contract; the [v0.6.0 protection matrix](PROTECTION_MATRIX_v0.6.0.md) states exact public coverage and gaps.
 - [Packaging plan](PACKAGING.md) documents package contents, build commands, validation gates, maintainer-script rules, signing, and rollback policy.
 - [Release process](RELEASE_PROCESS.md) turns packaging and validation into a release checklist.
 - [Security tooling options](SECURITY_TOOLING_OPTIONS.md) records the current and candidate security-tooling baseline.
@@ -69,7 +69,7 @@ The docs are intentionally split by operator journey. Start with the shortest pa
 
 Current event schema: `skynet.event.v0`.
 
-Current documentation structure target: v0.6.0-rc.1. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. The [MVP public support contract](MVP_SUPPORT_MATRIX.md) is the release-facing source for current support and capability status; if another page blurs that line, fix the page before building on it.
+Current documentation structure target: v0.6.0. The docs may describe planned capabilities, but each page should clearly separate implemented behavior from roadmap intent. The [MVP public support contract](MVP_SUPPORT_MATRIX.md) is the release-facing source for current support and capability status; if another page blurs that line, fix the page before building on it.
 
 ## Structured attribute safety
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-08-15
+
+- Promoted the v0.6.0-rc.1 passive evaluation baseline to stable SemVer identity without changing detection behavior, schemas, rules, dependencies, or capability claims.
+- Advanced active product, plugin, dashboard, package, workflow, evidence, and documentation identities to `0.6.0`; DEB/RPM use `0.6.0` and Arch uses `0.6.0-1`.
+- Made GitHub release publication select prerelease status from canonical product identity while preserving fail-closed tag, reviewed-notes, checksum, existing-release, and verified-tag gates.
+
 ## 0.6.0-rc.1 - 2026-08-12
 
 - Promoted the beta.1 passive evaluation baseline to an RC identity without changing detection behavior, schemas, dependencies, or capability claims.

@@ -2,11 +2,11 @@
 
 ## Audience and purpose
 
-This page is the public contract for the installable Skynet-EDR `v0.6.0-rc.1` prerelease. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. It is for evaluation and lab use, not a production support commitment. Exact rule claims and scenario evidence are in the [v0.6.0-rc.1 protection matrix](PROTECTION_MATRIX_v0.6.0-rc.1.md).
+This page is the public contract for the installable Skynet-EDR `v0.6.0` stable SemVer evaluation release. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. Stable identity in this pre-1.0 product is not a production support commitment. Exact rule claims and scenario evidence are in the [v0.6.0 protection matrix](PROTECTION_MATRIX_v0.6.0.md).
 
 ## Product boundary
 
-Skynet-EDR is a passive, local-first, Linux `x86_64`/`amd64` prerelease. It accepts and stores redacted local security evidence, applies bounded correlation, and exposes local read-only visibility. It detects and records; it does not block, pause, approve, quarantine, contain, or otherwise change an agent action.
+Skynet-EDR is a passive, local-first, Linux `x86_64`/`amd64` pre-1.0 stable SemVer evaluation release. It accepts and stores redacted local security evidence, applies bounded correlation, and exposes local read-only visibility. It detects and records; it does not block, pause, approve, quarantine, contain, or otherwise change an agent action.
 
 The product does not replace endpoint EDR, SIEM, IAM, DLP, runtime guardrails, or an incident-response service. Operators remain responsible for validating incidents, controlling runtime access, preserving evidence, and taking any response action.
 
@@ -19,7 +19,7 @@ The product does not replace endpoint EDR, SIEM, IAM, DLP, runtime guardrails, o
 
 Unsupported or unproven: `arm64`/`aarch64`, musl/Alpine, non-systemd hosts, Windows, macOS, and any distribution or architecture not listed above. RPM and Arch artifacts do not establish RHEL/Fedora/Arch runtime compatibility. The tarball installer does not provision the `skynet-edr-ingest` group or sysusers/tmpfiles state needed for authenticated continuous ingress; do not infer ingress readiness from a successful tarball installation.
 
-Published checksums provide integrity checking, but this prerelease has no package signatures, signed checksum manifest, SBOM, provenance attestation, or bounded Hermes compatibility range.
+Published checksums provide integrity checking, but this pre-1.0 stable SemVer evaluation release has no package signatures, signed checksum manifest, SBOM, provenance attestation, or bounded Hermes compatibility range.
 
 ## Runtime and integration coverage
 
