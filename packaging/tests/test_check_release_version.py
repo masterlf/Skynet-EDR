@@ -424,49 +424,127 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_rejects_prerelease_claims_in_stable_current_authorities(self) -> None:
-        with self.assertRaises(SystemExit) as failure:
-            with mock.patch.object(self.checker, "ROOT", self.fixture_root):
-                self.checker.require_current_release_kind("0.6.0")
+    def test_checks_each_current_release_kind_authority_independently(self) -> None:
+        cases = (
+            (
+                "docs/INSTALL.md",
+                "Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installable pre-1.0 stable SemVer evaluation release has a shipped live Hermes producer only; OpenClaw, Codex, Claude Code, and similar runtimes require an external conforming producer and are not shipped live integrations.",
+                "Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installable prerelease has a shipped live Hermes producer only; OpenClaw, Codex, Claude Code, and similar runtimes require an external conforming producer and are not shipped live integrations.",
+                "docs/INSTALL.md misstates the stable current release kind",
+            ),
+            (
+                "docs/README.md",
+                "| Check what this pre-1.0 stable SemVer evaluation release actually supports | [MVP public support contract](MVP_SUPPORT_MATRIX.md) |",
+                "| Check what this prerelease actually supports | [MVP public support contract](MVP_SUPPORT_MATRIX.md) |",
+                "docs/README.md misstates the stable current release kind",
+            ),
+            (
+                "docs/MVP_SUPPORT_MATRIX.md",
+                "Skynet-EDR is a passive, local-first, Linux `x86_64`/`amd64` pre-1.0 stable SemVer evaluation release. It accepts and stores redacted local security evidence, applies bounded correlation, and exposes local read-only visibility. It detects and records; it does not block, pause, approve, quarantine, contain, or otherwise change an agent action.",
+                "Skynet-EDR is a passive, local-first, Linux `x86_64`/`amd64` prerelease. It accepts and stores redacted local security evidence, applies bounded correlation, and exposes local read-only visibility. It detects and records; it does not block, pause, approve, quarantine, contain, or otherwise change an agent action.",
+                "docs/MVP_SUPPORT_MATRIX.md misstates the stable current release kind",
+            ),
+            (
+                "docs/MVP_SUPPORT_MATRIX.md",
+                "Published checksums provide integrity checking, but this pre-1.0 stable SemVer evaluation release has no package signatures, signed checksum manifest, SBOM, provenance attestation, or bounded Hermes compatibility range.",
+                "Published checksums provide integrity checking, but this prerelease has no package signatures, signed checksum manifest, SBOM, provenance attestation, or bounded Hermes compatibility range.",
+                "docs/MVP_SUPPORT_MATRIX.md misstates the stable current release kind",
+            ),
+            (
+                "docs/ROADMAP.md",
+                "The release remains passive and is published as a pre-1.0 stable SemVer evaluation release. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd, browser, and threat-validation gates. Autonomous Hermes enrollment remains unproven and blocked with the literal verdict `S3_ADAPTER_BLOCK`.",
+                "The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd, browser, and threat-validation gates. Autonomous Hermes enrollment remains unproven and blocked with the literal verdict `S3_ADAPTER_BLOCK`.",
+                "docs/ROADMAP.md misstates the stable current release kind",
+            ),
+        )
+        authority_paths = {relative for relative, _, _, _ in cases}
 
-        self.assertIn("stable current release", str(failure.exception))
+        for relative, stable_literal, prerelease_literal, _ in cases:
+            path = self.fixture_root / relative
+            document = path.read_text(encoding="utf-8")
+            self.assertEqual(document.count(prerelease_literal), 1)
+            path.write_text(
+                document.replace(prerelease_literal, stable_literal, 1),
+                encoding="utf-8",
+            )
 
-    def test_permits_current_prerelease_authorities_for_prerelease_version(self) -> None:
+        stable_baseline = {
+            relative: (self.fixture_root / relative).read_text(encoding="utf-8")
+            for relative in authority_paths
+        }
+        with mock.patch.object(self.checker, "ROOT", self.fixture_root):
+            self.checker.require_current_release_kind("0.6.0")
+
+        for relative, stable_literal, prerelease_literal, expected in cases:
+            with self.subTest(relative=relative, stable_literal=stable_literal):
+                for baseline_path, baseline_document in stable_baseline.items():
+                    (self.fixture_root / baseline_path).write_text(
+                        baseline_document,
+                        encoding="utf-8",
+                    )
+                before = {
+                    baseline_path: (self.fixture_root / baseline_path).read_text(
+                        encoding="utf-8"
+                    )
+                    for baseline_path in authority_paths
+                }
+                path = self.fixture_root / relative
+                self.assertEqual(before[relative].count(stable_literal), 1)
+                path.write_text(
+                    before[relative].replace(stable_literal, prerelease_literal, 1),
+                    encoding="utf-8",
+                )
+                after = {
+                    baseline_path: (self.fixture_root / baseline_path).read_text(
+                        encoding="utf-8"
+                    )
+                    for baseline_path in authority_paths
+                }
+                changed_paths = {
+                    baseline_path
+                    for baseline_path in authority_paths
+                    if before[baseline_path] != after[baseline_path]
+                }
+                self.assertEqual(changed_paths, {relative})
+
+                with self.assertRaises(SystemExit) as failure:
+                    with mock.patch.object(self.checker, "ROOT", self.fixture_root):
+                        self.checker.require_current_release_kind("0.6.0")
+                self.assertEqual(str(failure.exception), expected)
+
+        for relative, baseline_document in stable_baseline.items():
+            (self.fixture_root / relative).write_text(
+                baseline_document,
+                encoding="utf-8",
+            )
+        for relative, stable_literal, prerelease_literal, _ in cases:
+            path = self.fixture_root / relative
+            document = path.read_text(encoding="utf-8")
+            self.assertEqual(document.count(stable_literal), 1)
+            path.write_text(
+                document.replace(stable_literal, prerelease_literal, 1),
+                encoding="utf-8",
+            )
         with mock.patch.object(self.checker, "ROOT", self.fixture_root):
             self.checker.require_current_release_kind("0.6.0-rc.1")
 
-    def test_permits_historical_and_generic_prerelease_references_for_stable_version(self) -> None:
-        replacements = {
-            "docs/INSTALL.md": (
-                ("The installable prerelease has", "The installable pre-1.0 stable SemVer evaluation release has"),
-            ),
-            "docs/README.md": (
-                (
-                    "Check what this prerelease actually supports",
-                    "Check what this pre-1.0 stable SemVer evaluation release actually supports",
-                ),
-            ),
-            "docs/MVP_SUPPORT_MATRIX.md": (
-                ("`amd64` prerelease.", "`amd64` pre-1.0 stable SemVer evaluation release."),
-                (
-                    "but this prerelease has no package signatures",
-                    "but this pre-1.0 stable SemVer evaluation release has no package signatures",
-                ),
-            ),
-            "docs/ROADMAP.md": (
-                (
-                    "published as a prerelease.",
-                    "published as a pre-1.0 stable SemVer evaluation release.",
-                ),
-            ),
-        }
-        for relative, changes in replacements.items():
-            path = self.fixture_root / relative
-            document = path.read_text(encoding="utf-8")
-            for old, new in changes:
-                document = document.replace(old, new)
-            path.write_text(document, encoding="utf-8")
-
+        for relative, baseline_document in stable_baseline.items():
+            (self.fixture_root / relative).write_text(
+                baseline_document,
+                encoding="utf-8",
+            )
+        historical = self.fixture_root / "docs/INSTALL.md"
+        historical.write_text(
+            historical.read_text(encoding="utf-8")
+            + "\nHistorical release v0.5.0 was a prerelease.\n",
+            encoding="utf-8",
+        )
+        generic = self.fixture_root / "docs/ROADMAP.md"
+        generic.write_text(
+            generic.read_text(encoding="utf-8")
+            + "\nFuture prerelease validation remains required.\n",
+            encoding="utf-8",
+        )
         with mock.patch.object(self.checker, "ROOT", self.fixture_root):
             self.checker.require_current_release_kind("0.6.0")
 
