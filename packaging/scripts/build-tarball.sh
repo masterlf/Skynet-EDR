@@ -11,6 +11,7 @@ case "$SOURCE_DATE_EPOCH" in
     ;;
 esac
 export SOURCE_DATE_EPOCH
+. packaging/scripts/reproducible-rust-env.sh
 
 mkdir -p dist
 cargo build --locked --release --workspace --bins

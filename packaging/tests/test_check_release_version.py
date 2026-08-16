@@ -934,6 +934,16 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                 self.assertIn("SOURCE_DATE_EPOCH", script)
                 self.assertIn("packaging/SOURCE_DATE_EPOCH", script)
                 self.assertIn("export SOURCE_DATE_EPOCH", script)
+                self.assertIn(". packaging/scripts/reproducible-rust-env.sh", script)
+        rust_env = (REPOSITORY_ROOT / "packaging/scripts/reproducible-rust-env.sh").read_text(encoding="utf-8")
+        self.assertIn("--remap-path-prefix=$repo_root=/usr/src/skynet-edr", rust_env)
+        self.assertIn("--remap-path-prefix=$cargo_home=/usr/local/cargo", rust_env)
+        toolchain = (REPOSITORY_ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        self.assertIn('channel = "1.97.1"', toolchain)
+        for workflow in (REPOSITORY_ROOT / ".github/workflows").glob("*.yml"):
+            text = workflow.read_text(encoding="utf-8")
+            if "dtolnay/rust-toolchain@" in text:
+                self.assertIn("toolchain: 1.97.1", text, workflow.name)
         epoch = (REPOSITORY_ROOT / "packaging/SOURCE_DATE_EPOCH").read_text(encoding="ascii").strip()
         self.assertRegex(epoch, r"^[0-9]+$")
         tarball_script = (REPOSITORY_ROOT / "packaging/scripts/build-tarball.sh").read_text(encoding="utf-8")

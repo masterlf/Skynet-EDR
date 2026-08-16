@@ -44,12 +44,22 @@ if (dashboard.integrity !== sri || dashboard.version !== manifest.payload_versio
 }
 
 const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({
-  extraHTTPHeaders: { 'X-Hermes-Session-Token': sessionToken },
-});
+const context = await browser.newContext({ serviceWorkers: 'block' });
 try {
   const page = await context.newPage();
   const failures = [];
+  const targetOrigin = new URL(url).origin;
+  await page.route('**/*', async (route) => {
+    const request = route.request();
+    if (new URL(request.url()).origin !== targetOrigin) {
+      failures.push(`blocked cross-origin request: ${request.url()}`);
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue({
+      headers: { ...request.headers(), 'X-Hermes-Session-Token': sessionToken },
+    });
+  });
   page.on('request', (request) => {
     if (request.url().includes(':8787')) failures.push('browser attempted direct daemon access');
   });

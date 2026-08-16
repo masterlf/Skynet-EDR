@@ -115,7 +115,11 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertIn("process.env.HERMES_DASHBOARD_SESSION_TOKEN", browser)
         self.assertIn("sessionToken.length < 32", browser)
         self.assertIn("sessionToken.length > 256", browser)
-        self.assertIn("extraHTTPHeaders: { 'X-Hermes-Session-Token': sessionToken }", browser)
+        self.assertNotIn("extraHTTPHeaders", browser)
+        self.assertIn("serviceWorkers: 'block'", browser)
+        self.assertIn("new URL(request.url()).origin !== targetOrigin", browser)
+        self.assertIn("blocked cross-origin request", browser)
+        self.assertIn("headers: { ...request.headers(), 'X-Hermes-Session-Token': sessionToken }", browser)
         self.assertIn("const page = await context.newPage()", browser)
         self.assertIn("await context.close()", browser)
 
@@ -129,6 +133,8 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
             with self.subTest(workflow=workflow.name):
                 self.assertIn("https://github.com/NousResearch/hermes-agent.git", text)
                 self.assertIn(PIN, text)
+                self.assertIn("63ebda150acb3281f40c4056abf65dcb6d625a42e5743d128c94d559dde843e0", text)
+                self.assertLess(text.index("Verify accepted reproducible DEB identity"), text.index("exact-artifact-browser-gate.sh"))
                 self.assertLess(text.index("Prepare frozen Hermes and browser dependencies before artifact build"), text.index("packaging/scripts/build-tarball.sh"))
                 self.assertGreaterEqual(text.count("sha256sum -c checksums.txt"), 5)
                 self.assertLess(text.index("exact-artifact-browser-gate.sh"), text.index("actions/upload-artifact@"))

@@ -182,6 +182,10 @@ rejected. RPM/Arch remain checksum/content validation only until distro-native
 runtime environments exist. This is deliberately narrower than pretending a
 foreign host has proven every package manager equally.
 
+## Reproducible release build
+
+Release builders consume `packaging/SOURCE_DATE_EPOCH`, the repository `rust-toolchain.toml` pins Rust 1.97.1, and both canonical build scripts source `packaging/scripts/reproducible-rust-env.sh`. That helper remaps the checkout and Cargo registry roots to stable virtual paths before compilation. Reproducibility claims apply only to these canonical scripts with the locked dependencies and pinned toolchain; ad-hoc `cargo build` output is not a release artifact. The release workflows fail before smoke testing when the DEB does not match the accepted SHA-256 embedded in the workflow.
+
 ## Maintainer script rules
 
 Package scripts must be:

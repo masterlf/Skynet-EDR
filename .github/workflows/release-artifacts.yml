@@ -47,6 +47,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: 1.97.1
           components: rustfmt, clippy
       - name: Cache cargo
         uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
@@ -73,6 +74,11 @@ jobs:
           rm -rf dist
           packaging/scripts/build-tarball.sh
           packaging/scripts/build-packages.sh
+      - name: Verify accepted reproducible DEB identity
+        run: >-
+          printf '%s  %s\n'
+          '63ebda150acb3281f40c4056abf65dcb6d625a42e5743d128c94d559dde843e0'
+          'dist/skynet-edr_0.7.0-alpha.1_amd64.deb' | sha256sum -c -
       - name: Inspect package contents
         run: packaging/scripts/inspect-artifacts.sh dist
       - name: Smoke DEB/tarball in clean containers and validate RPM/Arch

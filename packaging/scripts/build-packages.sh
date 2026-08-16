@@ -11,6 +11,7 @@ case "$SOURCE_DATE_EPOCH" in
     ;;
 esac
 export SOURCE_DATE_EPOCH
+. packaging/scripts/reproducible-rust-env.sh
 
 PRODUCT_VERSION="${SKYNET_EDR_PRODUCT_VERSION:-$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "skynet-edr-cli"))')}"
 DEB_VERSION="${SKYNET_EDR_DEB_VERSION:-0.7.0~alpha.1}"
