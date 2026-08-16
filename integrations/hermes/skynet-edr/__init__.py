@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - continuous ingestion is Linux-first
     fcntl = None
 
 PLUGIN_NAME = "skynet-edr"
-PLUGIN_VERSION = "0.7.0-alpha.1"
+PLUGIN_VERSION = "0.7.0-alpha.2"
 SCHEMA_VERSION = "skynet.event.v0"
 DEFAULT_MAX_FIELD_CHARS = 4096
 DEFAULT_MAX_LOG_BYTES = 1_048_576
@@ -59,6 +59,10 @@ _RESULT_CLASSIFICATION_KEYS = frozenset(
     {"result", "output", "content", "text", "body", "message", "data"}
 )
 _INVALID_TOOL_NAME = "invalid_tool"
+_SAFE_SIMULATION_TOOL = "skynet_edr_safe_detection_simulation"
+_SAFE_SIMULATION_SCENARIO = "malware-marker"
+_SAFE_MALWARE_MARKER = "skynet_fake_malware_test_string_do_not_execute"
+_SAFE_SECRET_MARKER = "token=FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE"
 
 _SECRET_RE = re.compile(
     r"(?i)(authorization\s*:\s*bearer\s+\S+|x-api-key\s*[:=]\s*\S+|api[_-]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
@@ -133,9 +137,53 @@ _transport_counters = {
 _last_reported_transport_counters = dict(_transport_counters)
 
 
+def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
+    """Return fixed fake markers without reading, writing, executing, or connecting."""
+    if type(args) is not dict or args != {"scenario": _SAFE_SIMULATION_SCENARIO}:
+        raise ValueError("unsupported safe detection simulation request")
+    return json.dumps(
+        {
+            "status": "simulated",
+            "scenario": _SAFE_SIMULATION_SCENARIO,
+            "malware_marker": _SAFE_MALWARE_MARKER,
+            "synthetic_secret": _SAFE_SECRET_MARKER,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def register(ctx: Any) -> None:
     """Register passive Hermes hooks."""
     _setup_logging().info("registering Skynet-EDR Hermes plugin hooks version=%s", PLUGIN_VERSION)
+    register_tool = getattr(ctx, "register_tool", None)
+    if callable(register_tool):
+        register_tool(
+            name=_SAFE_SIMULATION_TOOL,
+            toolset="skynet_edr",
+            schema={
+                "name": _SAFE_SIMULATION_TOOL,
+                "description": (
+                    "Run Skynet-EDR's fixed zero-I/O malware-marker simulation. "
+                    "It uses fake allowlisted markers only and performs no external action."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario": {
+                            "type": "string",
+                            "enum": [_SAFE_SIMULATION_SCENARIO],
+                        }
+                    },
+                    "required": ["scenario"],
+                    "additionalProperties": False,
+                },
+            },
+            handler=_safe_detection_simulation,
+            is_async=False,
+            description="Fixed zero-I/O Skynet-EDR detection simulation",
+            emoji="shield",
+        )
     ctx.register_hook("on_session_start", _safe_hook(_on_session_start))
     ctx.register_hook("on_session_end", _safe_hook(_on_session_end))
     ctx.register_hook("pre_llm_call", _safe_hook(_pre_llm_call))
@@ -324,6 +372,10 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
     if malware_signature:
         attrs["malware_signature"] = malware_signature
         attrs["rule_id"] = "EDR-MALWARE-001"
+    redacted_fields: list[dict[str, str]] = []
+    result_replacement = _redaction_replacement(result_strings)
+    if result_replacement is not None:
+        redacted_fields.append(_redacted_field("attributes.result_preview", result_replacement))
     _write_event(
         event_type="agent.tool.completed",
         source_kind=indicators["source_kind"],
@@ -332,6 +384,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
         title=f"Hermes tool completed: {tool_name}",
         attributes=attrs,
         artifact=artifact,
+        redacted_fields=redacted_fields,
     )
     if _completed_cron_schedule_mutation(tool_name, params, result, kwargs):
         _write_event(

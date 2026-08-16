@@ -34,7 +34,7 @@ class HermesPluginManifestTests(unittest.TestCase):
                 path.chmod(0o644)
 
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), str(source), str(destination), "0.7.0-alpha.1"],
+                [sys.executable, str(SCRIPT), str(source), str(destination), "0.7.0-alpha.2"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -43,7 +43,7 @@ class HermesPluginManifestTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 json.loads(destination.read_text(encoding="ascii"))["payload_version"],
-                "0.7.0-alpha.1",
+                "0.7.0-alpha.2",
             )
 
     def test_manifest_rejects_missing_or_malformed_payload_version(self) -> None:
@@ -59,7 +59,7 @@ class HermesPluginManifestTests(unittest.TestCase):
 
             for arguments in (
                 [str(source), str(destination)],
-                [str(source), str(destination), "0.7.0-alpha.1\nINJECTED"],
+                [str(source), str(destination), "0.7.0-alpha.2\nINJECTED"],
             ):
                 with self.subTest(arguments=arguments):
                     result = subprocess.run(

@@ -46,7 +46,7 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
 
     def test_degraded_lane_fixture_tracks_release_version(self) -> None:
         fixture = DEGRADED_FIXTURE.read_text(encoding="utf-8")
-        self.assertIn('"version": "0.7.0-alpha.1"', fixture)
+        self.assertIn('"version": "0.7.0-alpha.2"', fixture)
         self.assertNotIn('"version": "0.6.0"', fixture)
 
     def test_loaded_user_copy_remains_exact_and_package_integrity_is_rechecked(self) -> None:
@@ -106,7 +106,7 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertNotIn("localeCompare", browser)
         self.assertIn("a < b ? -1 : a > b ? 1 : 0", browser)
         self.assertIn("headless: true", browser)
-        self.assertIn("0.7.0-alpha.1", browser)
+        self.assertIn("0.7.0-alpha.2", browser)
         self.assertIn("Engine Online", browser)
         self.assertIn("Backend available", browser)
         self.assertIn("Telemetry degraded", browser)
@@ -139,7 +139,7 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
             with self.subTest(workflow=workflow.name):
                 self.assertIn("https://github.com/NousResearch/hermes-agent.git", text)
                 self.assertIn(PIN, text)
-                self.assertIn("63ebda150acb3281f40c4056abf65dcb6d625a42e5743d128c94d559dde843e0", text)
+                self.assertIn("7747003b83793c3b9be6a828977202a104590959374935b34c81600fd44308fd", text)
                 self.assertLess(text.index("Verify accepted reproducible DEB identity"), text.index("exact-artifact-browser-gate.sh"))
                 self.assertLess(text.index("Prepare frozen Hermes and browser dependencies before artifact build"), text.index("packaging/scripts/build-tarball.sh"))
                 self.assertGreaterEqual(text.count("sha256sum -c checksums.txt"), 5)

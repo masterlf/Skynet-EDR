@@ -1,6 +1,6 @@
 # Operations
 
-This page is the v0.7.0-alpha.1 operator index for running and validating Skynet-EDR after installation.
+This page is the v0.7.0-alpha.2 operator index for running and validating Skynet-EDR after installation.
 
 Use [Install](INSTALL.md) for package installation and rollback commands. Use [Quickstart](QUICKSTART.md) for the shortest first-run path.
 

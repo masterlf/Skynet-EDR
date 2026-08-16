@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.7.0-alpha.2 - 2026-08-16
+
+- Added one fixed, zero-I/O Hermes tool for the existing `EDR-MALWARE-001` rule; the tool accepts only the `malware-marker` enum and returns only package-owned synthetic markers.
+- Exercised the default Hermes 0.20 deferred-tool path (`tool_search → tool_describe → tool_call`) through real pre/post hooks while omitting raw tool output and recording explicit Secret redaction metadata.
+- Advanced canonical product, package, plugin, dashboard, workflow, and current documentation identity to `0.7.0-alpha.2`; Debian/RPM metadata uses `0.7.0~alpha.2` and Arch uses `0.7.0.alpha.2-1`.
+- Kept the product passive and preserved the other six rule claims at their prior evidence level.
+
 ## 0.7.0-alpha.1 - 2026-08-16
 
 - Ported fail-closed autonomous Hermes enrollment to the exact Ubuntu 24.04 amd64/systemd, Hermes 0.20.0, default-profile compatibility cell.

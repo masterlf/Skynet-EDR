@@ -1,6 +1,6 @@
 # Skynet-EDR Hermes Plugin
 
-Passive Hermes Agent telemetry plugin for Skynet-EDR v0.7.0-alpha.1.
+Passive Hermes Agent telemetry plugin for Skynet-EDR v0.7.0-alpha.2.
 
 The plugin observes Hermes lifecycle hooks and emits canonical `skynet.event.v0`
 JSONL events. It is intentionally non-blocking: it does not approve, deny, or
@@ -13,6 +13,16 @@ modify model/tool execution.
 - `pre_llm_call`
 - `pre_tool_call`
 - `post_tool_call`
+
+## Safe detection simulation
+
+The plugin registers `skynet_edr_safe_detection_simulation` in the `skynet_edr`
+toolset. It accepts exactly `{"scenario":"malware-marker"}` and rejects missing,
+unknown, or additional input. The handler performs no filesystem, process, or
+network operation. It returns only package-owned synthetic malware and secret
+markers so the real Hermes deferred-tool dispatcher and post-tool redaction path
+can produce the existing `EDR-MALWARE-001` event shape. The raw result is never
+copied into Skynet-EDR producer output.
 
 
 ## Default output
@@ -58,7 +68,7 @@ The fallback, checkpoint, and log are user-private where supported.
   newest record rather than blocking Hermes. The producer worker writes aggregate
   queue/socket/fallback counters to the sanitized operational log.
 - No LLM calls from the plugin.
-- No inline blocking in v0.7.0-alpha.1.
+- No inline blocking in v0.7.0-alpha.2.
 - Raw tool parameters and raw tool output are omitted; only lengths and
   indicators are stored.
 - Newly emitted parameter previews are always `[OMITTED:tool_params]`.

@@ -95,6 +95,72 @@ class Hermes020MockOpenAITests(unittest.TestCase):
         self.assertIn(b'"content":"SPIKE_OK"', payload)
         self.assertTrue(payload.endswith(b"data: [DONE]\n\n"))
 
+    def test_safe_detection_mode_traverses_deferred_tools_then_stops(self):
+        original = getattr(self.fixture, "FIXTURE_MODE")
+        setattr(self.fixture, "FIXTURE_MODE", "safe-detection")
+        try:
+            base = {"role": "user", "content": "run safe simulation"}
+            expected = [
+                ("tool_search", {"query": "skynet edr safe detection simulation", "limit": 5}),
+                ("tool_describe", {"name": "skynet_edr_safe_detection_simulation"}),
+                (
+                    "tool_call",
+                    {
+                        "name": "skynet_edr_safe_detection_simulation",
+                        "arguments": {"scenario": "malware-marker"},
+                    },
+                ),
+            ]
+            messages = [base]
+            for index, (expected_name, expected_arguments) in enumerate(expected):
+                request = json.dumps({
+                    "model": "spike-model", "messages": messages, "stream": False,
+                }).encode()
+                status, payload = self.request(
+                    "POST", "/v1/chat/completions", body=request,
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 200)
+                choice = json.loads(payload)["choices"][0]
+                self.assertEqual(choice["finish_reason"], "tool_calls")
+                call = choice["message"]["tool_calls"][0]
+                self.assertEqual(call["function"]["name"], expected_name)
+                self.assertEqual(json.loads(call["function"]["arguments"]), expected_arguments)
+                messages.extend([
+                    choice["message"],
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": f"fixture result {index}",
+                    },
+                ])
+
+            stream_request = json.dumps({
+                "model": "spike-model", "messages": [base], "stream": True,
+            }).encode()
+            status, payload = self.request(
+                "POST", "/v1/chat/completions", body=stream_request,
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200)
+            self.assertIn(b'"name":"tool_search"', payload)
+            self.assertIn(b'"finish_reason":"tool_calls"', payload)
+
+            final_request = json.dumps({
+                "model": "spike-model", "messages": messages, "stream": False,
+            }).encode()
+            status, payload = self.request(
+                "POST", "/v1/chat/completions", body=final_request,
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                json.loads(payload)["choices"][0]["message"]["content"],
+                "SKYNET_EDR_SAFE_DETECTION_OK",
+            )
+        finally:
+            setattr(self.fixture, "FIXTURE_MODE", original)
+
     def test_enrollment_reply_contract_is_explicitly_selectable(self):
         original = getattr(self.fixture, "FIXED_REPLY")
         setattr(self.fixture, "FIXED_REPLY", getattr(self.fixture, "ENROLLMENT_REPLY"))

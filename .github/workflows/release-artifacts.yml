@@ -18,8 +18,8 @@ jobs:
     env:
       NFPM_VERSION: v2.46.3
       NFPM_SHA256: 9170d25ea056d7329def38134b2bcad98d02d221f8331610dcd619e84d28c565
-      SKYNET_EDR_PRODUCT_VERSION: 0.7.0-alpha.1
-      SKYNET_EDR_DEB_VERSION: 0.7.0~alpha.1
+      SKYNET_EDR_PRODUCT_VERSION: 0.7.0-alpha.2
+      SKYNET_EDR_DEB_VERSION: 0.7.0~alpha.2
       HERMES_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
       PLAYWRIGHT_BROWSERS_PATH: /tmp/skynet-edr-ms-playwright
     steps:
@@ -33,6 +33,13 @@ jobs:
           ref: f5be9236e00ddf2f2a412697f267078fc4ee068e
           path: .ci/hermes-agent
           persist-credentials: false
+      - name: Check out the pinned Hermes 0.20 dispatcher contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 3c27eb6234bf91b8ceee9e9071591b31e9b148cb
+          path: .ci/hermes-agent-dispatch
+          persist-credentials: false
       - name: Install pinned uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -41,9 +48,11 @@ jobs:
       - name: Prepare frozen Hermes and browser dependencies before artifact build
         run: |
           uv sync --frozen --project "$GITHUB_WORKSPACE/.ci/hermes-agent"
+          uv sync --frozen --project "$GITHUB_WORKSPACE/.ci/hermes-agent-dispatch"
           npm ci --ignore-scripts --no-audit --no-fund --prefix packaging/browser-gate
           npm exec --prefix packaging/browser-gate -- playwright install --with-deps chromium
           test -x "$GITHUB_WORKSPACE/.ci/hermes-agent/.venv/bin/hermes"
+          test -x "$GITHUB_WORKSPACE/.ci/hermes-agent-dispatch/.venv/bin/hermes"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -77,8 +86,8 @@ jobs:
       - name: Verify accepted reproducible DEB identity
         run: >-
           printf '%s  %s\n'
-          '63ebda150acb3281f40c4056abf65dcb6d625a42e5743d128c94d559dde843e0'
-          'dist/skynet-edr_0.7.0-alpha.1_amd64.deb' | sha256sum -c -
+          '7747003b83793c3b9be6a828977202a104590959374935b34c81600fd44308fd'
+          'dist/skynet-edr_0.7.0-alpha.2_amd64.deb' | sha256sum -c -
       - name: Inspect package contents
         run: packaging/scripts/inspect-artifacts.sh dist
       - name: Smoke DEB/tarball in clean containers and validate RPM/Arch
@@ -105,6 +114,9 @@ jobs:
           test -n "$deb"
           packaging/scripts/exact-artifact-browser-gate.sh \
             --deb "$deb" --hermes-repo "$GITHUB_WORKSPACE/.ci/hermes-agent"
+          packaging/scripts/hermes-real-dispatch-gate.sh \
+            --hermes-repo "$GITHUB_WORKSPACE/.ci/hermes-agent-dispatch" \
+            --plugin-source /usr/share/skynet-edr/hermes-plugin/skynet-edr
           (cd dist && sha256sum -c checksums.txt)
       - name: Verify exact gated bytes before upload
         run: (cd dist && sha256sum -c checksums.txt)

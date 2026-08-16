@@ -16,8 +16,11 @@ from typing import Any
 MODEL = "spike-model"
 SPIKE_REPLY = "SPIKE_OK"
 ENROLLMENT_REPLY = "SKYNET_EDR_ENROLLMENT_OK"
+SAFE_DETECTION_REPLY = "SKYNET_EDR_SAFE_DETECTION_OK"
+SAFE_DETECTION_TOOL = "skynet_edr_safe_detection_simulation"
 ALLOWED_REPLIES = frozenset({SPIKE_REPLY, ENROLLMENT_REPLY})
 FIXED_REPLY = SPIKE_REPLY
+FIXTURE_MODE = "fixed"
 MAX_REQUEST_BYTES = 1_048_576
 REQUEST_TIMEOUT_SECONDS = 5.0
 
@@ -40,7 +43,66 @@ def _models_response() -> dict[str, Any]:
     }
 
 
-def _completion_response() -> dict[str, Any]:
+def _tool_result_count(request: dict[str, Any]) -> int:
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return 0
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, dict) and message.get("role") == "tool"
+    )
+
+
+def _safe_detection_call(request: dict[str, Any]) -> tuple[str, dict[str, Any], str] | None:
+    calls = (
+        (
+            "tool_search",
+            {"query": "skynet edr safe detection simulation", "limit": 5},
+            "call_skynet_edr_tool_search",
+        ),
+        (
+            "tool_describe",
+            {"name": SAFE_DETECTION_TOOL},
+            "call_skynet_edr_tool_describe",
+        ),
+        (
+            "tool_call",
+            {"name": SAFE_DETECTION_TOOL, "arguments": {"scenario": "malware-marker"}},
+            "call_skynet_edr_safe_detection",
+        ),
+    )
+    index = _tool_result_count(request)
+    return calls[index] if index < len(calls) else None
+
+
+def _tool_call_message(request: dict[str, Any]) -> dict[str, Any]:
+    call = _safe_detection_call(request)
+    if call is None:
+        raise ValueError("safe detection sequence is complete")
+    name, arguments, call_id = call
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, separators=(",", ":"), sort_keys=True),
+                },
+            }
+        ],
+    }
+
+
+def _completion_response(request: dict[str, Any]) -> dict[str, Any]:
+    safe_detection_pending = FIXTURE_MODE == "safe-detection" and _safe_detection_call(request) is not None
+    message = _tool_call_message(request) if safe_detection_pending else {
+        "role": "assistant",
+        "content": SAFE_DETECTION_REPLY if FIXTURE_MODE == "safe-detection" else FIXED_REPLY,
+    }
     return {
         "id": "chatcmpl-skynet-edr-spike",
         "object": "chat.completion",
@@ -49,15 +111,40 @@ def _completion_response() -> dict[str, Any]:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": FIXED_REPLY},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": "tool_calls" if safe_detection_pending else "stop",
             }
         ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     }
 
 
-def _stream_response() -> bytes:
+def _stream_response(request: dict[str, Any]) -> bytes:
+    call = _safe_detection_call(request) if FIXTURE_MODE == "safe-detection" else None
+    safe_detection_pending = call is not None
+    if call is not None:
+        name, arguments, call_id = call
+        delta = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, separators=(",", ":"), sort_keys=True),
+                    },
+                }
+            ],
+        }
+        finish_reason = "tool_calls"
+    else:
+        delta = {
+            "role": "assistant",
+            "content": SAFE_DETECTION_REPLY if FIXTURE_MODE == "safe-detection" else FIXED_REPLY,
+        }
+        finish_reason = "stop"
     chunks = [
         {
             "id": "chatcmpl-skynet-edr-spike",
@@ -67,7 +154,7 @@ def _stream_response() -> bytes:
             "choices": [
                 {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": FIXED_REPLY},
+                    "delta": delta,
                     "finish_reason": None,
                 }
             ],
@@ -77,7 +164,7 @@ def _stream_response() -> bytes:
             "object": "chat.completion.chunk",
             "created": 0,
             "model": MODEL,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
             "usage": {
                 "prompt_tokens": 1,
                 "completion_tokens": 1,
@@ -166,10 +253,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self._send_error(400, "unsupported model")
             return
         if not request.get("stream", False):
-            self._send_json(_completion_response())
+            self._send_json(_completion_response(request))
             return
 
-        payload = _stream_response()
+        payload = _stream_response(request)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(payload)))
@@ -179,15 +266,20 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    global FIXED_REPLY
+    global FIXED_REPLY, FIXTURE_MODE
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=19000)
     parser.add_argument(
         "--reply", choices=sorted(ALLOWED_REPLIES), default=SPIKE_REPLY,
         help="fixed benign reply contract",
     )
+    parser.add_argument(
+        "--mode", choices=("fixed", "safe-detection"), default="fixed",
+        help="fixed reply or deterministic safe tool-dispatch sequence",
+    )
     args = parser.parse_args()
     FIXED_REPLY = args.reply
+    FIXTURE_MODE = args.mode
     server = HTTPServer(("127.0.0.1", args.port), FixtureHandler)
     print(f"fixture listening on 127.0.0.1:{args.port}", flush=True)
     server.serve_forever()

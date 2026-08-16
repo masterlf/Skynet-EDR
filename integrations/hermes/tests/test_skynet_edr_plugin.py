@@ -105,9 +105,13 @@ class FakeResponse:
 class FakeContext:
     def __init__(self):
         self.hooks = {}
+        self.tools = {}
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
+
+    def register_tool(self, **kwargs):
+        self.tools[kwargs["name"]] = kwargs
 
 
 class SkynetEdrHermesPluginTests(unittest.TestCase):
@@ -590,6 +594,76 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             },
         )
         self.assertTrue((self.state_dir / "skynet-edr-plugin.log").exists())
+
+    def test_registers_passive_hooks_when_optional_tool_api_is_absent(self):
+        class HookOnlyContext:
+            def __init__(self):
+                self.hooks = {}
+
+            def register_hook(self, name, callback):
+                self.hooks[name] = callback
+
+        ctx = HookOnlyContext()
+        self.plugin.register(ctx)
+        self.assertEqual(
+            set(ctx.hooks),
+            {
+                "on_session_start",
+                "on_session_end",
+                "pre_llm_call",
+                "pre_tool_call",
+                "post_tool_call",
+            },
+        )
+
+    def test_registers_zero_io_safe_detection_simulation_tool_and_redacts_result(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+
+        self.assertEqual(set(ctx.tools), {"skynet_edr_safe_detection_simulation"})
+        tool = ctx.tools["skynet_edr_safe_detection_simulation"]
+        self.assertEqual(tool["toolset"], "skynet_edr")
+        self.assertFalse(tool["is_async"])
+        self.assertEqual(
+            tool["schema"]["parameters"],
+            {
+                "type": "object",
+                "properties": {
+                    "scenario": {"type": "string", "enum": ["malware-marker"]}
+                },
+                "required": ["scenario"],
+                "additionalProperties": False,
+            },
+        )
+
+        with self.assertRaises(ValueError):
+            tool["handler"]({})
+        with self.assertRaises(ValueError):
+            tool["handler"]({"scenario": "malware-marker", "secret": "operator-input"})
+
+        args = {"scenario": "malware-marker"}
+        ctx.hooks["pre_tool_call"](tool["name"], args)
+        result = tool["handler"](args)
+        self.assertIn("skynet_fake_malware_test_string_do_not_execute", result)
+        self.assertIn("FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE", result)
+        ctx.hooks["post_tool_call"](tool["name"], args, result)
+
+        events = self.read_events()
+        serialized = json.dumps(events, sort_keys=True)
+        self.assertNotIn("FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE", serialized)
+        completed = [event for event in events if event["event_type"] == "agent.tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertTrue(completed[0]["attributes"]["malware_indicator"])
+        self.assertEqual(completed[0]["attributes"]["rule_id"], "EDR-MALWARE-001")
+        self.assertTrue(completed[0]["redaction"]["contains_sensitive_data"])
+        self.assertEqual(
+            completed[0]["redaction"]["redacted_fields"],
+            [{
+                "path": "attributes.result_preview",
+                "reason": "secret",
+                "replacement": "[REDACTED:secret]",
+            }],
+        )
 
     def test_cron_create_and_update_emit_only_completed_schedule_mutations(self):
         ctx = FakeContext()

@@ -32,7 +32,7 @@ class HermesEnrollmentTests(unittest.TestCase):
     def test_release_enrollment_contract_targets_hermes_020_and_alpha1_payload(self):
         module = load_module()
         self.assertEqual(module.SUPPORTED_HERMES, {"0.20.0"})
-        self.assertEqual(module.PAYLOAD_VERSION, "0.7.0-alpha.1")
+        self.assertEqual(module.PAYLOAD_VERSION, "0.7.0-alpha.2")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -45,10 +45,10 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.source = self.base / "payload"
         self.source.mkdir()
         files = {
-            "plugin.yaml": b'name: skynet-edr\nversion: "0.7.0-alpha.1"\n',
-            "__init__.py": b'PLUGIN_VERSION = "0.7.0-alpha.1"\n',
+            "plugin.yaml": b'name: skynet-edr\nversion: "0.7.0-alpha.2"\n',
+            "__init__.py": b'PLUGIN_VERSION = "0.7.0-alpha.2"\n',
             "README.md": b"safe\n",
-            "dashboard/manifest.json": b'{"version":"0.7.0-alpha.1"}\n',
+            "dashboard/manifest.json": b'{"version":"0.7.0-alpha.2"}\n',
             "dashboard/plugin.js": b"safe\n",
             "dashboard/plugin_api.py": b"safe\n",
             "desktop/plugin.js": b"safe\n",
@@ -75,7 +75,7 @@ class HermesEnrollmentTests(unittest.TestCase):
             "profile": "fixture-profile",
             "host": {"id": "ubuntu", "version": "24.04", "arch": "x86_64", "init": "systemd"},
             "hermes_version": "0.20.0",
-            "payload_version": "0.7.0-alpha.1",
+            "payload_version": "0.7.0-alpha.2",
             "manifest": self.manifest,
             "fixture": True,
             "socket": {"dac": True, "uid_authorized": True},
@@ -132,7 +132,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         package_manifest = self.base / "manifest.json"
         package_manifest.write_text(json.dumps({
             "schema": 1,
-            "payload_version": "0.7.0-alpha.1",
+            "payload_version": "0.7.0-alpha.2",
             "generation": self.request["manifest_sha256"],
             "files": self.manifest,
         }), encoding="utf-8")
@@ -169,7 +169,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         package_manifest = self.base / "manifest.json"
         package_manifest.write_text(json.dumps({
             "schema": 1,
-            "payload_version": "0.7.0-alpha.1",
+            "payload_version": "0.7.0-alpha.2",
             "generation": self.request["manifest_sha256"],
             "files": self.manifest,
         }), encoding="utf-8")

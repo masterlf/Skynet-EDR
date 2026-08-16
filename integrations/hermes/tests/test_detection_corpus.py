@@ -15,9 +15,13 @@ CORPUS = ROOT / "crates/skynet-edr-core/tests/fixtures/detections/v1/manifest.js
 class Context:
     def __init__(self):
         self.hooks = {}
+        self.tools = {}
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
+
+    def register_tool(self, **kwargs):
+        self.tools[kwargs["name"]] = kwargs
 
 
 def load_plugin():

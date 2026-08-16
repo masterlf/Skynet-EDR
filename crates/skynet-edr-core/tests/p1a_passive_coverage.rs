@@ -1196,6 +1196,7 @@ module._session_trace_id = "FAKE_TRACE_DIRECT_IP_TOOL_SHAPES"
 class Context:
     def __init__(self): self.hooks = {}
     def register_hook(self, name, callback): self.hooks[name] = callback
+    def register_tool(self, **kwargs): pass
 ctx = Context()
 module.register(ctx)
 ctx.hooks["pre_tool_call"]("read_file", {"path": "/root/.hermes/FAKE_E2E_SENSITIVE"})
@@ -1432,6 +1433,7 @@ module._session_trace_id = "FAKE_TRACE_P1A_SPOOL_ROUND_TRIP"
 class Context:
     def __init__(self): self.hooks = {}
     def register_hook(self, name, callback): self.hooks[name] = callback
+    def register_tool(self, **kwargs): pass
 ctx = Context()
 module.register(ctx)
 ctx.hooks["pre_tool_call"]("web_extract", {
