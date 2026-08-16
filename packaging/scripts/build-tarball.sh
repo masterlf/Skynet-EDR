@@ -1,6 +1,17 @@
 #!/usr/bin/env sh
 set -eu
 
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+  IFS= read -r SOURCE_DATE_EPOCH < packaging/SOURCE_DATE_EPOCH || SOURCE_DATE_EPOCH=""
+fi
+case "$SOURCE_DATE_EPOCH" in
+  ''|*[!0-9]*)
+    echo "SOURCE_DATE_EPOCH must be a non-negative integer or present in packaging/SOURCE_DATE_EPOCH" >&2
+    exit 1
+    ;;
+esac
+export SOURCE_DATE_EPOCH
+
 mkdir -p dist
 cargo build --locked --release --workspace --bins
 
@@ -32,7 +43,7 @@ if [ -e "$STAGED_HERMES_PLUGIN" ] || [ -L "$STAGED_HERMES_PLUGIN" ]; then
 fi
 packaging/scripts/stage-hermes-plugin-payload.sh integrations/hermes/skynet-edr "$STAGED_HERMES_PLUGIN"
 python3 packaging/scripts/create-hermes-plugin-manifest.py \
-  "$STAGED_HERMES_PLUGIN" "$ROOT/integrations/hermes/manifest.json"
+  "$STAGED_HERMES_PLUGIN" "$ROOT/integrations/hermes/manifest.json" "$VERSION"
 install -m 0644 README.md "$ROOT/README.md"
 install -m 0644 docs/INSTALL.md "$ROOT/docs/INSTALL.md"
 install -m 0644 docs/PACKAGING.md "$ROOT/docs/PACKAGING.md"
@@ -60,5 +71,6 @@ install -m 0644 LICENSE "$ROOT/LICENSE"
     > SHA256SUMS
 )
 
-tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
+tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+  -czf "dist/${NAME}.tar.gz" -C dist "$NAME"
 echo "built dist/${NAME}.tar.gz"

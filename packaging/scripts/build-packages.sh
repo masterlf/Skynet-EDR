@@ -1,6 +1,17 @@
 #!/usr/bin/env sh
 set -eu
 
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+  IFS= read -r SOURCE_DATE_EPOCH < packaging/SOURCE_DATE_EPOCH || SOURCE_DATE_EPOCH=""
+fi
+case "$SOURCE_DATE_EPOCH" in
+  ''|*[!0-9]*)
+    echo "SOURCE_DATE_EPOCH must be a non-negative integer or present in packaging/SOURCE_DATE_EPOCH" >&2
+    exit 1
+    ;;
+esac
+export SOURCE_DATE_EPOCH
+
 PRODUCT_VERSION="${SKYNET_EDR_PRODUCT_VERSION:-$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "skynet-edr-cli"))')}"
 DEB_VERSION="${SKYNET_EDR_DEB_VERSION:-0.7.0~alpha.1}"
 DEB_ARCH="${NFPM_ARCH:-amd64}"

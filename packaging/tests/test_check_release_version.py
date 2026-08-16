@@ -931,6 +931,15 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
                     "cargo build --locked --release --workspace --bins",
                     script,
                 )
+                self.assertIn("SOURCE_DATE_EPOCH", script)
+                self.assertIn("packaging/SOURCE_DATE_EPOCH", script)
+                self.assertIn("export SOURCE_DATE_EPOCH", script)
+        epoch = (REPOSITORY_ROOT / "packaging/SOURCE_DATE_EPOCH").read_text(encoding="ascii").strip()
+        self.assertRegex(epoch, r"^[0-9]+$")
+        tarball_script = (REPOSITORY_ROOT / "packaging/scripts/build-tarball.sh").read_text(encoding="utf-8")
+        self.assertIn('"$ROOT/integrations/hermes/manifest.json" "$VERSION"', tarball_script)
+        for flag in ("--sort=name", '--mtime="@${SOURCE_DATE_EPOCH}"', "--owner=0", "--group=0", "--numeric-owner"):
+            self.assertIn(flag, tarball_script)
 
 
 if __name__ == "__main__":
