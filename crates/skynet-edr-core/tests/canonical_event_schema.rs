@@ -13,9 +13,9 @@ const OPENCLAW_GOLDEN_JSONL: &str = include_str!("fixtures/openclaw_agent_golden
 
 #[test]
 fn safe_simulation_python_producer_emits_a_rust_valid_canonical_event() {
-    let test_root = std::env::var_os("SKYNET_EDR_TEST_STATE_ROOT")
+    let test_root = std::env::var_os("SKYNET_EDR_STATE_DIR")
         .map(PathBuf::from)
-        .expect("SKYNET_EDR_TEST_STATE_ROOT must be set to private test storage");
+        .expect("SKYNET_EDR_STATE_DIR must be set to private test storage");
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("clock follows Unix epoch")
