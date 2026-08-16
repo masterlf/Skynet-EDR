@@ -48,6 +48,12 @@ browser_executable=$(cd "$browser_runtime" && node -e \
   "const { chromium } = require('playwright'); process.stdout.write(chromium.executablePath())")
 [[ -x "$browser_executable" ]]
 [[ "$(dpkg-deb -f "$deb" Version)" == "$DEB_VERSION" ]]
+python3 - "$FIXTURE" "$PRODUCT_VERSION" <<'PY'
+import json, sys
+fixture = json.load(open(sys.argv[1], encoding="utf-8"))
+if fixture.get("version") != sys.argv[2]:
+    raise SystemExit("browser degraded-lane fixture version mismatch")
+PY
 [[ "$(dpkg-deb -f "$deb" Depends)" == "systemd, python3" ]]
 for dependency in systemd python3; do
   [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' "$dependency")" == "ii " ]]

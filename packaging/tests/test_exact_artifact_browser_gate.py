@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / "packaging" / "scripts" / "exact-artifact-browser-gate.sh"
 BROWSER = ROOT / "packaging" / "scripts" / "hermes-browser-smoke.mjs"
 BROWSER_LOCK = ROOT / "packaging" / "browser-gate" / "package-lock.json"
+DEGRADED_FIXTURE = ROOT / "crates" / "skynet-edr-daemon" / "tests" / "fixtures" / "status_alert_delivery_degraded.json"
 WORKFLOWS = (
     ROOT / ".github" / "workflows" / "packaging-release.yml",
     ROOT / ".github" / "workflows" / "release-artifacts.yml",
@@ -41,6 +42,12 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertLess(text.index("systemctl start skynet-edr.service"), text.index("sudo /usr/libexec/skynet-edr/deploy-verify"))
         self.assertIn('--hermes-plugin-uid "$(id -u)"', text)
         self.assertIn('--hermes-plugin-gid "$(id -g)"', text)
+        self.assertIn("browser degraded-lane fixture version mismatch", text)
+
+    def test_degraded_lane_fixture_tracks_release_version(self) -> None:
+        fixture = DEGRADED_FIXTURE.read_text(encoding="utf-8")
+        self.assertIn('"version": "0.7.0-alpha.1"', fixture)
+        self.assertNotIn('"version": "0.6.0"', fixture)
 
     def test_loaded_user_copy_remains_exact_and_package_integrity_is_rechecked(self) -> None:
         text = GATE.read_text(encoding="utf-8")
