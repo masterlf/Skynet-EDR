@@ -6,6 +6,8 @@ The repository ships a bounded enrollment transaction, deterministic fixture con
 
 The only compatibility cell exercised by the transaction tests is Ubuntu 24.04, `x86_64`/`amd64`, systemd, Hermes `0.19.0`, Skynet-EDR plugin `0.6.0`. Every other distro, architecture, init system, Hermes version, dashboard-only runtime, and global-role setup is unsupported or unproven and fails closed. The separate Hermes `0.20.0` dashboard gate proves read-only plugin activation and browser compatibility only; it does not authorize autonomous enrollment or replace this transaction gate.
 
+The [Hermes 0.20 gateway dispatch compatibility spike](HERMES_020_COMPATIBILITY_SPIKE.md) adds positive discovery, gateway-producer, real-dispatcher, and authenticated-ingestion evidence. Its bounded-port verdict is decision input for a future transaction gate; it does not widen this release's enrollment support or clear `S3_ADAPTER_BLOCK`.
+
 ## Command
 
 `skynet-edr-hermes-enroll check|apply|verify|unenroll` consumes:
