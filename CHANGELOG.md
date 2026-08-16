@@ -4,8 +4,8 @@
 
 ## 0.7.0-alpha.2 - 2026-08-16
 
-- Added one fixed, zero-I/O Hermes tool for the existing `EDR-MALWARE-001` rule; the tool accepts only the `malware-marker` enum and returns only package-owned synthetic markers.
-- Exercised the default Hermes 0.20 deferred-tool path (`tool_search → tool_describe → tool_call`) through real pre/post hooks while omitting raw tool output and recording explicit Secret redaction metadata.
+- Added one fixed Hermes tool for the existing `EDR-MALWARE-001` rule; it accepts only the `malware-marker` enum, performs no arbitrary or external I/O, emits one canonical event through the existing local telemetry transport, and returns only a fixed redacted status.
+- Exercised the default Hermes 0.20 deferred-tool path (`tool_search → tool_describe → tool_call`) through the real registry dispatcher; the handler emits the event directly and suppresses a duplicate when a runtime also invokes `post_tool_call`.
 - Advanced canonical product, package, plugin, dashboard, workflow, and current documentation identity to `0.7.0-alpha.2`; Debian/RPM metadata uses `0.7.0~alpha.2` and Arch uses `0.7.0.alpha.2-1`.
 - Kept the product passive and preserved the other six rule claims at their prior evidence level.
 

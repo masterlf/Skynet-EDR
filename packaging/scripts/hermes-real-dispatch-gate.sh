@@ -97,7 +97,7 @@ completed = [
     and event.get("attributes", {}).get("tool_name") == "skynet_edr_safe_detection_simulation"
 ]
 if len(completed) != 1:
-    raise SystemExit("expected exactly one completed safe simulation event")
+    raise SystemExit(f"expected exactly one completed safe simulation event, got {len(completed)}")
 event = completed[0]
 attrs = event.get("attributes", {})
 if (
@@ -128,16 +128,23 @@ finally:
     connection.close()
 called = []
 handler_result_seen = False
+raw_marker_seen = False
 for role, tool_calls, content in rows:
     if tool_calls:
         for call in json.loads(tool_calls):
             called.append(call.get("function", {}).get("name"))
     if role == "tool" and content:
-        handler_result_seen |= "skynet_fake_malware_test_string_do_not_execute" in content
+        handler_result_seen |= (
+            '"detection_signal":"submitted"' in content
+            and '"sensitive_output":"[REDACTED:secret]"' in content
+        )
+        raw_marker_seen |= "skynet_fake_malware_test_string_do_not_execute" in content
 if called != ["tool_search", "tool_describe", "tool_call"]:
     raise SystemExit(f"unexpected model tool-call sequence: {called!r}")
 if not handler_result_seen:
     raise SystemExit("plugin handler result was not returned through the real dispatcher")
+if raw_marker_seen:
+    raise SystemExit("raw safe-simulation marker survived in the plugin handler result")
 PY
 
 echo "Hermes 0.20 real deferred-dispatch gate passed"

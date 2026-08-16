@@ -18,11 +18,12 @@ modify model/tool execution.
 
 The plugin registers `skynet_edr_safe_detection_simulation` in the `skynet_edr`
 toolset. It accepts exactly `{"scenario":"malware-marker"}` and rejects missing,
-unknown, or additional input. The handler performs no filesystem, process, or
-network operation. It returns only package-owned synthetic malware and secret
-markers so the real Hermes deferred-tool dispatcher and post-tool redaction path
-can produce the existing `EDR-MALWARE-001` event shape. The raw result is never
-copied into Skynet-EDR producer output.
+unknown, or additional input. It reads no arbitrary file, starts no process, and
+opens no external network connection. The handler emits one fixed canonical event
+through the existing bounded local telemetry transport and returns only a redacted
+status. If a Hermes runtime also invokes `post_tool_call`, that hook recognizes this
+fixed tool and does not emit a duplicate. Neither synthetic marker is copied into
+the tool result or Skynet-EDR producer output.
 
 
 ## Default output

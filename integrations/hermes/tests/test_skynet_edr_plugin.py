@@ -642,10 +642,25 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             tool["handler"]({"scenario": "malware-marker", "secret": "operator-input"})
 
         args = {"scenario": "malware-marker"}
-        ctx.hooks["pre_tool_call"](tool["name"], args)
         result = tool["handler"](args)
-        self.assertIn("skynet_fake_malware_test_string_do_not_execute", result)
-        self.assertIn("FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE", result)
+        self.assertEqual(
+            self.read_events(),
+            [],
+            "the zero-I/O handler must not emit telemetry directly",
+        )
+        response = json.loads(result)
+        self.assertEqual(
+            response,
+            {
+                "detection_signal": "submitted",
+                "scenario": "malware-marker",
+                "sensitive_output": "[REDACTED:secret]",
+                "status": "simulated",
+            },
+        )
+        self.assertNotIn("skynet_fake_malware_test_string_do_not_execute", result)
+        self.assertNotIn("FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE", result)
+        ctx.hooks["pre_tool_call"](tool["name"], args)
         ctx.hooks["post_tool_call"](tool["name"], args, result)
 
         events = self.read_events()

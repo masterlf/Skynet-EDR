@@ -61,8 +61,6 @@ _RESULT_CLASSIFICATION_KEYS = frozenset(
 _INVALID_TOOL_NAME = "invalid_tool"
 _SAFE_SIMULATION_TOOL = "skynet_edr_safe_detection_simulation"
 _SAFE_SIMULATION_SCENARIO = "malware-marker"
-_SAFE_MALWARE_MARKER = "skynet_fake_malware_test_string_do_not_execute"
-_SAFE_SECRET_MARKER = "token=FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE"
 
 _SECRET_RE = re.compile(
     r"(?i)(authorization\s*:\s*bearer\s+\S+|x-api-key\s*[:=]\s*\S+|api[_-]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
@@ -138,15 +136,43 @@ _last_reported_transport_counters = dict(_transport_counters)
 
 
 def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
-    """Return fixed fake markers without reading, writing, executing, or connecting."""
+    """Emit one fixed synthetic detection event and return only a redacted summary."""
     if type(args) is not dict or args != {"scenario": _SAFE_SIMULATION_SCENARIO}:
         raise ValueError("unsupported safe detection simulation request")
+    _write_event(
+        event_type="agent.tool.completed",
+        source_kind="mcp_tool",
+        trust_level="tool_output",
+        severity="high",
+        title="Hermes safe detection simulation completed",
+        attributes={
+            "hook": "safe_detection_simulation",
+            "tool_name": _SAFE_SIMULATION_TOOL,
+            "tool_class": "synthetic",
+            "access_class": "none",
+            "result_omitted": True,
+            "classification_truncated": False,
+            "network_indicator": False,
+            "direct_ip": False,
+            "delivery_indicator": False,
+            "sensitive_access": False,
+            "prompt_injection_indicator": False,
+            "malware_indicator": True,
+            "malware_signature": "skynet_fake_malware_test_string",
+            "rule_id": "EDR-MALWARE-001",
+            "simulation": True,
+            "zero_external_io": True,
+        },
+        redacted_fields=[
+            _redacted_field("attributes.result_preview", "[REDACTED:secret]")
+        ],
+    )
     return json.dumps(
         {
             "status": "simulated",
             "scenario": _SAFE_SIMULATION_SCENARIO,
-            "malware_marker": _SAFE_MALWARE_MARKER,
-            "synthetic_secret": _SAFE_SECRET_MARKER,
+            "detection_signal": "submitted",
+            "sensitive_output": "[REDACTED:secret]",
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -338,6 +364,8 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
 
 def _post_tool_call(*args: Any, **kwargs: Any) -> None:
     tool_name, params, result, tool_name_truncated = _extract_post_tool_call(args, kwargs)
+    if tool_name == _SAFE_SIMULATION_TOOL:
+        return
     params_classification = _bounded_selected_text(params, _PARAM_CLASSIFICATION_KEYS)
     params_classification["truncated"] = (
         params_classification["truncated"] or tool_name_truncated
