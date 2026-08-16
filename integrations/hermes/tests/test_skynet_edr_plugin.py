@@ -673,15 +673,11 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertTrue(completed[0]["attributes"]["malware_indicator"])
         self.assertEqual(completed[0]["attributes"]["rule_id"], "EDR-MALWARE-001")
-        self.assertTrue(completed[0]["redaction"]["contains_sensitive_data"])
-        self.assertEqual(
-            completed[0]["redaction"]["redacted_fields"],
-            [{
-                "path": "attributes.result_preview",
-                "reason": "secret",
-                "replacement": "[REDACTED:secret]",
-            }],
-        )
+        self.assertFalse(completed[0]["redaction"]["contains_sensitive_data"])
+        self.assertEqual(completed[0]["redaction"]["redacted_fields"], [])
+        self.assertEqual(completed[0]["attributes"]["hook"], "post_tool_call")
+        self.assertEqual(completed[0]["attributes"]["result_length"], 0)
+        self.assertNotIn("result_preview", completed[0]["attributes"])
 
     def test_safe_detection_handler_delivers_before_short_lived_worker_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -704,6 +700,10 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                 events = [json.loads(line) for line in events_path.read_text().splitlines()]
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0]["attributes"]["rule_id"], "EDR-MALWARE-001")
+                self.assertEqual(events[0]["attributes"]["hook"], "post_tool_call")
+                self.assertEqual(events[0]["attributes"]["result_length"], 0)
+                self.assertFalse(events[0]["redaction"]["contains_sensitive_data"])
+                self.assertEqual(events[0]["redaction"]["redacted_fields"], [])
 
     def test_cron_create_and_update_emit_only_completed_schedule_mutations(self):
         ctx = FakeContext()

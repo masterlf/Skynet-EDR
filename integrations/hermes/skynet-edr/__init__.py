@@ -147,12 +147,10 @@ def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
         severity="high",
         title="Hermes safe detection simulation completed",
         attributes={
-            "hook": "safe_detection_simulation",
+            "hook": "post_tool_call",
             "tool_name": _SAFE_SIMULATION_TOOL,
-            "tool_class": "synthetic",
-            "access_class": "none",
             "result_omitted": True,
-            "classification_truncated": False,
+            "result_length": 0,
             "network_indicator": False,
             "direct_ip": False,
             "delivery_indicator": False,
@@ -161,12 +159,8 @@ def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
             "malware_indicator": True,
             "malware_signature": "skynet_fake_malware_test_string",
             "rule_id": "EDR-MALWARE-001",
-            "simulation": True,
-            "zero_external_io": True,
         },
-        redacted_fields=[
-            _redacted_field("attributes.result_preview", "[REDACTED:secret]")
-        ],
+        redacted_fields=[],
         synchronous=True,
     )
     return json.dumps(

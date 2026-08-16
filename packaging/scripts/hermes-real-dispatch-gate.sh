@@ -108,12 +108,14 @@ if (
 ):
     raise SystemExit("safe simulation event classification mismatch")
 redaction = event.get("redaction", {})
-if redaction.get("contains_sensitive_data") is not True or redaction.get("redacted_fields") != [{
-    "path": "attributes.result_preview",
-    "reason": "secret",
-    "replacement": "[REDACTED:secret]",
-}]:
-    raise SystemExit("safe simulation result redaction mismatch")
+if redaction.get("contains_sensitive_data") is not False or redaction.get("redacted_fields") != []:
+    raise SystemExit("safe simulation telemetry must contain no sensitive data")
+if (
+    attrs.get("hook") != "post_tool_call"
+    or attrs.get("result_length") != 0
+    or "result_preview" in attrs
+):
+    raise SystemExit("safe simulation event projection mismatch")
 
 for path in (spool_path, final_output, plugin_log, session_db):
     if path.exists() and forbidden.name.encode() in path.read_bytes():
