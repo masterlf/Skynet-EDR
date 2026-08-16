@@ -3,8 +3,9 @@
 Passive Hermes Agent telemetry plugin for Skynet-EDR v0.7.0-alpha.2.
 
 The plugin observes Hermes lifecycle hooks and emits canonical `skynet.event.v0`
-JSONL events. It is intentionally non-blocking: it does not approve, deny, or
-modify model/tool execution.
+JSONL events. Passive hook callbacks are intentionally non-blocking and do not
+approve, deny, or modify model/tool execution. The explicit safe simulation waits
+for a bounded terminal delivery outcome before returning its redacted result.
 
 ## Captured hooks
 
@@ -25,17 +26,19 @@ status. If a Hermes runtime also invokes `post_tool_call`, that hook recognizes 
 fixed tool and does not emit a duplicate. Neither synthetic marker is copied into
 the tool result or Skynet-EDR producer output.
 
-The result reports `detection_signal=submitted` only after an authenticated terminal
-ACK (`persisted` or `duplicate`) or a confirmed durable fallback write
+The result reports `detection_signal=submitted` only after an authenticated strict
+JSON-object terminal ACK (`persisted` or `duplicate`) or a confirmed durable fallback write
 (`delivery_status=spooled`). Disabled telemetry, collision, permanent rejection, and
 a full or inaccessible fallback report `not_submitted`; the tool is not registered
-when the plugin is disabled.
+when the plugin is disabled. Hooks and the simulation share one FIFO worker queue, so
+a later simulation completion cannot overtake an earlier requested event.
 
 
 ## Default output
 
-The hook path serializes into a bounded in-memory queue only. A producer-owned
-worker sends length-prefixed canonical events to the daemon AF_UNIX socket. If
+Every event serializes into one bounded in-memory FIFO queue. Passive hooks return
+after enqueue; the safe simulation waits on a private bounded completion ticket. A
+producer-owned worker sends length-prefixed canonical events to the daemon AF_UNIX socket. If
 the daemon is unavailable, the worker writes a bounded, private, versioned
 fallback and advances its checkpoint only after a terminal daemon ACK:
 
@@ -56,6 +59,7 @@ The fallback, checkpoint, and log are user-private where supported.
 | `SKYNET_EDR_INGEST_SOCKET` | Override the AF_UNIX ingest socket. |
 | `SKYNET_EDR_SOCKET_TIMEOUT_MS` | Bound connect/write/ACK time in the worker. |
 | `SKYNET_EDR_EVENT_QUEUE_SIZE` | Bound the in-memory handoff queue. |
+| `SKYNET_EDR_SYNC_DELIVERY_TIMEOUT_MS` | Bound the safe simulation's wait for its FIFO delivery result (50–15000 ms; default 3000). |
 | `SKYNET_EDR_SPOOL_PATH` | Override the versioned fallback JSONL path. |
 | `SKYNET_EDR_CHECKPOINT_PATH` | Override the fallback replay checkpoint. |
 | `SKYNET_EDR_FALLBACK_MAX_BYTES` | Bound fallback storage (hard ceiling: 256 MiB). |
@@ -75,7 +79,8 @@ The fallback, checkpoint, and log are user-private where supported.
   newest record rather than blocking Hermes. The producer worker writes aggregate
   queue/socket/fallback counters to the sanitized operational log.
 - No LLM calls from the plugin.
-- No inline blocking in v0.7.0-alpha.2.
+- Passive hooks never wait for transport; only the explicit safe simulation in
+  v0.7.0-alpha.2 performs a bounded wait for its ordered terminal outcome.
 - Raw tool parameters and raw tool output are omitted; only lengths and
   indicators are stored.
 - Newly emitted parameter previews are always `[OMITTED:tool_params]`.

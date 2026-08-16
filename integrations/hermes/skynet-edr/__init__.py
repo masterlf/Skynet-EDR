@@ -1,9 +1,10 @@
 """Skynet-EDR passive telemetry plugin for Hermes Agent.
 
-The plugin is intentionally non-blocking. It observes Hermes lifecycle hooks,
-emits canonical ``skynet.event.v0`` JSONL records to a local spool, and writes a
-sanitized operational log. It never executes tool content, never performs
-network egress, and never stores raw tool output.
+Passive hooks are intentionally non-blocking. They and the bounded synchronous
+safe simulation share one ordered transport queue. The plugin emits canonical
+``skynet.event.v0`` JSONL records to a local spool and writes a sanitized
+operational log. It never executes tool content, never performs network egress,
+and never stores raw tool output.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 try:
@@ -38,6 +39,8 @@ SCHEMA_VERSION = "skynet.event.v0"
 DEFAULT_MAX_FIELD_CHARS = 4096
 DEFAULT_MAX_LOG_BYTES = 1_048_576
 DEFAULT_EVENT_QUEUE_SIZE = 1024
+DEFAULT_SYNC_DELIVERY_TIMEOUT_MS = 3_000
+MAX_SYNC_DELIVERY_TIMEOUT_MS = 15_000
 DEFAULT_FALLBACK_MAX_BYTES = 64 * 1024 * 1024
 MAX_FALLBACK_MAX_BYTES = 256 * 1024 * 1024
 MAX_INGEST_FRAME_BYTES = 262_144
@@ -119,7 +122,12 @@ def _initial_queue_size() -> int:
     return min(65_536, max(1, value))
 
 
-_event_queue: queue.Queue[str] = queue.Queue(maxsize=_initial_queue_size())
+class _DeliveryItem(NamedTuple):
+    line: str
+    completion: queue.Queue[str] | None
+
+
+_event_queue: queue.Queue[_DeliveryItem] = queue.Queue(maxsize=_initial_queue_size())
 _worker_lock = threading.Lock()
 _delivery_lock = threading.Lock()
 _worker_started = False
@@ -514,6 +522,20 @@ def _reject_nonstandard_json_constant(_constant: str) -> None:
     raise ValueError("non-standard JSON constant")
 
 
+def _parse_ack(ack: bytearray) -> dict[str, Any] | None:
+    if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+        return None
+    try:
+        response = json.loads(
+            bytes(ack[:-1]),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (TypeError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+    return response if type(response) is dict else None
+
+
 def _write_event(
     *,
     event_id: str | None = None,
@@ -561,34 +583,47 @@ def _write_event(
     if artifact is not None:
         event["artifact"] = artifact
     line = json.dumps(event, separators=(",", ":"), sort_keys=True)
-    if synchronous:
-        delivery_status = _deliver_line(line)
-        _report_transport_counters()
-        return delivery_status
-    _ensure_worker()
+    return _submit_line(line, synchronous=synchronous)
+
+
+def _submit_line(line: str, *, synchronous: bool) -> str:
+    if not _ensure_worker():
+        return "delivery_failed"
+    completion: queue.Queue[str] | None = queue.Queue(maxsize=1) if synchronous else None
     try:
-        _event_queue.put_nowait(line)
-        return "queued"
+        _event_queue.put_nowait(_DeliveryItem(line=line, completion=completion))
     except queue.Full:
         with _lock:
             _transport_counters["queue_drops"] += 1
         return "delivery_failed"
+    _ensure_worker()
+    if completion is None:
+        return "queued"
+    timeout = min(
+        MAX_SYNC_DELIVERY_TIMEOUT_MS,
+        max(50, _safe_positive_int_env("SKYNET_EDR_SYNC_DELIVERY_TIMEOUT_MS", DEFAULT_SYNC_DELIVERY_TIMEOUT_MS)),
+    ) / 1000
+    try:
+        return completion.get(timeout=timeout)
+    except queue.Empty:
+        return "delivery_failed"
 
 
-def _ensure_worker() -> None:
+def _ensure_worker() -> bool:
     global _worker_started, _worker_thread
     with _worker_lock:
         if _worker_thread is not None and _worker_thread.is_alive():
             _worker_started = True
-            return
+            return True
         _worker_started = False
         if _worker_stop.is_set():
-            return
+            return False
         _worker_thread = threading.Thread(
             target=_transport_worker, name="skynet-edr-forwarder", daemon=True
         )
         _worker_thread.start()
         _worker_started = True
+        return True
 
 
 def _transport_worker() -> None:
@@ -598,7 +633,7 @@ def _transport_worker() -> None:
         idle_ticks = 0
         while not _worker_stop.is_set():
             try:
-                line = _event_queue.get(timeout=0.05)
+                item = _event_queue.get(timeout=0.05)
             except queue.Empty:
                 idle_ticks += 1
                 if idle_ticks >= 20:
@@ -608,12 +643,18 @@ def _transport_worker() -> None:
                     idle_ticks = 0
                 continue
             idle_ticks = 0
+            delivery_status = "delivery_failed"
             try:
-                delivery_status = _deliver_line(line)
+                delivery_status = _deliver_line(item.line)
                 if delivery_status == "delivery_failed":
                     with _lock:
                         _transport_counters["queue_drops"] += 1
             finally:
+                if item.completion is not None:
+                    try:
+                        item.completion.put_nowait(delivery_status)
+                    except queue.Full:
+                        pass
                 _event_queue.task_done()
                 _report_transport_counters()
                 _send_health_report()
@@ -705,9 +746,9 @@ def _send_frame(line: str) -> str:
                 ack.extend(chunk)
                 if b"\n" in chunk:
                     break
-        if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+        response = _parse_ack(ack)
+        if response is None:
             return "retry_later"
-        response = json.loads(bytes(ack[:-1]))
         status = response.get("status")
         if (
             response.get("version") == 1
@@ -781,9 +822,9 @@ def _send_health_report() -> bool:
                 ack.extend(chunk)
                 if b"\n" in chunk:
                     break
-        if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+        response = _parse_ack(ack)
+        if response is None:
             return False
-        response = json.loads(bytes(ack[:-1]))
         return response.get("version") == 1 and response.get("status") == "health_recorded"
     except (OSError, ValueError, json.JSONDecodeError):
         return False

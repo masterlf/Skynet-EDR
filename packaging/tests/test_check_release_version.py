@@ -606,7 +606,7 @@ class ReleaseVersionCheckerTests(unittest.TestCase):
             ),
             (
                 "integrations/hermes/skynet-edr/README.md",
-                "No inline blocking in v0.7.0-alpha.2.",
+                "v0.7.0-alpha.2 performs a bounded wait for its ordered terminal outcome.",
             ),
         ):
             with self.subTest(relative=relative, marker=current_marker):
