@@ -253,10 +253,10 @@ fi
 grep -qx 'c7ad23af619abd84e3c475b5503a8af8f7696b19:crates/skynet-edr-core/tests/hermes_event_ingestion.rs:curl-auth-header:32' .gitleaksignore
 
 for action in init autobuild analyze upload-sarif; do
-  grep -q "github/codeql-action/${action}@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3" .github/workflows/codeql.yml .github/workflows/security.yml
+  grep -q "github/codeql-action/${action}@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7" .github/workflows/codeql.yml .github/workflows/security.yml
 done
 grep -q 'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11' .github/workflows/security.yml
-grep -q 'aquasecurity/trivy-action@c07df6fec6fa692e6fd1200d50aaa1fdd66f03c8' .github/workflows/security.yml
+grep -q 'aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297' .github/workflows/security.yml
 
 grep -q 'packaging/scripts/smoke-install-artifacts.sh' .github/workflows/packaging-release.yml
 grep -q 'packaging/scripts/verify-public-release.sh' docs/RELEASE_PROCESS.md
