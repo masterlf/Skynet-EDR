@@ -29,19 +29,26 @@ def load_module():
 
 
 class HermesEnrollmentTests(unittest.TestCase):
+    def test_release_enrollment_contract_targets_hermes_020_and_alpha1_payload(self):
+        module = load_module()
+        self.assertEqual(module.SUPPORTED_HERMES, {"0.20.0"})
+        self.assertEqual(module.PAYLOAD_VERSION, "0.7.0-alpha.1")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.home = self.base / "home"
         self.home.mkdir(mode=0o700)
+        (self.home / "config.yaml").write_text("plugins:\n  enabled: true\n", encoding="utf-8")
+        (self.home / "config.yaml").chmod(0o600)
         self.source = self.base / "payload"
         self.source.mkdir()
         files = {
-            "plugin.yaml": b'name: skynet-edr\nversion: "0.6.0"\n',
-            "__init__.py": b'PLUGIN_VERSION = "0.6.0"\n',
+            "plugin.yaml": b'name: skynet-edr\nversion: "0.7.0-alpha.1"\n',
+            "__init__.py": b'PLUGIN_VERSION = "0.7.0-alpha.1"\n',
             "README.md": b"safe\n",
-            "dashboard/manifest.json": b'{"version":"0.6.0"}\n',
+            "dashboard/manifest.json": b'{"version":"0.7.0-alpha.1"}\n',
             "dashboard/plugin.js": b"safe\n",
             "dashboard/plugin_api.py": b"safe\n",
             "desktop/plugin.js": b"safe\n",
@@ -67,8 +74,8 @@ class HermesEnrollmentTests(unittest.TestCase):
             "hermes_home": str(self.home),
             "profile": "fixture-profile",
             "host": {"id": "ubuntu", "version": "24.04", "arch": "x86_64", "init": "systemd"},
-            "hermes_version": "0.19.0",
-            "payload_version": "0.6.0",
+            "hermes_version": "0.20.0",
+            "payload_version": "0.7.0-alpha.1",
             "manifest": self.manifest,
             "fixture": True,
             "socket": {"dac": True, "uid_authorized": True},
@@ -125,7 +132,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         package_manifest = self.base / "manifest.json"
         package_manifest.write_text(json.dumps({
             "schema": 1,
-            "payload_version": "0.6.0",
+            "payload_version": "0.7.0-alpha.1",
             "generation": self.request["manifest_sha256"],
             "files": self.manifest,
         }), encoding="utf-8")
@@ -162,7 +169,7 @@ class HermesEnrollmentTests(unittest.TestCase):
         package_manifest = self.base / "manifest.json"
         package_manifest.write_text(json.dumps({
             "schema": 1,
-            "payload_version": "0.6.0",
+            "payload_version": "0.7.0-alpha.1",
             "generation": self.request["manifest_sha256"],
             "files": self.manifest,
         }), encoding="utf-8")
@@ -203,7 +210,8 @@ class HermesEnrollmentTests(unittest.TestCase):
         self.assertFalse(self.state.exists())
 
     def make_adapter(self, enabled=True, healthy=True, home=None, profile="fixture-profile", fail_action=None,
-                     require_payload_before_prepare=False, call_log=None):
+                     require_payload_before_prepare=False, require_payload_absent_before_rollback=False,
+                     call_log=None):
         home = self.home if home is None else home
         adapter = self.base / "adapter.py"
         adapter.write_text(
@@ -215,20 +223,26 @@ class HermesEnrollmentTests(unittest.TestCase):
             "assert os.environ['HERMES_PROFILE']==" + repr(profile) + "\n"
             + ("if sys.argv[1]=='prepare': assert os.path.isfile(os.path.join(os.environ['HERMES_HOME'],'plugins','skynet-edr','plugin.yaml'))\n"
                if require_payload_before_prepare else "") +
-            "o={'prepared':True,'plugin_enabled':False}\n"
+             ("if sys.argv[1]=='rollback': assert not os.path.exists(os.path.join(os.environ['HERMES_HOME'],'plugins','skynet-edr'))\n"
+               if require_payload_absent_before_rollback else "") +
+            "o={'prepared':True,'plugin_enabled':False,'enabled_config_sha256':'c'*64,'disabled_config_sha256':'d'*64}\n"
+            "if sys.argv[1]=='enable': assert os.environ['SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256']=='c'*64 and os.environ['SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256']=='d'*64\n"
+            "if sys.argv[1]=='disable': assert os.environ['SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256']=='e'*64 and os.environ['SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256']=='f'*64\n"
             "if sys.argv[1] in ('enable','disable'): o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False}\n"
+            "if sys.argv[1]=='disable': o['disabled_config_sha256']=os.environ['SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256']\n"
             "elif sys.argv[1]=='rollback': o={'prepared':False,'plugin_enabled':False,'reload_required':True,'rollback_phase':'RESTORED_VERIFIED'}\n"
             "elif sys.argv[1]=='attest': o={'plugin_enabled':False,'loaded_generation':None,'process_fresh':False,"
             "'daemon':{'healthy':False,'listener':True,'transport':'available','backlog':0,'degraded':False},"
             "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':False,'generation':os.environ['SKYNET_EDR_GENERATION'],'runtime_nonce':'c'*64},"
             "'real_hook':{'correlated':False,'committed':False,'incident_opened':False},"
-            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1}\n"
+            "'real_dispatch':{'completed':False,'events_committed':0},"
+            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1,'enabled_config_sha256':'e'*64,'disabled_config_sha256':'f'*64}\n"
             "if sys.argv[1]=='enable':\n"
             f" o['plugin_enabled']={enabled!r}\n"
             " o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']\n"
             "elif sys.argv[1]=='disable': o['plugin_enabled']=False\n"
             "if sys.argv[1]=='attest':\n"
-            f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}; o['real_hook']={{'correlated':True,'committed':True,'incident_opened':False,'event_id':os.environ['SKYNET_EDR_CANARY_EVENT_ID'],'receipt_status':'persisted'}}\n"
+            f" o['plugin_enabled']=True; o['loaded_generation']=os.environ['SKYNET_EDR_GENERATION']; o['process_fresh']={healthy!r}; o['producer']['fresh']={healthy!r}; o['daemon']['healthy']={healthy!r}; o['real_hook']={{'correlated':True,'committed':True,'incident_opened':False,'event_id':os.environ['SKYNET_EDR_CANARY_EVENT_ID'],'receipt_status':'persisted'}}; o['real_dispatch']={{'completed':True,'events_committed':3}}\n"
             "print(json.dumps(o))\n",
             encoding="utf-8",
         )
@@ -439,17 +453,20 @@ class HermesEnrollmentTests(unittest.TestCase):
                          "generation": generation, "runtime_nonce": "c" * 64},
             "real_hook": {"correlated": True, "committed": True, "incident_opened": False,
                           "event_id": event_id, "receipt_status": "persisted"},
+            "real_dispatch": {"completed": True, "events_committed": 3},
             "restart_blast_radius": "complete_user_manager",
             "identities": {"user@1.service": [11, 101, 1001],
                            "hermes-gateway.service": [21, 201, 2001],
                            "skynet-edr.service": [31, 301, 3001]},
             "commit_sequence": 1,
+            "enabled_config_sha256": "e" * 64,
+            "disabled_config_sha256": "f" * 64,
         }
         module.validate_attest_response(valid, env, event_id)
 
         mutations = [
             (("daemon", "backlog"), False), (("producer", "uid"), True),
-            (("commit_sequence",), True),
+            (("commit_sequence",), True), (("real_dispatch", "events_committed"), True),
             *((("identities", unit, index), True)
               for unit in valid["identities"] for index in range(3)),
             (("plugin_enabled",), 1), (("process_fresh",), 1),
@@ -628,7 +645,9 @@ class HermesEnrollmentTests(unittest.TestCase):
     def test_attest_lane_uses_cleanup_grace_only_for_adapter_process_lifetime(self):
         module = load_module()
         token = "a" * 64
-        attested = {"transaction_nonce": "c" * 64}
+        attested = {"transaction_nonce": "c" * 64,
+                    "enabled_config_sha256": "e" * 64,
+                    "disabled_config_sha256": "f" * 64}
         guards = []
 
         @contextlib.contextmanager
@@ -830,14 +849,15 @@ class HermesEnrollmentTests(unittest.TestCase):
             "import json,os,sys\n"
             f"open({str(action_log)!r},'a').write(json.dumps([sys.argv[1],os.geteuid()])+'\\n')\n"
             "healthy=sys.argv[1]=='attest'\n"
-            "if sys.argv[1]=='prepare': o={'prepared':True,'plugin_enabled':False}\n"
+            "if sys.argv[1]=='prepare': o={'prepared':True,'plugin_enabled':False,'enabled_config_sha256':'c'*64,'disabled_config_sha256':'d'*64}\n"
             "elif sys.argv[1]=='rollback': o={'prepared':False,'plugin_enabled':False,'reload_required':True,'rollback_phase':'RESTORED_VERIFIED'}\n"
-            "elif sys.argv[1] in ('enable','disable'): o={'plugin_enabled':sys.argv[1]=='enable','loaded_generation':os.environ['SKYNET_EDR_GENERATION'] if sys.argv[1]=='enable' else None,'process_fresh':False}\n"
+            "elif sys.argv[1] in ('enable','disable'): o={'plugin_enabled':sys.argv[1]=='enable','loaded_generation':os.environ['SKYNET_EDR_GENERATION'] if sys.argv[1]=='enable' else None,'process_fresh':False,'disabled_config_sha256':'d'*64} if sys.argv[1]=='disable' else {'plugin_enabled':True,'loaded_generation':os.environ['SKYNET_EDR_GENERATION'],'process_fresh':False}\n"
             "else: o={'plugin_enabled':True,'loaded_generation':os.environ['SKYNET_EDR_GENERATION'],"
             "'process_fresh':healthy,'daemon':{'healthy':healthy,'listener':True,'transport':'available','backlog':0,'degraded':False},"
             "'producer':{'uid':int(os.environ['SKYNET_EDR_TARGET_UID']),'role':'gateway','fresh':healthy,'generation':os.environ['SKYNET_EDR_GENERATION'],'runtime_nonce':'c'*64},"
             "'real_hook':{'correlated':sys.argv[1]=='attest','committed':sys.argv[1]=='attest','incident_opened':False,'event_id':os.environ.get('SKYNET_EDR_CANARY_EVENT_ID'),'receipt_status':'persisted' if sys.argv[1]=='attest' else None},"
-            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1}\n"
+            "'real_dispatch':{'completed':sys.argv[1]=='attest','events_committed':3 if sys.argv[1]=='attest' else 0},"
+            "'restart_blast_radius':'complete_user_manager','identities':{'user@'+os.environ['SKYNET_EDR_TARGET_UID']+'.service':[11,101,1001],'hermes-gateway.service':[21,201,2001],'skynet-edr.service':[31,301,3001]},'commit_sequence':1,'enabled_config_sha256':'e'*64,'disabled_config_sha256':'f'*64}\n"
             "print(json.dumps(o))\n",
             encoding="utf-8",
         )
@@ -1017,7 +1037,7 @@ class HermesEnrollmentTests(unittest.TestCase):
 
     def test_unsupported_platform_and_hermes_version_fail_closed(self):
         for key, value in (("host", {"id": "debian", "version": "12", "arch": "x86_64", "init": "systemd"}),
-                           ("hermes_version", "0.20.0")):
+                           ("hermes_version", "0.19.0")):
             original = self.request[key]
             self.request[key] = value
             self._write_inputs()
@@ -1085,6 +1105,14 @@ class HermesEnrollmentTests(unittest.TestCase):
         result, output = self.run_cli("apply", "--adapter", adapter)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output["state"], "ENROLLED")
+
+    def test_unenroll_quarantines_payload_before_adapter_rollback(self):
+        adapter = self.make_adapter(require_payload_absent_before_rollback=True)
+        result, _ = self.run_cli("apply", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result, output = self.run_cli("unenroll", "--adapter", adapter)
+        self.assertEqual(result.returncode, 0, (result.stderr, output))
+        self.assertEqual(output["state"], "QUARANTINED")
 
     def test_unenroll_is_repeatable_preserves_evidence_and_other_profile(self):
         adapter = self.make_adapter()

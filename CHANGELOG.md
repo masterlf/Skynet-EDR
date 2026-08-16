@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.7.0-alpha.1 - 2026-08-16
+
+- Ported fail-closed autonomous Hermes enrollment to the exact Ubuntu 24.04 amd64/systemd, Hermes 0.20.0, default-profile compatibility cell.
+- Advanced canonical product, package, plugin, dashboard, workflow, and current documentation identity to `0.7.0-alpha.1`; Debian/RPM metadata uses `0.7.0~alpha.1` and Arch uses `0.7.0.alpha.1-1`.
+- Preserved passive behavior, seven existing narrow detection claims, strict transaction rollback evidence, idempotence, bounded deadlines, redaction, and explicit complete-user-manager restart scope.
+
 ## 0.6.0 - 2026-08-15
 
 - Promoted the v0.6.0-rc.1 passive evaluation baseline to stable SemVer identity without changing detection behavior, schemas, rules, dependencies, or capability claims.

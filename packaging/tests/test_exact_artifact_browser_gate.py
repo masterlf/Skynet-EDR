@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / "packaging" / "scripts" / "exact-artifact-browser-gate.sh"
 BROWSER = ROOT / "packaging" / "scripts" / "hermes-browser-smoke.mjs"
 BROWSER_LOCK = ROOT / "packaging" / "browser-gate" / "package-lock.json"
+DEGRADED_FIXTURE = ROOT / "crates" / "skynet-edr-daemon" / "tests" / "fixtures" / "status_alert_delivery_degraded.json"
 WORKFLOWS = (
     ROOT / ".github" / "workflows" / "packaging-release.yml",
     ROOT / ".github" / "workflows" / "release-artifacts.yml",
@@ -41,6 +42,12 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertLess(text.index("systemctl start skynet-edr.service"), text.index("sudo /usr/libexec/skynet-edr/deploy-verify"))
         self.assertIn('--hermes-plugin-uid "$(id -u)"', text)
         self.assertIn('--hermes-plugin-gid "$(id -g)"', text)
+        self.assertIn("browser degraded-lane fixture version mismatch", text)
+
+    def test_degraded_lane_fixture_tracks_release_version(self) -> None:
+        fixture = DEGRADED_FIXTURE.read_text(encoding="utf-8")
+        self.assertIn('"version": "0.7.0-alpha.1"', fixture)
+        self.assertNotIn('"version": "0.6.0"', fixture)
 
     def test_loaded_user_copy_remains_exact_and_package_integrity_is_rechecked(self) -> None:
         text = GATE.read_text(encoding="utf-8")
@@ -99,12 +106,28 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertNotIn("localeCompare", browser)
         self.assertIn("a < b ? -1 : a > b ? 1 : 0", browser)
         self.assertIn("headless: true", browser)
-        self.assertIn("0.6.0", browser)
+        self.assertIn("0.7.0-alpha.1", browser)
         self.assertIn("Engine Online", browser)
         self.assertIn("Backend available", browser)
         self.assertIn("Telemetry degraded", browser)
         self.assertIn("request.url().includes(':8787')", browser)
         self.assertNotIn("http://127.0.0.1:8787", browser)
+        self.assertIn("process.env.HERMES_DASHBOARD_SESSION_TOKEN", browser)
+        self.assertIn("sessionToken.length < 32", browser)
+        self.assertIn("sessionToken.length > 256", browser)
+        self.assertNotIn("extraHTTPHeaders", browser)
+        self.assertIn("serviceWorkers: 'block'", browser)
+        self.assertIn("installAuthenticatedOriginProxy(context, url, sessionToken, failures)", browser)
+        self.assertIn("const page = await context.newPage()", browser)
+        self.assertIn("await context.close()", browser)
+
+        proxy = (ROOT / "packaging/scripts/hermes-browser-origin-proxy.mjs").read_text(encoding="utf-8")
+        self.assertIn("context.route('**/*'", proxy)
+        self.assertIn("requestUrl.origin !== targetOrigin", proxy)
+        self.assertIn("maxRedirects: 0", proxy)
+        self.assertIn("blocked authenticated redirect", proxy)
+        self.assertNotIn("route.continue", proxy)
+        self.assertIn("test-hermes-browser-origin-proxy.mjs", GATE.read_text(encoding="utf-8"))
 
     def test_both_workflows_gate_one_deb_before_upload_or_publication(self) -> None:
         gate = GATE.read_text(encoding="utf-8")
@@ -116,6 +139,8 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
             with self.subTest(workflow=workflow.name):
                 self.assertIn("https://github.com/NousResearch/hermes-agent.git", text)
                 self.assertIn(PIN, text)
+                self.assertIn("63ebda150acb3281f40c4056abf65dcb6d625a42e5743d128c94d559dde843e0", text)
+                self.assertLess(text.index("Verify accepted reproducible DEB identity"), text.index("exact-artifact-browser-gate.sh"))
                 self.assertLess(text.index("Prepare frozen Hermes and browser dependencies before artifact build"), text.index("packaging/scripts/build-tarball.sh"))
                 self.assertGreaterEqual(text.count("sha256sum -c checksums.txt"), 5)
                 self.assertLess(text.index("exact-artifact-browser-gate.sh"), text.index("actions/upload-artifact@"))

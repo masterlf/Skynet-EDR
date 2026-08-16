@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -23,10 +24,13 @@ ALLOWED_FILES = (
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 4:
         return 2
     source = Path(sys.argv[1])
     destination = Path(sys.argv[2])
+    payload_version = sys.argv[3]
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", payload_version) is None:
+        return 2
     files: dict[str, dict[str, int | str]] = {}
     for relative in ALLOWED_FILES:
         path = source / relative
@@ -45,7 +49,7 @@ def main() -> int:
     ).hexdigest()
     document = {
         "schema": 1,
-        "payload_version": "0.6.0",
+        "payload_version": payload_version,
         "generation": generation,
         "files": files,
     }

@@ -1,6 +1,6 @@
 # Skynet-EDR Linux installation guide
 
-Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installable pre-1.0 stable SemVer evaluation release has a shipped live Hermes producer only; OpenClaw, Codex, Claude Code, and similar runtimes require an external conforming producer and are not shipped live integrations.
+Skynet-EDR is currently a pre-production, passive-first AI-agent Detection and Response project. The installable prerelease has a shipped live Hermes producer only; OpenClaw, Codex, Claude Code, and similar runtimes require an external conforming producer and are not shipped live integrations.
 
 The install goal is conservative: collect and normalize local AI-agent security evidence without creating a new root-level attack surface. No privileged runtime sensor is enabled by default.
 
@@ -104,17 +104,17 @@ Download packages from the GitHub Releases page:
 https://github.com/masterlf/Skynet-EDR/releases
 ```
 
-For `v0.6.0`, the expected Linux `amd64` artifacts are:
+For `v0.7.0-alpha.1`, the expected Linux `amd64` artifacts are:
 
 ```text
-skynet-edr_0.6.0_amd64.deb
-skynet-edr-0.6.0-1.x86_64.rpm
-skynet-edr-0.6.0-1-x86_64.pkg.tar.zst
-skynet-edr-0.6.0-x86_64-unknown-linux-gnu.tar.gz
+skynet-edr_0.7.0-alpha.1_amd64.deb
+skynet-edr-0.7.0-alpha.1-1.x86_64.rpm
+skynet-edr-0.7.0.alpha.1-1-x86_64.pkg.tar.zst
+skynet-edr-0.7.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz
 checksums.txt
 ```
 
-Artifact filenames retain the canonical release version. DEB and RPM report `0.6.0` (RPM release `1`), while Arch reports `0.6.0-1`. The packaging inspection gate rejects metadata that drops or misstates the stable identity.
+Artifact filenames retain the canonical release version. DEB and RPM report `0.7.0~alpha.1` (RPM release `1`), while Arch reports `0.7.0.alpha.1-1`. The packaging inspection gate rejects metadata that drops or misstates the prerelease identity.
 
 Verify downloaded files before installation:
 
@@ -128,7 +128,7 @@ After downloading the `.deb` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo apt install ./skynet-edr_0.6.0_amd64.deb
+sudo apt install ./skynet-edr_0.7.0-alpha.1_amd64.deb
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -156,11 +156,11 @@ manifest, observation, adapter, rollback, and clean-host gate contracts.
 
 The repository ships the transaction, deterministic boundary fixtures, and the
 root-owned adapter at `/usr/libexec/skynet-edr/hermes-enrollment-adapter.py`.
-The adapter's exact Hermes 0.19.0 CLI/read-back and booted-systemd contract has
-not yet passed the disposable clean-host gate. Therefore no live deployment may
-yet claim autonomous `ENROLLED`; the current operational verdict is
-`S3_ADAPTER_BLOCK`. Do not recreate the removed copy/enable/manual-restart
-sequence as a parallel success path.
+The adapter targets exact Hermes 0.20.0/default-profile behavior on Ubuntu 24.04
+amd64/systemd. Enrollment success requires package-owned bytes, an explicitly
+authorized complete user-manager restart, healthy protocol-v3 producer evidence,
+and a fresh committed attestation receipt. Do not recreate the removed
+copy/enable/manual-restart sequence as a parallel success path.
 
 The plugin worker sends to `/run/skynet-edr-ingest/ingest.sock`. During daemon
 outages it writes a private versioned fallback under:
@@ -189,7 +189,7 @@ After downloading the `.rpm` and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo dnf install ./skynet-edr-0.6.0-1.x86_64.rpm
+sudo dnf install ./skynet-edr-0.7.0-alpha.1-1.x86_64.rpm
 skynet-edr --version
 skynet-edr-daemon --version
 skynet-edr-install-hermes-plugin --help
@@ -212,7 +212,7 @@ After downloading the Arch package and `checksums.txt` from the release:
 
 ```bash
 sha256sum -c checksums.txt --ignore-missing
-sudo pacman -U ./skynet-edr-0.6.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ./skynet-edr-0.7.0.alpha.1-1-x86_64.pkg.tar.zst
 skynet-edr --version
 skynet-edr-daemon status
 ```

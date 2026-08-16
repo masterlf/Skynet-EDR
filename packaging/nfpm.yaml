@@ -2,7 +2,7 @@ name: skynet-edr
 arch: ${NFPM_ARCH:-amd64}
 platform: linux
 # Native DEB identity is intentionally distinct from canonical product SemVer.
-version: ${SKYNET_EDR_DEB_VERSION:-0.6.0}
+version: ${SKYNET_EDR_DEB_VERSION:-0.7.0~alpha.1}
 section: security
 priority: optional
 maintainer: Skynet-EDR Maintainers <maintainers@example.invalid>

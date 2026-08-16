@@ -1,6 +1,6 @@
 # Integrations
 
-This page is the v0.6.0 integration index. It points to the runtime-specific docs and states the shared contract all integrations must respect.
+This page is the v0.7.0-alpha.1 integration index. It points to the runtime-specific docs and states the shared contract all integrations must respect.
 
 The common event contract is [Canonical event schema](EVENT_SCHEMA.md). Integration code should normalize into `skynet.event.v0` instead of making the correlation engine learn every runtime dialect. Cute architecture trick: fewer dialects, fewer gremlins.
 
@@ -17,7 +17,7 @@ The common event contract is [Canonical event schema](EVENT_SCHEMA.md). Integrat
 
 | Surface | Status | Purpose | Details |
 |---|---|---|---|
-| Hermes plugin telemetry | v0.6.0 live passive path | Observe Hermes lifecycle hooks, emit canonical JSONL, and write sanitized plugin logs | [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) |
+| Hermes plugin telemetry | v0.7.0-alpha.1 live passive path | Observe Hermes lifecycle hooks, emit canonical JSONL, and write sanitized plugin logs | [Hermes plugin telemetry](HERMES_PLUGIN_TELEMETRY.md) |
 | Hermes trace ingestion | MVP/import path | Normalize Hermes/AI-agent traces into canonical events | [Hermes event ingestion](HERMES_EVENT_INGESTION.md) |
 | Read-only MCP handler library | Implemented library contract | Defines side-effect-free handlers and metadata for a future adapter; no MCP transport, registration, or operator-runnable Hermes integration is shipped | [Read-only MCP integration](MCP_READ_ONLY.md) |
 | OpenClaw adapter | Adapter contract | Map OpenClaw-style observations into canonical event properties | [OpenClaw integration](OPENCLAW_INTEGRATION.md) |

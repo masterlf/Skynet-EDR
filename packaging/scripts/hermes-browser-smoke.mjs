@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
+import { installAuthenticatedOriginProxy } from './hermes-browser-origin-proxy.mjs';
 
 const [url, lane, manifestPath, browserRuntime] = process.argv.slice(2);
 if (!url || !['normal', 'alert-delivery'].includes(lane) || !manifestPath || !browserRuntime) {
@@ -11,10 +12,14 @@ if (!url || !['normal', 'alert-delivery'].includes(lane) || !manifestPath || !br
 if (!url.startsWith('http://127.0.0.1:') || url.includes(':8787')) {
   throw new Error('browser target must be the loopback Hermes origin, never the daemon');
 }
+const sessionToken = process.env.HERMES_DASHBOARD_SESSION_TOKEN;
+if (typeof sessionToken !== 'string' || sessionToken.length < 32 || sessionToken.length > 256 || /\s/.test(sessionToken)) {
+  throw new Error('a bounded Hermes dashboard session token is required');
+}
 const requireFromRuntime = createRequire(join(browserRuntime, 'package.json'));
 const { chromium } = requireFromRuntime('playwright');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-if (manifest.schema !== 1 || manifest.payload_version !== '0.6.0') {
+if (manifest.schema !== 1 || manifest.payload_version !== '0.7.0-alpha.1') {
   throw new Error('installed package manifest version mismatch');
 }
 function canonicalize(value) {
@@ -40,16 +45,18 @@ if (dashboard.integrity !== sri || dashboard.version !== manifest.payload_versio
 }
 
 const browser = await chromium.launch({ headless: true });
+const context = await browser.newContext({ serviceWorkers: 'block' });
 try {
-  const page = await browser.newPage();
+  const page = await context.newPage();
   const failures = [];
+  await installAuthenticatedOriginProxy(context, url, sessionToken, failures);
   page.on('request', (request) => {
     if (request.url().includes(':8787')) failures.push('browser attempted direct daemon access');
   });
   page.on('console', (message) => { if (message.type() === 'error') failures.push(`console: ${message.text()}`); });
   page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
   await page.goto(url, { waitUntil: 'networkidle', timeout: 60_000 });
-  for (const text of ['EDR 0.6.0', 'Engine Online', 'Backend available', 'Passive mode']) {
+  for (const text of ['EDR 0.7.0-alpha.1', 'Engine Online', 'Backend available', 'Passive mode']) {
     await page.getByText(text, { exact: true }).waitFor({ timeout: 30_000 });
   }
   const telemetry = lane === 'normal' ? 'Telemetry disabled' : 'Telemetry degraded';
@@ -59,5 +66,6 @@ try {
   if (failures.length) throw new Error(failures.join('; '));
   process.stdout.write(JSON.stringify({ generation, lane, status: 'PASS' }) + '\n');
 } finally {
+  await context.close();
   await browser.close();
 }

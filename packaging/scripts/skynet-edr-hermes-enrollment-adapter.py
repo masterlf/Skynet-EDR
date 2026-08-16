@@ -36,6 +36,7 @@ DROPIN = Path("/etc/systemd/user/hermes-gateway.service.d/50-skynet-edr.conf")
 SOCKET = Path("/run/skynet-edr-ingest/ingest.sock")
 HERMES = Path("/usr/bin/hermes")
 SYSTEMCTL = Path("/usr/bin/systemctl")
+LOGINCTL = Path("/usr/bin/loginctl")
 USERMOD = Path("/usr/sbin/usermod")
 GPASSWD = Path("/usr/bin/gpasswd")
 GROUP = "skynet-edr-ingest"
@@ -50,9 +51,16 @@ MANAGED_MANAGER_ENVIRONMENT = (
     "SKYNET_EDR_ATTESTATION_TOKEN",
 )
 MAX_OUTPUT = 65_536
-ATTEST_BUDGET_NS = 15_000_000_000
+ATTEST_BUDGET_NS = 30_000_000_000
 CLEANUP_BUDGET_NS = 15_000_000_000
 POLL_SECONDS = 0.2
+A2A_HOST = "127.0.0.1"
+A2A_PORT = 9900
+A2A_REQUEST_ID = "skynet-edr-enrollment-v1"
+A2A_REPLY = "SKYNET_EDR_ENROLLMENT_OK"
+POST_STARTUP_STABILITY_SECONDS = 10.0
+A2A_CONNECT_TIMEOUT_SECONDS = 3.0
+A2A_RESPONSE_TIMEOUT_SECONDS = 10.0
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 CANARY_EVENT_ID = re.compile(r"^evt_skynet_attest_[0-9a-f]{64}$")
 V3_SOURCE_KEYS = {
@@ -82,8 +90,20 @@ INGESTION_STATUS_KEYS = {
     "frames_oversize_total", "frames_invalid_total", "frames_timeout_total",
     "events_persisted_total", "events_duplicate_total", "events_collision_total",
     "incident_integrity_collision_total", "correlation_truncated_total",
-    "storage_errors_total", "sources",
+    "storage_errors_total", "alert_delivery_errors_total", "error_category_contract", "sources",
 }
+ERROR_CATEGORY_SCHEMA = "skynet.ingestion-error-categories.v1"
+ERROR_CATEGORY_GENERATION = "fnv1a64-9e53ed39e2296140"
+ERROR_CATEGORIES = (
+    ("frame_timeout", True),
+    ("storage", True),
+    ("transaction", True),
+    ("incident_collision", True),
+    ("alert_delivery", True),
+    ("invalid_event", False),
+    ("malformed_frame", False),
+    ("frame_size", False),
+)
 BOOT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SAFE_PROFILE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 SAFE_HOME = re.compile(r"^/[A-Za-z0-9_./@-]{1,4095}$")
@@ -199,6 +219,26 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
     deadline_ns = None
     attestation_token = None
     canary_event_id = None
+    expected_hermes_config_sha256 = None
+    if action == "rollback":
+        expected_hermes_config_sha256 = env.get("SKYNET_EDR_EXPECTED_HERMES_CONFIG_SHA256")
+        if type(expected_hermes_config_sha256) is not str or HEX64.fullmatch(expected_hermes_config_sha256) is None:
+            raise AdapterError("invalid_context")
+    elif "SKYNET_EDR_EXPECTED_HERMES_CONFIG_SHA256" in env:
+        raise AdapterError("invalid_context")
+    enabled_hermes_config_sha256 = None
+    disabled_hermes_config_sha256 = None
+    if action in {"enable", "disable"}:
+        enabled_hermes_config_sha256 = env.get("SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256")
+        disabled_hermes_config_sha256 = env.get("SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256")
+        if (type(enabled_hermes_config_sha256) is not str
+                or HEX64.fullmatch(enabled_hermes_config_sha256) is None
+                or type(disabled_hermes_config_sha256) is not str
+                or HEX64.fullmatch(disabled_hermes_config_sha256) is None):
+            raise AdapterError("invalid_context")
+    elif ("SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256" in env
+          or "SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256" in env):
+        raise AdapterError("invalid_context")
     if action == "attest":
         try:
             deadline_text = env["SKYNET_EDR_DEADLINE_NS"]
@@ -253,7 +293,10 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
             "home": home, "profile": profile,
             "nonce": nonce, "generation": generation, "action": action, "home_fd": home_fd,
             "deadline_ns": deadline_ns, "attestation_token": attestation_token,
-            "canary_event_id": canary_event_id}
+            "canary_event_id": canary_event_id,
+            "expected_hermes_config_sha256": expected_hermes_config_sha256,
+            "enabled_hermes_config_sha256": enabled_hermes_config_sha256,
+            "disabled_hermes_config_sha256": disabled_hermes_config_sha256}
 
 
 def _toml_ingest(text: str) -> dict[str, Any]:
@@ -427,22 +470,61 @@ def _hermes_launcher(context: dict[str, Any]) -> Path:
     return launcher
 
 
+def _read_regular_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return {"exists": False}
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise AdapterError("untrusted_path")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise AdapterError("untrusted_path") from exc
+    try:
+        opened = os.fstat(fd)
+        fixed = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                              info.st_gid, info.st_nlink, info.st_size)
+        if fixed(before) != fixed(opened) or opened.st_size > 1_048_576:
+            raise AdapterError("untrusted_path")
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(fd, 65_536):
+            total += len(chunk)
+            if total > 1_048_576:
+                raise AdapterError("untrusted_path")
+            chunks.append(chunk)
+        after = os.fstat(fd)
+        if fixed(opened) != fixed(after) or total != opened.st_size:
+            raise AdapterError("untrusted_path")
+    finally:
+        os.close(fd)
+    return {"exists": True, "data": base64.b64encode(b"".join(chunks)).decode("ascii"),
+            "mode": stat.S_IMODE(opened.st_mode), "uid": opened.st_uid, "gid": opened.st_gid}
+
+
+def _snapshot_sha256(item: dict[str, Any]) -> str:
+    if (set(item) != {"exists", "data", "mode", "uid", "gid"}
+            or item.get("exists") is not True
+            or type(item.get("mode")) is not int or not 0 <= item["mode"] <= 0o7777
+            or type(item.get("uid")) is not int or item["uid"] < 0
+            or type(item.get("gid")) is not int or item["gid"] < 0):
+        raise AdapterError("config_drift")
+    try:
+        data = base64.b64decode(item["data"], validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AdapterError("config_drift") from exc
+    fingerprint = {
+        "gid": item["gid"], "mode": item["mode"],
+        "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "uid": item["uid"],
+    }
+    return hashlib.sha256(
+        json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+
+
 def snapshot_files(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
-    snapshot: dict[str, dict[str, Any]] = {}
-    for name, path in paths.items():
-        try:
-            info = os.lstat(path)
-        except FileNotFoundError:
-            snapshot[name] = {"exists": False}
-            continue
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise AdapterError("untrusted_path")
-        data = path.read_bytes()
-        if len(data) > 1_048_576:
-            raise AdapterError("untrusted_path")
-        snapshot[name] = {"exists": True, "data": base64.b64encode(data).decode("ascii"),
-                          "mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid}
-    return snapshot
+    return {name: _read_regular_snapshot(path) for name, path in paths.items()}
 
 
 def _atomic_write(path: Path, data: bytes, mode: int, uid: int = 0, gid: int = 0, *,
@@ -491,17 +573,27 @@ def restore_files(snapshot: dict[str, dict[str, Any]], paths: dict[str, Path]) -
         raise AdapterError("rollback")
     for name, path in paths.items():
         item = snapshot[name]
+        if type(item) is not dict:
+            raise AdapterError("rollback")
         if item.get("exists") is False:
+            if set(item) != {"exists"}:
+                raise AdapterError("rollback")
             try:
                 path.unlink()
             except FileNotFoundError:
                 pass
             continue
+        if set(item) != {"exists", "data", "mode", "uid", "gid"} or item.get("exists") is not True:
+            raise AdapterError("rollback")
         try:
             data = base64.b64decode(item["data"], validate=True)
-            mode, uid, gid = int(item["mode"]), int(item["uid"]), int(item["gid"])
         except (KeyError, TypeError, ValueError) as exc:
             raise AdapterError("rollback") from exc
+        if (type(item["mode"]) is not int or not 0 <= item["mode"] <= 0o7777
+                or type(item["uid"]) is not int or item["uid"] < 0
+                or type(item["gid"]) is not int or item["gid"] < 0):
+            raise AdapterError("rollback")
+        mode, uid, gid = item["mode"], item["uid"], item["gid"]
         _atomic_write(path, data, mode, uid, gid)
 
 
@@ -689,7 +781,8 @@ def _clear_manager_attestation_token(context: dict[str, Any], deadline_ns: int) 
             raise AdapterError("readback_failure")
 
 
-def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> bool:
+def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None, *,
+                    allow_absent: bool = False) -> bool:
     target = context if os.geteuid() == 0 else None
     value = parse_bounded_json(_run([str(_hermes_launcher(context)), "plugins", "list", "--json"],
                                     env=_minimal_env(context), target=target, deadline_ns=deadline_ns))
@@ -698,6 +791,8 @@ def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> 
     if type(value) is not list:
         raise AdapterError("readback_failure")
     matches = [item for item in value if type(item) is dict and item.get("name") == "skynet-edr"]
+    if not matches and allow_absent:
+        return False
     if len(matches) != 1 or "enabled" in matches[0]:
         raise AdapterError("readback_failure")
     status = matches[0].get("status")
@@ -706,6 +801,165 @@ def _plugin_enabled(context: dict[str, Any], deadline_ns: int | None = None) -> 
     if status in {"not enabled", "disabled"}:
         return False
     raise AdapterError("readback_failure")
+
+
+def _connect_a2a_pre_send(deadline_ns: int) -> socket.socket:
+    while True:
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            client.settimeout(_remaining_seconds(
+                deadline_ns, A2A_CONNECT_TIMEOUT_SECONDS
+            ))
+            client.connect((A2A_HOST, A2A_PORT))
+            return client
+        except ConnectionRefusedError as exc:
+            client.close()
+            if exc.errno != errno.ECONNREFUSED:
+                raise AdapterError("dispatch_failure") from exc
+            _bounded_sleep(deadline_ns)
+        except AdapterError:
+            client.close()
+            raise
+        except (OSError, TimeoutError) as exc:
+            client.close()
+            raise AdapterError("dispatch_failure") from exc
+
+
+def _a2a_exchange(payload: dict[str, Any], deadline_ns: int) -> dict[str, Any]:
+    request_body = json.dumps(payload, separators=(",", ":")).encode("ascii")
+    request = (
+        b"POST / HTTP/1.1\r\nHost: 127.0.0.1:9900\r\n"
+        b"Content-Type: application/json\r\nConnection: close\r\nContent-Length: "
+        + str(len(request_body)).encode("ascii") + b"\r\n\r\n" + request_body
+    )
+    response = bytearray()
+    try:
+        with _connect_a2a_pre_send(deadline_ns) as client:
+            client.settimeout(_remaining_seconds(
+                deadline_ns, A2A_RESPONSE_TIMEOUT_SECONDS
+            ))
+            client.sendall(request)
+            while len(response) <= MAX_OUTPUT + 8192:
+                client.settimeout(_remaining_seconds(
+                    deadline_ns, A2A_RESPONSE_TIMEOUT_SECONDS
+                ))
+                part = client.recv(4096)
+                _check_deadline(deadline_ns)
+                if not part:
+                    break
+                response.extend(part)
+    except (OSError, TimeoutError) as exc:
+        raise AdapterError("dispatch_failure") from exc
+    if len(response) > MAX_OUTPUT + 8192 or b"\r\n\r\n" not in response:
+        raise AdapterError("dispatch_failure")
+    raw_headers, body = bytes(response).split(b"\r\n\r\n", 1)
+    lines = raw_headers.split(b"\r\n")
+    if not lines or lines[0] not in {b"HTTP/1.0 200 OK", b"HTTP/1.1 200 OK"}:
+        raise AdapterError("dispatch_failure")
+    headers: dict[bytes, bytes] = {}
+    for line in lines[1:]:
+        if b":" not in line:
+            raise AdapterError("dispatch_failure")
+        name, value = line.split(b":", 1)
+        name = name.strip().lower()
+        if name in headers:
+            raise AdapterError("dispatch_failure")
+        headers[name] = value.strip()
+    if b"transfer-encoding" in headers:
+        raise AdapterError("dispatch_failure")
+    if headers.get(b"content-type", b"").split(b";", 1)[0].strip() != b"application/json":
+        raise AdapterError("dispatch_failure")
+    try:
+        length = int(headers[b"content-length"])
+    except (KeyError, ValueError) as exc:
+        raise AdapterError("dispatch_failure") from exc
+    if length < 1 or length > MAX_OUTPUT or len(body) != length:
+        raise AdapterError("dispatch_failure")
+    value = parse_bounded_json(body)
+    if type(value) is not dict:
+        raise AdapterError("dispatch_failure")
+    return value
+
+
+def _a2a_result(value: dict[str, Any], request_id: str) -> dict[str, Any]:
+    if (value.get("jsonrpc") != "2.0" or value.get("id") != request_id
+            or value.get("error") is not None or type(value.get("result")) is not dict):
+        raise AdapterError("dispatch_failure")
+    return value["result"]
+
+
+def _a2a_observed_fields(result: dict[str, Any]) -> tuple[list[str], list[str]]:
+    states: list[str] = []
+    texts: list[str] = []
+    pending: list[tuple[Any, int]] = [(result, 0)]
+    visited = 0
+    while pending:
+        node, depth = pending.pop()
+        visited += 1
+        if visited > 256 or depth > 12:
+            raise AdapterError("dispatch_failure")
+        if type(node) is dict:
+            for key, item in node.items():
+                if key == "state" and type(item) is str:
+                    states.append(item)
+                elif key == "text" and type(item) is str:
+                    texts.append(item)
+                if type(item) in {dict, list}:
+                    pending.append((item, depth + 1))
+        elif type(node) is list:
+            pending.extend((item, depth + 1) for item in node)
+    return states, texts
+
+
+def _a2a_exact_reply(result: dict[str, Any]) -> bool:
+    status = result.get("status")
+    artifacts = result.get("artifacts")
+    message = status.get("message") if type(status) is dict else None
+
+    def exact_reply_parts(parts: Any) -> bool:
+        return (
+            type(parts) is list
+            and len(parts) == 1
+            and type(parts[0]) is dict
+            and set(parts[0]) == {"text", "mediaType"}
+            and parts[0].get("text") == A2A_REPLY
+            and parts[0].get("mediaType") == "text/plain"
+        )
+
+    states, texts = _a2a_observed_fields(result)
+    return (
+        type(status) is dict
+        and status.get("state") == "TASK_STATE_COMPLETED"
+        and type(message) is dict
+        and message.get("role") == "ROLE_AGENT"
+        and exact_reply_parts(message.get("parts"))
+        and type(artifacts) is list
+        and len(artifacts) == 1
+        and type(artifacts[0]) is dict
+        and exact_reply_parts(artifacts[0].get("parts"))
+        and states.count("TASK_STATE_COMPLETED") == 1
+        and len(states) == 1
+        and texts.count(A2A_REPLY) == 2
+        and len(texts) == 2
+    )
+
+
+def _dispatch_canary(deadline_ns: int) -> None:
+    initial = _a2a_exchange({
+        "jsonrpc": "2.0",
+        "id": A2A_REQUEST_ID,
+        "method": "message/send",
+        "params": {"message": {
+            "role": "ROLE_USER",
+            "parts": [{
+                "text": "Skynet-EDR harmless enrollment dispatch canary",
+                "mediaType": "text/plain",
+            }],
+            "messageId": A2A_REQUEST_ID,
+        }},
+    }, deadline_ns)
+    if not _a2a_exact_reply(_a2a_result(initial, A2A_REQUEST_ID)):
+        raise AdapterError("dispatch_failure")
 
 
 def _status(deadline_ns: int | None = None, *, allow_disabled: bool = False) -> dict[str, Any]:
@@ -793,6 +1047,22 @@ def _validate_disabled_status_schema(status: dict[str, Any]) -> dict[str, Any]:
     return ingestion
 
 
+def _error_category_contract_valid(value: Any) -> bool:
+    if (type(value) is not dict
+            or set(value) != {"schema_version", "generation", "categories"}
+            or value.get("schema_version") != ERROR_CATEGORY_SCHEMA
+            or value.get("generation") != ERROR_CATEGORY_GENERATION):
+        return False
+    categories = value.get("categories")
+    if type(categories) is not list or len(categories) != len(ERROR_CATEGORIES):
+        return False
+    for actual, (name, degrades) in zip(categories, ERROR_CATEGORIES, strict=True):
+        if (type(actual) is not dict or set(actual) != {"name", "degrades"}
+                or actual.get("name") != name or actual.get("degrades") is not degrades):
+            return False
+    return True
+
+
 def _validate_status_schema(status: dict[str, Any]) -> dict[str, Any]:
     ingestion = _validate_status_root(status)
     if set(ingestion) != INGESTION_STATUS_KEYS:
@@ -803,7 +1073,7 @@ def _validate_status_schema(status: dict[str, Any]) -> dict[str, Any]:
         "peer_credential_errors_total", "frames_received_total", "frames_oversize_total",
         "frames_invalid_total", "frames_timeout_total", "events_persisted_total",
         "events_duplicate_total", "events_collision_total", "incident_integrity_collision_total",
-        "correlation_truncated_total", "storage_errors_total",
+        "correlation_truncated_total", "storage_errors_total", "alert_delivery_errors_total",
     )
     optional_times = (
         "last_event_received_at_unix_ms", "last_event_received_age_ms",
@@ -816,6 +1086,7 @@ def _validate_status_schema(status: dict[str, Any]) -> dict[str, Any]:
             or ingestion.get("transport_heartbeat_state") not in {"fresh", "stale", "not_observed"}
             or ingestion.get("hook_event_state") not in {"fresh", "stale", "not_observed"}
             or ingestion.get("hook_event_freshness_affects_state") is not False
+            or not _error_category_contract_valid(ingestion.get("error_category_contract"))
             or any(value is not None and (type(value) is not int or value < 0)
                    for value in (ingestion.get(key) for key in optional_times))
             or any(type(ingestion.get(key)) is not int or ingestion[key] < 0
@@ -834,6 +1105,17 @@ def _source_identity(source: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(source.get(key) for key in (
         "authenticated_uid", "runtime_role", "plugin_generation", "runtime_instance_nonce",
         "kernel_peer_pid", "kernel_peer_start_ticks",
+    ))
+
+
+def _source_observable_epoch(source: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(source.get(key) for key in (
+        "source_id", "authenticated_uid", "runtime_role", "protocol_version", "s3_eligible",
+        "instance_id", "plugin_generation", "runtime_instance_nonce", "kernel_peer_pid",
+        "kernel_peer_start_ticks", "commit_sequence", "events_persisted_total",
+        "events_malformed_total", "events_dropped_total", "events_duplicate_total",
+        "events_collision_total", "last_error_category", "last_persisted_canary_event_id",
+        "last_persisted_canary_receipt_status", "last_persisted_canary_incidents_opened",
     ))
 
 
@@ -920,6 +1202,28 @@ def _persisted_advanced(before: dict[str, Any], after: dict[str, Any], event_id:
             and _source_identity(before) == _source_identity(after)
             and cast(int, after_sequence) - cast(int, before_sequence) == 1
             and cast(int, after_persisted) - cast(int, before_persisted) == 1)
+
+
+def _dispatch_advanced(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    integer_fields = ("commit_sequence", "events_persisted_total")
+    failure_fields = ("events_malformed_total", "events_dropped_total",
+                      "events_duplicate_total", "events_collision_total")
+    return (
+        _source_identity(before) == _source_identity(after)
+        and all(type(before.get(field)) is int and type(after.get(field)) is int
+                for field in integer_fields)
+        and all(cast(int, after[field]) - cast(int, before[field]) == 3
+                for field in integer_fields)
+        and all(before.get(field) == 0 and after.get(field) == 0 for field in failure_fields)
+        and before.get("last_error_category") is None
+        and after.get("last_error_category") is None
+        and after.get("last_persisted_canary_event_id")
+            == before.get("last_persisted_canary_event_id")
+        and after.get("last_persisted_canary_receipt_status")
+            == before.get("last_persisted_canary_receipt_status")
+        and after.get("last_persisted_canary_incidents_opened")
+            == before.get("last_persisted_canary_incidents_opened")
+    )
 
 
 def _startup_canary_baseline(source: dict[str, Any], event_id: str) -> dict[str, Any]:
@@ -1157,7 +1461,7 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
     _trusted_parent(STATE_ROOT)
     _safe_regular(CONFIG)
     _hermes_launcher(context)
-    for command in (SYSTEMCTL, USERMOD):
+    for command in (SYSTEMCTL, LOGINCTL, USERMOD):
         _safe_regular(command)
     try:
         group = grp.getgrnam(GROUP)
@@ -1184,7 +1488,8 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
             snapshot = {"uid": context["uid"], "profile": context["profile"],
                         "home": str(context["home"]), "generation": context["generation"],
                         "group_member": context["account"] in group.gr_mem,
-                        "plugin_enabled": _plugin_enabled(context)}
+                        "plugin_enabled": _plugin_enabled(context),
+                        "hermes_config": _read_regular_snapshot(context["home"] / "config.yaml")}
             _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
         else:
             _safe_regular(snapshot_path)
@@ -1196,6 +1501,8 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
             snapshot["generation"] = context["generation"]
             snapshot.pop("restart_identity", None)
             snapshot.pop("attestation", None)
+            snapshot.pop("enabled_hermes_config_sha256", None)
+            snapshot.pop("disabled_hermes_config_sha256", None)
             _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
     except Exception:
         if not snapshot_path.exists():
@@ -1212,6 +1519,11 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
                 except OSError as exc:
                     raise AdapterError("rollback") from exc
         raise
+    (snapshot["enabled_hermes_config_sha256"],
+     snapshot["disabled_hermes_config_sha256"]) = _expected_config_contract(
+         context, snapshot["hermes_config"]
+     )
+    _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
     try:
         config = CONFIG.read_text(encoding="utf-8")
         _atomic_write(CONFIG, rewrite_ingest_toml(config, context["uid"], enabled=True).encode("utf-8"),
@@ -1234,7 +1546,12 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
         except Exception as rollback_error:
             raise AdapterError("rollback") from rollback_error
         raise
-    return {"prepared": True, "plugin_enabled": False}
+    return {
+        "prepared": True,
+        "plugin_enabled": False,
+        "enabled_config_sha256": snapshot["enabled_hermes_config_sha256"],
+        "disabled_config_sha256": snapshot["disabled_hermes_config_sha256"],
+    }
 
 
 def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[str, Any]:
@@ -1251,8 +1568,21 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
             or snapshot.get("home") != str(context["home"])
             or snapshot.get("generation") != context["generation"]
             or type(snapshot.get("group_member")) is not bool
-            or type(snapshot.get("plugin_enabled")) is not bool):
+            or type(snapshot.get("plugin_enabled")) is not bool
+            or type(snapshot.get("hermes_config")) is not dict):
         raise AdapterError("rollback")
+    if verify_managed and (
+            type(snapshot.get("enabled_hermes_config_sha256")) is not str
+            or HEX64.fullmatch(snapshot["enabled_hermes_config_sha256"]) is None
+            or type(snapshot.get("disabled_hermes_config_sha256")) is not str
+            or HEX64.fullmatch(snapshot["disabled_hermes_config_sha256"]) is None):
+        raise AdapterError("rollback")
+    if verify_managed:
+        expected_config_sha256 = context.get("expected_hermes_config_sha256")
+        current_hermes_config = _read_regular_snapshot(context["home"] / "config.yaml")
+        if (type(expected_config_sha256) is not str
+                or _snapshot_sha256(current_hermes_config) != expected_config_sha256):
+            raise AdapterError("config_drift")
     other_scopes = [candidate for candidate in STATE_ROOT.glob("*/snapshot.json") if candidate != snapshot_path]
     other_uids: list[int] = []
     same_uid_snapshots: list[tuple[Path, dict[str, Any]]] = []
@@ -1289,19 +1619,17 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
                 _run([str(GPASSWD), "-d", context["account"], GROUP], env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
         except KeyError as exc:
             raise AdapterError("rollback") from exc
-    enabled = _plugin_enabled(context)
+    restore_files({"hermes_config": snapshot["hermes_config"]},
+                  {"hermes_config": context["home"] / "config.yaml"})
+    enabled = _plugin_enabled(context, allow_absent=True)
     if enabled is not snapshot["plugin_enabled"]:
-        desired_action = "enable" if snapshot["plugin_enabled"] else "disable"
-        _run([str(_hermes_launcher(context)), "plugins", desired_action, "skynet-edr"],
-             env=_minimal_env(context), target=context)
-        if _plugin_enabled(context) is not snapshot["plugin_enabled"]:
-            raise AdapterError("rollback")
-    _run([str(SYSTEMCTL), "--user", "daemon-reload"], env=_minimal_env(context), target=context)
-    _clear_manager_environment(context)
-    if other_scopes:
-        _write_managed()
-    else:
-        _verify_managed()
+        raise AdapterError("rollback")
+    if not uid_still_active:
+        _restore_unenrolled_runtime_epoch(context)
+    # The active managed files may have changed above: either the last scope
+    # restored the baseline or the remaining scopes changed the shared config.
+    # Record that state only after every restoration and readback succeeded.
+    _write_managed()
     # S3-V3C-Lite intentionally keeps rollback authority and its exact snapshot.
     # A later root operator may inspect/recover/remove it; this adapter never
     # deletes managed transaction evidence automatically.
@@ -1317,6 +1645,56 @@ def _old_identity_gone(identity: ProcessIdentity, deadline_ns: int) -> bool:
             return True
         raise
     return current != identity.proc_start_ticks
+
+
+def _manager_unit_state(context: dict[str, Any], unit: str,
+                        deadline_ns: int) -> tuple[str, str, int]:
+    raw = _run(
+        [str(SYSTEMCTL), "show", unit, "--property=ActiveState",
+         "--property=SubState", "--property=MainPID"],
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        deadline_ns=deadline_ns,
+    )
+    expected = {"ActiveState", "SubState", "MainPID"}
+    properties: dict[str, str] = {}
+    try:
+        for line in raw.decode("ascii").splitlines():
+            name, value = line.split("=", 1)
+            if name not in expected or name in properties:
+                raise ValueError("ambiguous unit state")
+            properties[name] = value
+        if set(properties) != expected:
+            raise ValueError("incomplete unit state")
+        active = properties["ActiveState"]
+        substate = properties["SubState"]
+        main_pid = int(properties["MainPID"])
+    except (UnicodeError, ValueError) as exc:
+        raise AdapterError("readback_failure") from exc
+    if not active or not substate or main_pid < 0:
+        raise AdapterError("readback_failure")
+    return active, substate, main_pid
+
+
+def _wait_for_manager_inactive(context: dict[str, Any], unit: str,
+                               previous: ProcessIdentity, deadline_ns: int) -> None:
+    while True:
+        try:
+            current_ticks = _proc_start_ticks(previous.main_pid, deadline_ns)
+        except AdapterError as exc:
+            if exc.category != "process_missing":
+                raise
+            pid_gone = True
+        else:
+            if current_ticks != previous.proc_start_ticks:
+                raise AdapterError("identity_epoch")
+            pid_gone = False
+        active, substate, main_pid = _manager_unit_state(context, unit, deadline_ns)
+        expected_main_pids = {0} if pid_gone else {0, previous.main_pid}
+        if main_pid not in expected_main_pids:
+            raise AdapterError("identity_epoch")
+        if pid_gone and (active, substate, main_pid) == ("inactive", "dead", 0):
+            return
+        _bounded_sleep(deadline_ns)
 
 
 def _wait_for_source(context: dict[str, Any], gateway: ProcessIdentity,
@@ -1355,6 +1733,51 @@ def _acquire_source(context: dict[str, Any], deadline_ns: int
         return status, source, after
 
 
+def _restore_unenrolled_runtime_epoch(context: dict[str, Any]) -> None:
+    deadline_ns = time.monotonic_ns() + CLEANUP_BUDGET_NS
+    manager_unit = f"user@{context['uid']}.service"
+    units = (manager_unit, UNIT, DAEMON_UNIT)
+    before = {unit: _service_identity(context, unit, deadline_ns) for unit in units}
+    root_environment = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+    _run([str(SYSTEMCTL), "stop", DAEMON_UNIT], env=root_environment, deadline_ns=deadline_ns)
+    _run([str(SYSTEMCTL), "stop", manager_unit],
+         env=root_environment, deadline_ns=deadline_ns)
+    _wait_for_manager_inactive(context, manager_unit, before[manager_unit], deadline_ns)
+    _run([str(SYSTEMCTL), "start", manager_unit], env=root_environment, deadline_ns=deadline_ns)
+    environment = _minimal_env(context)
+    _run([str(SYSTEMCTL), "--user", "daemon-reload"], env=environment,
+         target=context, deadline_ns=deadline_ns)
+    _run([str(SYSTEMCTL), "--user", "restart", UNIT], env=environment,
+         target=context, deadline_ns=deadline_ns)
+    _run([str(SYSTEMCTL), "restart", DAEMON_UNIT], env=root_environment, deadline_ns=deadline_ns)
+    shown = _run([str(SYSTEMCTL), "--user", "show-environment"], env=environment,
+                 target=context, deadline_ns=deadline_ns)
+    names: set[str] = set()
+    for line in shown.splitlines():
+        try:
+            name, _value = line.decode("utf-8").split("=", 1)
+        except (UnicodeError, ValueError) as exc:
+            raise AdapterError("rollback") from exc
+        names.add(name)
+    if names.intersection(MANAGED_MANAGER_ENVIRONMENT):
+        raise AdapterError("rollback")
+    after = {unit: _service_identity(context, unit, deadline_ns) for unit in units}
+    if any(after[unit] == before[unit] for unit in units):
+        raise AdapterError("identity_epoch")
+    if any(not _old_identity_gone(identity, deadline_ns) for identity in before.values()):
+        raise AdapterError("identity_epoch")
+    try:
+        ingest_gid = grp.getgrnam(GROUP).gr_gid
+        config_text = CONFIG.read_text(encoding="utf-8")
+    except (KeyError, OSError, UnicodeError) as exc:
+        raise AdapterError("rollback") from exc
+    ingest = _toml_ingest(config_text)
+    if (context["uid"] in ingest["allowed_uids"]
+            or ingest_gid in _process_groups(after[manager_unit].main_pid, deadline_ns)
+            or ingest_gid in _process_groups(after[UNIT].main_pid, deadline_ns)):
+        raise AdapterError("rollback")
+
+
 def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
     deadline_ns = context.get("deadline_ns")
     if type(deadline_ns) is not int:
@@ -1379,7 +1802,10 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
     )
     _run([str(SYSTEMCTL), "stop", DAEMON_UNIT],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
-    _run([str(SYSTEMCTL), "restart", manager_unit],
+    _run([str(SYSTEMCTL), "stop", manager_unit],
+         env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
+    _wait_for_manager_inactive(context, manager_unit, before[manager_unit], deadline_ns)
+    _run([str(SYSTEMCTL), "start", manager_unit],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
     _import_manager_environment(context, deadline_ns)
     _run([str(SYSTEMCTL), "--user", "restart", UNIT],
@@ -1428,6 +1854,27 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
         _bounded_sleep(deadline_ns)
         status, source = _wait_for_source(context, after[UNIT], deadline_ns)
 
+    dispatch_baseline = source
+    dispatch_epoch = _source_observable_epoch(dispatch_baseline)
+    _bounded_sleep(deadline_ns, POST_STARTUP_STABILITY_SECONDS)
+    stable_status, stable_source = _wait_for_source(context, after[UNIT], deadline_ns)
+    stable_ingestion = stable_status.get("ingestion", {})
+    if (_source_observable_epoch(stable_source) != dispatch_epoch
+            or stable_ingestion.get("listener_live") is not True
+            or stable_ingestion.get("state") != "healthy"):
+        raise AdapterError("producer_health")
+    dispatch_baseline = stable_source
+    _dispatch_canary(deadline_ns)
+    while True:
+        status, source = _wait_for_source(context, after[UNIT], deadline_ns)
+        if _dispatch_advanced(dispatch_baseline, source):
+            break
+        sequence_delta = source["commit_sequence"] - dispatch_baseline["commit_sequence"]
+        persisted_delta = source["events_persisted_total"] - dispatch_baseline["events_persisted_total"]
+        if sequence_delta > 3 or persisted_delta > 3:
+            raise AdapterError("dispatch_failure")
+        _bounded_sleep(deadline_ns)
+
     if not _plugin_enabled(context, deadline_ns):
         raise AdapterError("readback_failure")
     final = {unit: _service_identity(context, unit, deadline_ns) for unit in units}
@@ -1440,7 +1887,10 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
         raise AdapterError("readback_failure")
     final_source = _exact_source(final_ingestion, context, final[UNIT])
     if (_source_identity(final_source) != _source_identity(source)
-            or not _persisted_advanced(baseline, final_source, event_id)):
+            or final_source.get("last_persisted_canary_event_id") != event_id
+            or final_source.get("last_persisted_canary_receipt_status") != "persisted"
+            or final_source.get("last_persisted_canary_incidents_opened") != 0
+            or not _dispatch_advanced(dispatch_baseline, final_source)):
         raise AdapterError("source_identity")
     if {unit: _service_identity(context, unit, deadline_ns) for unit in units} != final:
         raise AdapterError("identity_epoch")
@@ -1456,6 +1906,7 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
                      "runtime_nonce": source["runtime_instance_nonce"]},
         "real_hook": {"correlated": True, "committed": True, "incident_opened": False,
                       "event_id": event_id, "receipt_status": "persisted"},
+        "real_dispatch": {"completed": True, "events_committed": 3},
         "restart_blast_radius": "complete_user_manager",
         "identities": {unit: [identity.main_pid, identity.proc_start_ticks,
                                 identity.exec_start_monotonic_us]
@@ -1501,6 +1952,61 @@ def _cleanup_failed_attestation(context: dict[str, Any]) -> None:
         raise AdapterError("rollback") from cleanup_error
 
 
+def _expected_config_contract(context: dict[str, Any],
+                              baseline_snapshot: dict[str, Any],
+                              *, already_enabled: bool = False) -> tuple[str, str]:
+    _snapshot_sha256(baseline_snapshot)
+    try:
+        baseline_data = base64.b64decode(baseline_snapshot["data"], validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AdapterError("config_drift") from exc
+    with tempfile.TemporaryDirectory(prefix=".skynet-edr-hermes-contract.", dir="/run") as root:
+        temporary_root = Path(root)
+        os.chown(temporary_root, context["uid"], context["account_gid"])
+        temporary_home = temporary_root / ".hermes"
+        temporary_home.mkdir(mode=0o700)
+        os.chown(temporary_home, context["uid"], context["account_gid"])
+        plugins = temporary_home / "plugins"
+        plugins.mkdir(mode=0o700)
+        os.chown(plugins, context["uid"], context["account_gid"])
+        os.symlink(context["home"] / "plugins" / "skynet-edr", plugins / "skynet-edr")
+        temporary_config = temporary_home / "config.yaml"
+        _atomic_write(temporary_config, baseline_data, baseline_snapshot["mode"],
+                      context["uid"], context["account_gid"])
+        temporary_context = dict(context)
+        temporary_context["home"] = temporary_home
+        temporary_context["_hermes_launcher"] = _hermes_launcher(context)
+        target = context if os.geteuid() == 0 else None
+        deadline_ns = context.get("deadline_ns")
+        if already_enabled:
+            enabled_snapshot = baseline_snapshot
+        else:
+            _run([str(_hermes_launcher(temporary_context)), "plugins", "enable", "skynet-edr"],
+                 env=_minimal_env(temporary_context), target=target, deadline_ns=deadline_ns)
+            if _plugin_enabled(temporary_context, deadline_ns=deadline_ns) is not True:
+                raise AdapterError("readback_failure")
+            enabled_snapshot = _read_regular_snapshot(temporary_config)
+        normalized_enabled = dict(enabled_snapshot)
+        for key in ("mode", "uid", "gid"):
+            normalized_enabled[key] = baseline_snapshot[key]
+        enabled_sha256 = _snapshot_sha256(normalized_enabled)
+        _run([str(_hermes_launcher(temporary_context)), "plugins", "disable", "skynet-edr"],
+             env=_minimal_env(temporary_context), target=target, deadline_ns=deadline_ns)
+        if _plugin_enabled(temporary_context, deadline_ns=deadline_ns) is not False:
+            raise AdapterError("readback_failure")
+        disabled_snapshot = _read_regular_snapshot(temporary_config)
+    normalized_disabled = dict(disabled_snapshot)
+    for key in ("mode", "uid", "gid"):
+        normalized_disabled[key] = baseline_snapshot[key]
+    return enabled_sha256, _snapshot_sha256(normalized_disabled)
+
+
+def _verify_hermes_config_fingerprint(context: dict[str, Any], expected: str) -> None:
+    current = _read_regular_snapshot(context["home"] / "config.yaml")
+    if _snapshot_sha256(current) != expected:
+        raise AdapterError("config_drift")
+
+
 def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
     context["_hermes_launcher"] = _resolve_hermes_launcher(HERMES)
     if action == "prepare":
@@ -1509,15 +2015,37 @@ def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
         return rollback(context)
     if action in {"enable", "disable"}:
         desired = action == "enable"
+        if action == "disable":
+            _verify_hermes_config_fingerprint(
+                context, context["enabled_hermes_config_sha256"]
+            )
         _run([str(_hermes_launcher(context)), "plugins", action, "skynet-edr"], env=_minimal_env(context))
         enabled = _plugin_enabled(context)
         if enabled is not desired:
             raise AdapterError("readback_failure")
-        return {"plugin_enabled": enabled, "loaded_generation": context["generation"] if enabled else None,
-                "process_fresh": False}
+        if action == "enable":
+            _verify_hermes_config_fingerprint(
+                context, context["enabled_hermes_config_sha256"]
+            )
+        else:
+            _verify_hermes_config_fingerprint(
+                context, context["disabled_hermes_config_sha256"]
+            )
+        result = {"plugin_enabled": enabled,
+                  "loaded_generation": context["generation"] if enabled else None,
+                  "process_fresh": False}
+        if action == "disable":
+            result["disabled_config_sha256"] = context["disabled_hermes_config_sha256"]
+        return result
     if action == "attest":
         _safe_regular(SYSTEMCTL)
-        return _restart(context)
+        result = _restart(context)
+        current = _read_regular_snapshot(context["home"] / "config.yaml")
+        (result["enabled_config_sha256"],
+         result["disabled_config_sha256"]) = _expected_config_contract(
+             context, current, already_enabled=True
+         )
+        return result
     raise AdapterError("invalid_action")
 
 

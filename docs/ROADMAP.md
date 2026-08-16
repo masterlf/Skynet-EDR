@@ -25,11 +25,11 @@ The MVP remains deliberately narrow:
 
 No additional detection rule is required for this MVP. The remaining risk is not a shortage of rules; it is the absence of an independently proven public user journey.
 
-The release remains passive and is published as a pre-1.0 stable SemVer evaluation release. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd, browser, and threat-validation gates. Autonomous Hermes enrollment remains unproven and blocked with the literal verdict `S3_ADAPTER_BLOCK`.
+The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd, browser, threat-validation, and Hermes enrollment gates.
 
-This paragraph describes the shipped `v0.6.0` authority; it does not claim that the third-party product-MVP exit gates below have passed.
+The shipped `v0.6.0` authority remains historical evidence. The current alpha.1 candidate advances only the exact Hermes 0.20 enrollment cell and release identity; it does not claim that the remaining third-party product-MVP exit gates below have passed.
 
-## Current milestone: v0.6.0 shipped evaluation baseline
+## Current milestone: v0.7.0-alpha.1 autonomous enrollment prerelease
 
 | Product gate | Verified current state | MVP consequence |
 |---|---|---|
@@ -38,8 +38,8 @@ This paragraph describes the shipped `v0.6.0` authority; it does not claim that 
 | Other artifacts | RPM, Arch, and tarball artifacts are published without corresponding native runtime qualification | They remain explicitly unqualified or are omitted from the MVP release; publication is not support |
 | Detection quality | Seven narrow rule paths are `DETECTED_AND_TESTED`; hostile malformed cases and benign near misses are versioned | Sufficient floor for MVP; claims remain narrow |
 | Detection gaps | Three producer-dark rules and standalone secret access remain `NOT_COVERED`; real Hermes discovery/dispatcher ABI is `NOT_TESTED` | No claim expansion; at least one rule must gain real-host end-to-end evidence |
-| Hermes enrollment | A strict transaction exists for a historical Hermes 0.19.0 cell, but its mandatory clean-host gate never passed | `S3_ADAPTER_BLOCK` remains until exact Hermes 0.20.0 public-artifact proof passes |
-| Live producer health | Maintainer-controlled deployments do not provide independent clean-host acceptance, and current evidence does not prove a healthy released gateway producer on the target cell | Producer presence and real dispatch are a feasibility gate, not an assumption |
+| Hermes enrollment | The strict transaction is ported to exact Hermes 0.20.0/default-profile behavior | Alpha.1 promotion requires exact package-owned clean-host apply/verify/unenroll proof with sealed evidence |
+| Live producer health | The signed Hermes 0.20.0 release passed discovery, gateway health, and real-dispatch feasibility | Candidate acceptance still binds the exact package/plugin generation and fresh process/source evidence |
 | Triage | SQLite incidents and Risk Explorer are authoritative local investigation surfaces | A local MVP does not require webhook, email, SIEM, or a dedicated alert outbox |
 | Local notices | Post-commit stdout/journald notices are best effort; SQLite remains authoritative | Documentation and acceptance must prevent operators from treating journald as guaranteed delivery |
 | Operations | Store retention/pruning and qualified backup/restore are absent; upgrade/rollback evidence is maintainer-controlled | Bounded store lifecycle and clean-host restore proof block MVP |
