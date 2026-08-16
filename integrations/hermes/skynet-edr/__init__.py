@@ -140,7 +140,7 @@ def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
     """Emit one fixed synthetic detection event and return only a redacted summary."""
     if type(args) is not dict or args != {"scenario": _SAFE_SIMULATION_SCENARIO}:
         raise ValueError("unsupported safe detection simulation request")
-    _write_event(
+    delivery_status = _write_event(
         event_type="agent.tool.completed",
         source_kind="mcp_tool",
         trust_level="tool_output",
@@ -163,11 +163,13 @@ def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
         redacted_fields=[],
         synchronous=True,
     )
+    submitted = delivery_status in {"persisted", "duplicate", "spooled"}
     return json.dumps(
         {
-            "status": "simulated",
+            "status": "simulated" if submitted else "failed",
             "scenario": _SAFE_SIMULATION_SCENARIO,
-            "detection_signal": "submitted",
+            "detection_signal": "submitted" if submitted else "not_submitted",
+            "delivery_status": delivery_status,
             "sensitive_output": "[REDACTED:secret]",
         },
         separators=(",", ":"),
@@ -179,15 +181,15 @@ def register(ctx: Any) -> None:
     """Register passive Hermes hooks."""
     _setup_logging().info("registering Skynet-EDR Hermes plugin hooks version=%s", PLUGIN_VERSION)
     register_tool = getattr(ctx, "register_tool", None)
-    if callable(register_tool):
+    if callable(register_tool) and _enabled():
         register_tool(
             name=_SAFE_SIMULATION_TOOL,
             toolset="skynet_edr",
             schema={
                 "name": _SAFE_SIMULATION_TOOL,
                 "description": (
-                    "Run Skynet-EDR's fixed zero-I/O malware-marker simulation. "
-                    "It uses fake allowlisted markers only and performs no external action."
+                    "Run Skynet-EDR's fixed local-only malware-marker simulation. "
+                    "It emits one bounded local event and performs no external action."
                 ),
                 "parameters": {
                     "type": "object",
@@ -203,7 +205,7 @@ def register(ctx: Any) -> None:
             },
             handler=_safe_detection_simulation,
             is_async=False,
-            description="Fixed zero-I/O Skynet-EDR detection simulation",
+            description="Fixed local-only Skynet-EDR detection simulation",
             emoji="shield",
         )
     ctx.register_hook("on_session_start", _safe_hook(_on_session_start))
@@ -524,9 +526,9 @@ def _write_event(
     artifact: dict[str, Any] | None = None,
     redacted_fields: list[dict[str, str]] | None = None,
     synchronous: bool = False,
-) -> None:
+) -> str:
     if not _enabled():
-        return
+        return "disabled"
     now = _now_ms()
     event_id = event_id or _event_id(event_type, now, attributes)
     redacted_fields = redacted_fields or []
@@ -560,15 +562,17 @@ def _write_event(
         event["artifact"] = artifact
     line = json.dumps(event, separators=(",", ":"), sort_keys=True)
     if synchronous:
-        _deliver_line(line)
+        delivery_status = _deliver_line(line)
         _report_transport_counters()
-        return
+        return delivery_status
     _ensure_worker()
     try:
         _event_queue.put_nowait(line)
+        return "queued"
     except queue.Full:
         with _lock:
             _transport_counters["queue_drops"] += 1
+        return "delivery_failed"
 
 
 def _ensure_worker() -> None:
@@ -608,16 +612,16 @@ def _transport_worker() -> None:
             _send_health_report()
 
 
-def _deliver_line(line: str) -> None:
+def _deliver_line(line: str) -> str:
     """Deliver or durably spool one line while preserving producer order."""
     with _delivery_lock:
         _replay_fallback(max_records=4)
         if _fallback_has_pending():
-            _append_fallback(line)
-            return
+            return "spooled" if _append_fallback(line) else "delivery_failed"
         status = _send_frame(line)
-        if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
-            _append_fallback(line)
+        if status in {"persisted", "duplicate", "collision", "rejected_permanent"}:
+            return status
+        return "spooled" if _append_fallback(line) else "delivery_failed"
 
 
 def _report_transport_counters() -> None:

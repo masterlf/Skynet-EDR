@@ -25,6 +25,12 @@ status. If a Hermes runtime also invokes `post_tool_call`, that hook recognizes 
 fixed tool and does not emit a duplicate. Neither synthetic marker is copied into
 the tool result or Skynet-EDR producer output.
 
+The result reports `detection_signal=submitted` only after an authenticated terminal
+ACK (`persisted` or `duplicate`) or a confirmed durable fallback write
+(`delivery_status=spooled`). Disabled telemetry, collision, permanent rejection, and
+a full or inaccessible fallback report `not_submitted`; the tool is not registered
+when the plugin is disabled.
+
 
 ## Default output
 

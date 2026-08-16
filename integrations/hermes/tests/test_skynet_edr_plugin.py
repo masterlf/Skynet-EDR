@@ -648,6 +648,7 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             response,
             {
                 "detection_signal": "submitted",
+                "delivery_status": "spooled",
                 "scenario": "malware-marker",
                 "sensitive_output": "[REDACTED:secret]",
                 "status": "simulated",
@@ -679,6 +680,114 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(completed[0]["attributes"]["result_length"], 0)
         self.assertNotIn("result_preview", completed[0]["attributes"])
 
+    def test_safe_detection_reports_only_confirmed_delivery_outcomes(self):
+        accepted = {"persisted", "duplicate", "spooled"}
+        for outcome in sorted(
+            accepted | {"disabled", "collision", "rejected_permanent", "delivery_failed"}
+        ):
+            with self.subTest(outcome=outcome), patch.object(
+                self.plugin, "_write_event", return_value=outcome
+            ):
+                response = json.loads(
+                    self.plugin._safe_detection_simulation(
+                        {"scenario": "malware-marker"}
+                    )
+                )
+                self.assertEqual(response["delivery_status"], outcome)
+                if outcome in accepted:
+                    self.assertEqual(response["detection_signal"], "submitted")
+                    self.assertEqual(response["status"], "simulated")
+                else:
+                    self.assertEqual(response["detection_signal"], "not_submitted")
+                    self.assertEqual(response["status"], "failed")
+
+    def test_disabled_plugin_does_not_register_tool_or_claim_submission(self):
+        with patch.dict(os.environ, {"SKYNET_EDR_HERMES_PLUGIN_ENABLED": "0"}):
+            plugin = load_plugin()
+            ctx = FakeContext()
+            plugin.register(ctx)
+            self.assertNotIn("skynet_edr_safe_detection_simulation", ctx.tools)
+            response = json.loads(
+                plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(response["detection_signal"], "not_submitted")
+        self.assertEqual(response["delivery_status"], "disabled")
+        self.assertEqual(response["status"], "failed")
+
+    def test_synchronous_delivery_requires_ack_or_durable_fallback(self):
+        line = '{"event_id":"evt_delivery_contract"}'
+        terminal = {"persisted", "duplicate", "collision", "rejected_permanent"}
+        for outcome in terminal:
+            with self.subTest(outcome=outcome), patch.object(
+                self.plugin, "_replay_fallback"
+            ), patch.object(
+                self.plugin, "_fallback_has_pending", return_value=False
+            ), patch.object(
+                self.plugin, "_send_frame", return_value=outcome
+            ), patch.object(self.plugin, "_append_fallback") as append:
+                self.assertEqual(self.plugin._deliver_line(line), outcome)
+                append.assert_not_called()
+        for persisted, expected in [(True, "spooled"), (False, "delivery_failed")]:
+            with self.subTest(fallback_persisted=persisted), patch.object(
+                self.plugin, "_replay_fallback"
+            ), patch.object(
+                self.plugin, "_fallback_has_pending", return_value=False
+            ), patch.object(
+                self.plugin, "_send_frame", return_value="retry_later"
+            ), patch.object(
+                self.plugin, "_append_fallback", return_value=persisted
+            ):
+                self.assertEqual(self.plugin._deliver_line(line), expected)
+
+    def test_missing_identity_or_socket_is_success_only_after_durable_spool(self):
+        line = '{"event_id":"evt_transport_unavailable"}'
+        with patch.object(self.plugin, "_transport_identity", return_value=None):
+            self.assertEqual(self.plugin._deliver_line(line), "spooled")
+        self.assertTrue((self.state_dir / "events-v1.jsonl").exists())
+
+        isolated = self.state_dir / "socket-unavailable"
+        isolated.mkdir(mode=0o700)
+        with patch.dict(
+            os.environ,
+            {
+                "SKYNET_EDR_STATE_DIR": str(isolated),
+                "SKYNET_EDR_INGEST_SOCKET": str(isolated / "missing.sock"),
+            },
+        ), patch.object(
+            self.plugin, "_transport_identity", return_value=("a" * 64, "b" * 64)
+        ):
+            self.assertEqual(self.plugin._deliver_line(line), "spooled")
+        self.assertTrue((isolated / "events-v1.jsonl").exists())
+
+    def test_full_or_inaccessible_fallback_reports_delivery_failure(self):
+        with patch.dict(os.environ, {"SKYNET_EDR_FALLBACK_MAX_BYTES": "1"}), patch.object(
+            self.plugin, "_replay_fallback"
+        ), patch.object(
+            self.plugin, "_fallback_has_pending", return_value=False
+        ), patch.object(
+            self.plugin, "_send_frame", return_value="retry_later"
+        ):
+            full_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(full_response["detection_signal"], "not_submitted")
+        self.assertEqual(full_response["delivery_status"], "delivery_failed")
+        self.assertEqual(self.plugin._transport_counters["fallback_full"], 1)
+
+        fallback = self.state_dir / "events-v1.jsonl"
+        target = self.state_dir / "inaccessible-target"
+        target.write_text("", encoding="utf-8")
+        fallback.symlink_to(target)
+        with patch.object(self.plugin, "_replay_fallback"), patch.object(
+            self.plugin, "_fallback_has_pending", return_value=False
+        ), patch.object(self.plugin, "_send_frame", return_value="retry_later"):
+            inaccessible_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(inaccessible_response["detection_signal"], "not_submitted")
+        self.assertEqual(inaccessible_response["delivery_status"], "delivery_failed")
+        self.assertEqual(target.read_text(encoding="utf-8"), "")
+
     def test_safe_detection_handler_delivers_before_short_lived_worker_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
@@ -694,7 +803,9 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
                         {"scenario": "malware-marker"}
                     )
                 ensure_worker.assert_not_called()
-                self.assertEqual(json.loads(result)["detection_signal"], "submitted")
+                response = json.loads(result)
+                self.assertEqual(response["detection_signal"], "submitted")
+                self.assertEqual(response["delivery_status"], "spooled")
                 events_path = Path(tmp) / "events-v1.jsonl"
                 self.assertTrue(events_path.exists())
                 events = [json.loads(line) for line in events_path.read_text().splitlines()]

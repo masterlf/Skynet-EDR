@@ -86,7 +86,7 @@ jobs:
       - name: Verify accepted reproducible DEB identity
         run: >-
           printf '%s  %s\n'
-          '1198a8e215307848e36cfd78fd31354e2ff6ac1d3339eda8c4ba56aaa43dae3a'
+          'e493e525b90083c102bc6ccd0c48e767b17eacc5e6c0e294a9cadf9b8c90666f'
           'dist/skynet-edr_0.7.0-alpha.2_amd64.deb' | sha256sum -c -
       - name: Inspect package contents
         run: packaging/scripts/inspect-artifacts.sh dist

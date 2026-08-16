@@ -138,6 +138,7 @@ for role, tool_calls, content in rows:
     if role == "tool" and content:
         handler_result_seen |= (
             '"detection_signal":"submitted"' in content
+            and '"delivery_status":"spooled"' in content
             and '"sensitive_output":"[REDACTED:secret]"' in content
         )
         raw_marker_seen |= "skynet_fake_malware_test_string_do_not_execute" in content

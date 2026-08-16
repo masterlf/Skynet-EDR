@@ -175,7 +175,7 @@ This spike is mandatory because the existing enrollment transaction never passed
 - update the public coverage evidence to distinguish this real-host path from synthetic fixture evidence;
 - keep the other six rules at their exact existing evidence level rather than generalizing from one journey.
 
-**Exit gate:** the safe simulation produces exactly the expected incident and no forbidden synthetic marker survives any stored or displayed surface.
+**Exit gate:** the safe simulation produces exactly the expected incident, reports submission only after an authenticated terminal ACK or durable fallback write, and leaves no forbidden synthetic marker on any stored or displayed surface.
 
 **Budget:** 3–5 developer-days.
 
