@@ -226,6 +226,19 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
             raise AdapterError("invalid_context")
     elif "SKYNET_EDR_EXPECTED_HERMES_CONFIG_SHA256" in env:
         raise AdapterError("invalid_context")
+    enabled_hermes_config_sha256 = None
+    disabled_hermes_config_sha256 = None
+    if action in {"enable", "disable"}:
+        enabled_hermes_config_sha256 = env.get("SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256")
+        disabled_hermes_config_sha256 = env.get("SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256")
+        if (type(enabled_hermes_config_sha256) is not str
+                or HEX64.fullmatch(enabled_hermes_config_sha256) is None
+                or type(disabled_hermes_config_sha256) is not str
+                or HEX64.fullmatch(disabled_hermes_config_sha256) is None):
+            raise AdapterError("invalid_context")
+    elif ("SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256" in env
+          or "SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256" in env):
+        raise AdapterError("invalid_context")
     if action == "attest":
         try:
             deadline_text = env["SKYNET_EDR_DEADLINE_NS"]
@@ -281,7 +294,9 @@ def validate_context(action: str, env: dict[str, str], *, effective_uid: int | N
             "nonce": nonce, "generation": generation, "action": action, "home_fd": home_fd,
             "deadline_ns": deadline_ns, "attestation_token": attestation_token,
             "canary_event_id": canary_event_id,
-            "expected_hermes_config_sha256": expected_hermes_config_sha256}
+            "expected_hermes_config_sha256": expected_hermes_config_sha256,
+            "enabled_hermes_config_sha256": enabled_hermes_config_sha256,
+            "disabled_hermes_config_sha256": disabled_hermes_config_sha256}
 
 
 def _toml_ingest(text: str) -> dict[str, Any]:
@@ -1486,6 +1501,8 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
             snapshot["generation"] = context["generation"]
             snapshot.pop("restart_identity", None)
             snapshot.pop("attestation", None)
+            snapshot.pop("enabled_hermes_config_sha256", None)
+            snapshot.pop("disabled_hermes_config_sha256", None)
             _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
     except Exception:
         if not snapshot_path.exists():
@@ -1502,6 +1519,11 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
                 except OSError as exc:
                     raise AdapterError("rollback") from exc
         raise
+    (snapshot["enabled_hermes_config_sha256"],
+     snapshot["disabled_hermes_config_sha256"]) = _expected_config_contract(
+         context, snapshot["hermes_config"]
+     )
+    _atomic_write(snapshot_path, json.dumps(snapshot, sort_keys=True).encode("ascii"), 0o600)
     try:
         config = CONFIG.read_text(encoding="utf-8")
         _atomic_write(CONFIG, rewrite_ingest_toml(config, context["uid"], enabled=True).encode("utf-8"),
@@ -1524,7 +1546,12 @@ def prepare(context: dict[str, Any]) -> dict[str, Any]:
         except Exception as rollback_error:
             raise AdapterError("rollback") from rollback_error
         raise
-    return {"prepared": True, "plugin_enabled": False}
+    return {
+        "prepared": True,
+        "plugin_enabled": False,
+        "enabled_config_sha256": snapshot["enabled_hermes_config_sha256"],
+        "disabled_config_sha256": snapshot["disabled_hermes_config_sha256"],
+    }
 
 
 def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[str, Any]:
@@ -1543,6 +1570,12 @@ def rollback(context: dict[str, Any], *, verify_managed: bool = True) -> dict[st
             or type(snapshot.get("group_member")) is not bool
             or type(snapshot.get("plugin_enabled")) is not bool
             or type(snapshot.get("hermes_config")) is not dict):
+        raise AdapterError("rollback")
+    if verify_managed and (
+            type(snapshot.get("enabled_hermes_config_sha256")) is not str
+            or HEX64.fullmatch(snapshot["enabled_hermes_config_sha256"]) is None
+            or type(snapshot.get("disabled_hermes_config_sha256")) is not str
+            or HEX64.fullmatch(snapshot["disabled_hermes_config_sha256"]) is None):
         raise AdapterError("rollback")
     if verify_managed:
         expected_config_sha256 = context.get("expected_hermes_config_sha256")
@@ -1769,7 +1802,7 @@ def _restart_attestation(context: dict[str, Any]) -> dict[str, Any]:
     )
     _run([str(SYSTEMCTL), "stop", DAEMON_UNIT],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
-    _run([str(LOGINCTL), "terminate-user", context["account"]],
+    _run([str(SYSTEMCTL), "stop", manager_unit],
          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, deadline_ns=deadline_ns)
     _wait_for_manager_inactive(context, manager_unit, before[manager_unit], deadline_ns)
     _run([str(SYSTEMCTL), "start", manager_unit],
@@ -1919,6 +1952,61 @@ def _cleanup_failed_attestation(context: dict[str, Any]) -> None:
         raise AdapterError("rollback") from cleanup_error
 
 
+def _expected_config_contract(context: dict[str, Any],
+                              baseline_snapshot: dict[str, Any],
+                              *, already_enabled: bool = False) -> tuple[str, str]:
+    _snapshot_sha256(baseline_snapshot)
+    try:
+        baseline_data = base64.b64decode(baseline_snapshot["data"], validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AdapterError("config_drift") from exc
+    with tempfile.TemporaryDirectory(prefix=".skynet-edr-hermes-contract.", dir="/run") as root:
+        temporary_root = Path(root)
+        os.chown(temporary_root, context["uid"], context["account_gid"])
+        temporary_home = temporary_root / ".hermes"
+        temporary_home.mkdir(mode=0o700)
+        os.chown(temporary_home, context["uid"], context["account_gid"])
+        plugins = temporary_home / "plugins"
+        plugins.mkdir(mode=0o700)
+        os.chown(plugins, context["uid"], context["account_gid"])
+        os.symlink(context["home"] / "plugins" / "skynet-edr", plugins / "skynet-edr")
+        temporary_config = temporary_home / "config.yaml"
+        _atomic_write(temporary_config, baseline_data, baseline_snapshot["mode"],
+                      context["uid"], context["account_gid"])
+        temporary_context = dict(context)
+        temporary_context["home"] = temporary_home
+        temporary_context["_hermes_launcher"] = _hermes_launcher(context)
+        target = context if os.geteuid() == 0 else None
+        deadline_ns = context.get("deadline_ns")
+        if already_enabled:
+            enabled_snapshot = baseline_snapshot
+        else:
+            _run([str(_hermes_launcher(temporary_context)), "plugins", "enable", "skynet-edr"],
+                 env=_minimal_env(temporary_context), target=target, deadline_ns=deadline_ns)
+            if _plugin_enabled(temporary_context, deadline_ns=deadline_ns) is not True:
+                raise AdapterError("readback_failure")
+            enabled_snapshot = _read_regular_snapshot(temporary_config)
+        normalized_enabled = dict(enabled_snapshot)
+        for key in ("mode", "uid", "gid"):
+            normalized_enabled[key] = baseline_snapshot[key]
+        enabled_sha256 = _snapshot_sha256(normalized_enabled)
+        _run([str(_hermes_launcher(temporary_context)), "plugins", "disable", "skynet-edr"],
+             env=_minimal_env(temporary_context), target=target, deadline_ns=deadline_ns)
+        if _plugin_enabled(temporary_context, deadline_ns=deadline_ns) is not False:
+            raise AdapterError("readback_failure")
+        disabled_snapshot = _read_regular_snapshot(temporary_config)
+    normalized_disabled = dict(disabled_snapshot)
+    for key in ("mode", "uid", "gid"):
+        normalized_disabled[key] = baseline_snapshot[key]
+    return enabled_sha256, _snapshot_sha256(normalized_disabled)
+
+
+def _verify_hermes_config_fingerprint(context: dict[str, Any], expected: str) -> None:
+    current = _read_regular_snapshot(context["home"] / "config.yaml")
+    if _snapshot_sha256(current) != expected:
+        raise AdapterError("config_drift")
+
+
 def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
     context["_hermes_launcher"] = _resolve_hermes_launcher(HERMES)
     if action == "prepare":
@@ -1927,15 +2015,37 @@ def execute(action: str, context: dict[str, Any]) -> dict[str, Any]:
         return rollback(context)
     if action in {"enable", "disable"}:
         desired = action == "enable"
+        if action == "disable":
+            _verify_hermes_config_fingerprint(
+                context, context["enabled_hermes_config_sha256"]
+            )
         _run([str(_hermes_launcher(context)), "plugins", action, "skynet-edr"], env=_minimal_env(context))
         enabled = _plugin_enabled(context)
         if enabled is not desired:
             raise AdapterError("readback_failure")
-        return {"plugin_enabled": enabled, "loaded_generation": context["generation"] if enabled else None,
-                "process_fresh": False}
+        if action == "enable":
+            _verify_hermes_config_fingerprint(
+                context, context["enabled_hermes_config_sha256"]
+            )
+        else:
+            _verify_hermes_config_fingerprint(
+                context, context["disabled_hermes_config_sha256"]
+            )
+        result = {"plugin_enabled": enabled,
+                  "loaded_generation": context["generation"] if enabled else None,
+                  "process_fresh": False}
+        if action == "disable":
+            result["disabled_config_sha256"] = context["disabled_hermes_config_sha256"]
+        return result
     if action == "attest":
         _safe_regular(SYSTEMCTL)
-        return _restart(context)
+        result = _restart(context)
+        current = _read_regular_snapshot(context["home"] / "config.yaml")
+        (result["enabled_config_sha256"],
+         result["disabled_config_sha256"]) = _expected_config_contract(
+             context, current, already_enabled=True
+         )
+        return result
     raise AdapterError("invalid_action")
 
 

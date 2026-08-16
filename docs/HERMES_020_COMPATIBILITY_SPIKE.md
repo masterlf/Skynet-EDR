@@ -63,9 +63,11 @@ Relevant findings:
    but it is 84 commits after the signed `v2026.8.3` release commit. The browser
    gate therefore does not establish exact-release provenance. This spike used
    the signed release commit and adds real gateway dispatch plus AF_UNIX evidence.
-5. The current enrollment adapter still rejects `0.20.0` because its supported
-   tuple is intentionally fixed to `0.19.0`. That is the bounded port, not a
-   runtime contract failure.
+5. At the time of this historical spike, the enrollment adapter still rejected
+   `0.20.0` because its supported tuple was fixed to `0.19.0`. PR #104 later
+   implemented and clean-host-qualified the bounded 0.20.0 port. This statement
+   is historical evidence, not the current release verdict; the release notes
+   and `HERMES_ENROLLMENT.md` are authoritative for v0.7.0-alpha.1.
 
 ## Runtime evidence
 

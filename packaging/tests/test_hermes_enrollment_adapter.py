@@ -213,24 +213,48 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
 
     def test_execute_uses_resolved_hermes_target_for_mutation_and_readback(self):
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
-                   "generation": "b" * 64}
+                   "generation": "b" * 64, "enabled_hermes_config_sha256": "c" * 64,
+                   "disabled_hermes_config_sha256": "d" * 64}
         resolved = Path("/opt/hermes/bin/hermes")
         payloads = [b"", json.dumps([{"name": "skynet-edr", "status": "enabled"}]).encode()]
         with mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=resolved), \
-                mock.patch.object(self.module, "_run", side_effect=payloads) as run:
+                mock.patch.object(self.module, "_run", side_effect=payloads) as run, \
+                mock.patch.object(self.module, "_verify_hermes_config_fingerprint") as verify:
             result = self.module.execute("enable", context)
         self.assertTrue(result["plugin_enabled"])
+        verify.assert_called_once_with(context, "c" * 64)
         self.assertEqual([call.args[0][0] for call in run.call_args_list], [str(resolved), str(resolved)])
 
     def test_execute_disable_accepts_real_hermes_019_disabled_readback(self):
+        enabled_hash = "c" * 64
+        disabled_hash = "d" * 64
         context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
-                   "generation": "b" * 64}
+                   "generation": "b" * 64, "enabled_hermes_config_sha256": enabled_hash,
+                   "disabled_hermes_config_sha256": disabled_hash}
         resolved = Path("/opt/hermes/bin/hermes")
         payloads = [b"", json.dumps([{"name": "skynet-edr", "status": "disabled"}]).encode()]
         with mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=resolved), \
-                mock.patch.object(self.module, "_run", side_effect=payloads):
+                mock.patch.object(self.module, "_run", side_effect=payloads), \
+                mock.patch.object(self.module, "_verify_hermes_config_fingerprint") as verify:
             result = self.module.execute("disable", context)
         self.assertIs(result["plugin_enabled"], False)
+        self.assertEqual(result["disabled_config_sha256"], disabled_hash)
+        self.assertEqual(verify.call_args_list, [
+            mock.call(context, enabled_hash), mock.call(context, disabled_hash),
+        ])
+
+    def test_execute_disable_fails_before_mutation_when_enabled_config_drifted(self):
+        context = {"uid": 1000, "home": Path("/home/alice/.hermes"), "profile": "default",
+                   "generation": "b" * 64, "enabled_hermes_config_sha256": "c" * 64,
+                   "disabled_hermes_config_sha256": "d" * 64}
+        resolved = Path("/opt/hermes/bin/hermes")
+        with mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=resolved), \
+                mock.patch.object(self.module, "_verify_hermes_config_fingerprint",
+                                  side_effect=self.module.AdapterError("config_drift")), \
+                mock.patch.object(self.module, "_run") as run:
+            with self.assertRaises(self.module.AdapterError):
+                self.module.execute("disable", context)
+        run.assert_not_called()
 
     def test_execute_prepare_accepts_real_hermes_019_not_enabled_readback(self):
         config = self.base / "config.toml"
@@ -240,7 +264,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         command.chmod(0o755)
         state = self.base / "adapter-state"
         context = {"uid": 1000, "account": "alice", "home": Path("/home/alice/.hermes"),
-                   "profile": "default", "generation": "b" * 64}
+                   "profile": "default", "generation": "b" * 64, "account_gid": 1000}
         group = SimpleNamespace(gr_mem=["alice"], gr_gid=1000)
         plugin_list = json.dumps([{"name": "skynet-edr", "status": "not enabled"}]).encode()
         with mock.patch.object(self.module, "CONFIG", config), \
@@ -252,10 +276,14 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 mock.patch.object(self.module, "_trusted_parent"), \
                 mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=command), \
                 mock.patch.object(self.module.grp, "getgrnam", return_value=group), \
+                mock.patch.object(self.module, "_expected_config_contract",
+                                  return_value=("c" * 64, "d" * 64)), \
                 mock.patch.object(self.module, "_run", side_effect=[plugin_list, b""]):
             result = self.module.execute("prepare", context)
             snapshot = json.loads((self.module._scope(context) / "snapshot.json").read_text())
-        self.assertEqual(result, {"prepared": True, "plugin_enabled": False})
+        self.assertEqual(result, {"prepared": True, "plugin_enabled": False,
+                                  "enabled_config_sha256": "c" * 64,
+                                  "disabled_config_sha256": "d" * 64})
         self.assertIs(snapshot["plugin_enabled"], False)
 
     def test_single_scope_rollback_records_restored_managed_state(self):
@@ -273,7 +301,7 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         hermes_config.write_bytes(original_hermes_config)
         hermes_config.chmod(0o600)
         context = {"uid": 1000, "account": "alice", "home": hermes_home,
-                   "profile": "default", "generation": "b" * 64}
+                   "profile": "default", "generation": "b" * 64, "account_gid": 1000}
         group = SimpleNamespace(gr_mem=["alice"], gr_gid=1000)
         plugin_list = json.dumps([
             {"name": "skynet-edr", "status": "not enabled"}
@@ -287,19 +315,29 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
                 mock.patch.object(self.module, "_trusted_parent"), \
                 mock.patch.object(self.module, "_resolve_hermes_launcher", return_value=command), \
                 mock.patch.object(self.module.grp, "getgrnam", return_value=group), \
+                mock.patch.object(self.module, "_expected_config_contract",
+                                  return_value=("c" * 64, "d" * 64)), \
                 mock.patch.object(self.module, "_restore_unenrolled_runtime_epoch"), \
                 mock.patch.object(
                     self.module, "_run", side_effect=[plugin_list, b"", plugin_list]
                 ):
             self.assertEqual(
                 self.module.execute("prepare", context),
-                {"prepared": True, "plugin_enabled": False},
+                {"prepared": True, "plugin_enabled": False,
+                 "enabled_config_sha256": "c" * 64,
+                 "disabled_config_sha256": "d" * 64},
             )
             disabled_hermes_config = b"plugins:\n  disabled: [skynet-edr]\n  enabled: []\n"
             hermes_config.write_bytes(disabled_hermes_config)
-            context["expected_hermes_config_sha256"] = self.module._snapshot_sha256(
+            disabled_hash = self.module._snapshot_sha256(
                 self.module._read_regular_snapshot(hermes_config)
             )
+            snapshot_path = self.module._scope(context) / "snapshot.json"
+            snapshot = json.loads(snapshot_path.read_text(encoding="ascii"))
+            snapshot["enabled_hermes_config_sha256"] = "c" * 64
+            snapshot["disabled_hermes_config_sha256"] = disabled_hash
+            snapshot_path.write_text(json.dumps(snapshot), encoding="ascii")
+            context["expected_hermes_config_sha256"] = disabled_hash
             result = self.module.execute("rollback", context)
             managed = json.loads((state / "managed.json").read_text(encoding="ascii"))
             restored = self.module._managed_state()
@@ -1872,8 +1910,10 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         dispatch_canary.assert_called_once_with(15_000_001_000)
         self.assertEqual(groups.call_args_list, [mock.call(12, 15_000_001_000),
                                                  mock.call(23, 15_000_001_000)])
-        self.assertIn([str(self.module.LOGINCTL), "terminate-user", "alice"],
+        self.assertIn([str(self.module.SYSTEMCTL), "stop", "user@1000.service"],
                       [call.args[0] for call in run.call_args_list])
+        self.assertNotIn([str(self.module.LOGINCTL), "terminate-user", "alice"],
+                         [call.args[0] for call in run.call_args_list])
         manager_inactive.assert_called_once_with(
             context, "user@1000.service", self.module.ProcessIdentity(11, 101, 1001),
             15_000_001_000,
@@ -1883,8 +1923,9 @@ class PrivilegedHermesAdapterTests(unittest.TestCase):
         self.assertIn([str(self.module.SYSTEMCTL), "restart", self.module.DAEMON_UNIT],
                       [call.args[0] for call in run.call_args_list])
         systemctl_calls = [call for call in run.call_args_list if call.args[0][0] == str(self.module.SYSTEMCTL)]
-        self.assertEqual([call.args[0] for call in systemctl_calls[:5]], [
+        self.assertEqual([call.args[0] for call in systemctl_calls[:6]], [
             [str(self.module.SYSTEMCTL), "stop", self.module.DAEMON_UNIT],
+            [str(self.module.SYSTEMCTL), "stop", "user@1000.service"],
             [str(self.module.SYSTEMCTL), "start", "user@1000.service"],
             [str(self.module.SYSTEMCTL), "--user", "import-environment",
              *self.module.MANAGED_MANAGER_ENVIRONMENT],

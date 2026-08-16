@@ -65,16 +65,17 @@ MANUAL_RECOVERY = ("Manual root recovery required: inspect the exact quarantine 
 ATTEST_RESPONSE_KEYS = {
     "plugin_enabled", "loaded_generation", "process_fresh", "daemon", "producer",
     "real_hook", "real_dispatch", "restart_blast_radius", "identities", "commit_sequence",
+    "enabled_config_sha256", "disabled_config_sha256",
 }
 ATTEST_OBSERVATION_KEYS = ATTEST_RESPONSE_KEYS | {
     "target_uid", "observed_generation", "transaction_nonce",
     "action", "effective_uid", "observed_at_ns",
 }
 ADAPTER_BASE_KEYS = {
-    "prepare": {"prepared", "plugin_enabled"},
+    "prepare": {"prepared", "plugin_enabled", "enabled_config_sha256", "disabled_config_sha256"},
     "rollback": {"prepared", "plugin_enabled", "reload_required", "rollback_phase"},
     "enable": {"plugin_enabled", "loaded_generation", "process_fresh"},
-    "disable": {"plugin_enabled", "loaded_generation", "process_fresh"},
+    "disable": {"plugin_enabled", "loaded_generation", "process_fresh", "disabled_config_sha256"},
 }
 ADAPTER_ENVELOPE_KEYS = {"transaction_nonce", "action", "observed_generation", "target_uid", "effective_uid", "observed_at_ns"}
 
@@ -270,7 +271,11 @@ def installed_state(home: Path, state_root: Path, manifest: dict[str, Any], uid:
         return False, "DRIFTED", {}
     generation = canonical_generation(manifest)
     if (enrolled.get("generation") != generation or enrolled.get("uid") != uid
-            or enrolled.get("profile") != profile):
+            or enrolled.get("profile") != profile
+            or type(enrolled.get("enabled_config_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", enrolled["enabled_config_sha256"]) is None
+            or type(enrolled.get("disabled_config_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", enrolled["disabled_config_sha256"]) is None):
         return False, "DRIFTED", {}
     return True, generation, enrolled
 
@@ -343,14 +348,21 @@ def assess(request: dict[str, Any], home: Path, state_root: Path, manifest: dict
     return "ENROLLED", "verified"
 
 
-def adapter_env(home: Path, profile: str, observations: Path, generation: str, uid: int) -> dict[str, str]:
+def adapter_env(home: Path, profile: str, observations: Path, generation: str, uid: int,
+                *, enabled_config_sha256: str | None = None,
+                disabled_config_sha256: str | None = None) -> dict[str, str]:
     try:
         home_info = os.stat(home, follow_symlinks=False)
     except OSError as exc:
         raise EnrollmentError("invalid_target") from exc
     if not stat.S_ISDIR(home_info.st_mode) or home_info.st_uid != uid:
         raise EnrollmentError("invalid_target")
-    return {
+    if ((enabled_config_sha256 is None) != (disabled_config_sha256 is None)
+            or (enabled_config_sha256 is not None and (
+                re.fullmatch(r"[0-9a-f]{64}", enabled_config_sha256) is None
+                or re.fullmatch(r"[0-9a-f]{64}", disabled_config_sha256 or "") is None))):
+        raise EnrollmentError("installed_state")
+    result = {
         "HOME": str(home.parent),
         "HERMES_HOME": str(home),
         "HERMES_PROFILE": profile,
@@ -361,6 +373,10 @@ def adapter_env(home: Path, profile: str, observations: Path, generation: str, u
         "SKYNET_EDR_HOME_DEVICE": str(home_info.st_dev),
         "SKYNET_EDR_HOME_INODE": str(home_info.st_ino),
     }
+    if enabled_config_sha256 is not None:
+        result["SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256"] = enabled_config_sha256
+        result["SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256"] = disabled_config_sha256 or ""
+    return result
 
 
 def canary_event_id(token: str) -> str:
@@ -436,7 +452,11 @@ def validate_attest_response(response: dict[str, Any], env: dict[str, str], even
             or response["restart_blast_radius"] != "complete_user_manager"
             or not identity_values_ok
             or type(response.get("commit_sequence")) is not int
-            or response["commit_sequence"] <= 0):
+            or response["commit_sequence"] <= 0
+            or type(response.get("enabled_config_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", response["enabled_config_sha256"]) is None
+            or type(response.get("disabled_config_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", response["disabled_config_sha256"]) is None):
         raise EnrollmentError("adapter_failure")
 
 
@@ -754,9 +774,12 @@ def run_attest_lane(adapter: Path, env: dict[str, str], observations: Path,
     event_id = canary_event_id(token)
     deadline_ns = time.monotonic_ns() + ATTEST_BUDGET_NS
     adapter_process_deadline_ns = deadline_ns + ADAPTER_CLEANUP_GRACE_NS
+    attest_env = dict(env)
+    attest_env.pop("SKYNET_EDR_ENABLED_HERMES_CONFIG_SHA256", None)
+    attest_env.pop("SKYNET_EDR_DISABLED_HERMES_CONFIG_SHA256", None)
     with _deadline_guard(adapter_process_deadline_ns):
         attested = run_adapter(
-            adapter, "attest", env, observations, deadline_ns=deadline_ns,
+            adapter, "attest", attest_env, observations, deadline_ns=deadline_ns,
             attestation_token=token, expected_event_id=event_id,
         )
     _remaining_seconds(deadline_ns)
@@ -764,6 +787,8 @@ def run_attest_lane(adapter: Path, env: dict[str, str], observations: Path,
         _remaining_seconds(deadline_ns)
         write_metadata(
             state_root, generation, uid, profile, attested["transaction_nonce"],
+            enabled_config_sha256=attested["enabled_config_sha256"],
+            disabled_config_sha256=attested["disabled_config_sha256"],
             deadline_ns=deadline_ns,
         )
         _remaining_seconds(deadline_ns)
@@ -873,7 +898,12 @@ def run_adapter(adapter: Path, action: str, env: dict[str, str], observations: P
         _remaining_seconds(deadline_ns)
     elif (action not in ADAPTER_BASE_KEYS or set(response) != ADAPTER_BASE_KEYS[action]
           or type(response.get("plugin_enabled")) is not bool
-          or (action == "prepare" and response.get("prepared") is not True)
+          or (action == "prepare" and (
+              response.get("prepared") is not True
+              or type(response.get("enabled_config_sha256")) is not str
+              or re.fullmatch(r"[0-9a-f]{64}", response["enabled_config_sha256"]) is None
+              or type(response.get("disabled_config_sha256")) is not str
+              or re.fullmatch(r"[0-9a-f]{64}", response["disabled_config_sha256"]) is None))
           or (action == "rollback" and (
               response.get("prepared") is not False
               or response.get("reload_required") is not True
@@ -1176,7 +1206,10 @@ def copy_generation(source: Path, stage: Path, manifest: dict[str, Any], uid: in
 
 
 def write_metadata(state_root: Path, generation: str, uid: int, profile: str, verified_nonce: str | None,
-                   *, reload_required: bool = False, deadline_ns: int | None = None) -> None:
+                   *, reload_required: bool = False,
+                   enabled_config_sha256: str | None = None,
+                   disabled_config_sha256: str | None = None,
+                   deadline_ns: int | None = None) -> None:
     if deadline_ns is not None:
         _remaining_seconds(deadline_ns)
     metadata_path = state_root / "enrollment.json"
@@ -1188,8 +1221,15 @@ def write_metadata(state_root: Path, generation: str, uid: int, profile: str, ve
     replaced = False
     try:
         os.fchmod(fd, 0o600)
+        if ((enabled_config_sha256 is None) != (disabled_config_sha256 is None)
+                or (enabled_config_sha256 is not None and (
+                    re.fullmatch(r"[0-9a-f]{64}", enabled_config_sha256) is None
+                    or re.fullmatch(r"[0-9a-f]{64}", disabled_config_sha256 or "") is None))):
+            raise EnrollmentError("installed_state")
         data = json.dumps({"schema": 1, "generation": generation, "uid": uid, "profile": profile,
-                           "verified_nonce": verified_nonce, "reload_required": reload_required},
+                           "verified_nonce": verified_nonce, "reload_required": reload_required,
+                           "enabled_config_sha256": enabled_config_sha256,
+                           "disabled_config_sha256": disabled_config_sha256},
                           sort_keys=True).encode("ascii")
         os.write(fd, data)
         os.fsync(fd)
@@ -1338,7 +1378,12 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
         if state == "RELOAD_REQUIRED":
             if request.get("restart_authorized") is not True:
                 return emit(state, category, noop=True)
-            env = adapter_env(home, profile, observations, generation, uid)
+            enrolled = load_json(state_root / "enrollment.json", "installed_state")
+            env = adapter_env(
+                home, profile, observations, generation, uid,
+                enabled_config_sha256=enrolled.get("enabled_config_sha256"),
+                disabled_config_sha256=enrolled.get("disabled_config_sha256"),
+            )
             try:
                 _, final_state, final_category = run_attest_lane(
                     adapter, env, observations, state_root, generation, uid, profile,
@@ -1375,13 +1420,30 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
             fsync_dir(target_parent)
             install_desktop(source, desktop_parent, state_root, uid, gid)
             write_metadata(state_root, generation, uid, profile, None)
-            run_adapter(adapter, "prepare", adapter_env(home, profile, observations, generation, uid), observations)
-            env = adapter_env(home, profile, observations, generation, uid)
+            prepared = run_adapter(
+                adapter, "prepare",
+                adapter_env(home, profile, observations, generation, uid), observations,
+            )
+            write_metadata(
+                state_root, generation, uid, profile, None,
+                enabled_config_sha256=prepared["enabled_config_sha256"],
+                disabled_config_sha256=prepared["disabled_config_sha256"],
+            )
+            env = adapter_env(
+                home, profile, observations, generation, uid,
+                enabled_config_sha256=prepared["enabled_config_sha256"],
+                disabled_config_sha256=prepared["disabled_config_sha256"],
+            )
             enabled = run_adapter(adapter, "enable", env, observations)
             if enabled.get("plugin_enabled") is not True:
                 raise EnrollmentError("enablement")
             if request.get("restart_authorized") is not True:
-                write_metadata(state_root, generation, uid, profile, None, reload_required=True)
+                write_metadata(
+                    state_root, generation, uid, profile, None,
+                    reload_required=True,
+                    enabled_config_sha256=prepared["enabled_config_sha256"],
+                    disabled_config_sha256=prepared["disabled_config_sha256"],
+                )
                 return emit("RELOAD_REQUIRED", "reload_boundary")
             _, final_state, final_category = run_attest_lane(
                 adapter, env, observations, state_root, generation, uid, profile,
@@ -1518,6 +1580,20 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
         if journal is not None and journal["target"] != {
                 "uid": uid, "home": str(home), "profile": profile, "generation": generation}:
             return emit("MANUAL_RECOVERY_REQUIRED", "journal")
+        config_contract: dict[str, Any] | None = None
+        if journal is None or journal["phase"] == "STARTED":
+            try:
+                config_contract = load_json(state_root / "enrollment.json", "installed_state")
+            except EnrollmentError:
+                return emit("DRIFTED", "installed_state")
+            if (config_contract.get("generation") != generation
+                    or config_contract.get("uid") != uid
+                    or config_contract.get("profile") != profile
+                    or type(config_contract.get("enabled_config_sha256")) is not str
+                    or re.fullmatch(r"[0-9a-f]{64}", config_contract["enabled_config_sha256"]) is None
+                    or type(config_contract.get("disabled_config_sha256")) is not str
+                    or re.fullmatch(r"[0-9a-f]{64}", config_contract["disabled_config_sha256"]) is None):
+                return emit("DRIFTED", "installed_state")
         if journal is None:
             if target is None or target.is_symlink() or not target.is_dir():
                 return emit("DRIFTED", "invalid_target")
@@ -1583,13 +1659,25 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
                 _fresh_quarantine_proof(journal, bindings)
                 return emit("QUARANTINED", "unenrolled", noop=True, success=True)
             if journal["phase"] == "STARTED":
-                disabled = run_adapter(adapter, "disable", adapter_env(home, profile, observations, generation, uid), observations)
+                if config_contract is None:
+                    raise EnrollmentError("installed_state", "MANUAL_RECOVERY_REQUIRED")
+                disabled = run_adapter(
+                    adapter, "disable",
+                    adapter_env(
+                        home, profile, observations, generation, uid,
+                        enabled_config_sha256=config_contract["enabled_config_sha256"],
+                        disabled_config_sha256=config_contract["disabled_config_sha256"],
+                    ),
+                    observations,
+                )
                 if set(disabled) != ADAPTER_BASE_KEYS["disable"] | ADAPTER_ENVELOPE_KEYS \
                         or disabled.get("plugin_enabled") is not False \
                         or disabled.get("loaded_generation") is not None \
-                        or type(disabled.get("process_fresh")) is not bool:
+                        or type(disabled.get("process_fresh")) is not bool \
+                        or type(disabled.get("disabled_config_sha256")) is not str \
+                        or re.fullmatch(r"[0-9a-f]{64}", disabled["disabled_config_sha256"]) is None:
                     raise EnrollmentError("enablement", "MANUAL_RECOVERY_REQUIRED")
-                journal["disabled_config_sha256"] = _regular_object_sha256(home, "config.yaml", uid)
+                journal["disabled_config_sha256"] = disabled["disabled_config_sha256"]
                 journal["phase"] = "DISABLED"
                 write_quarantine_journal(journal_path, journal)
             if journal["phase"] in {"DISABLED", "PLUGIN_QUARANTINING"}:
