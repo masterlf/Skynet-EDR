@@ -131,7 +131,7 @@ jobs:
       - name: Verify accepted reproducible DEB identity
         run: >-
           printf '%s  %s\n'
-          'a1865d5948930a0c86af1d6cb069cf923cf541818bbd886a44acc61569dfa84e'
+          '125dd99f041aa6d89a13294db9a618f303bd982ac3f828824f2111da27919a70'
           'dist/skynet-edr_0.7.0-alpha.2_amd64.deb' | sha256sum -c -
 
       - name: Inspect package contents and generate checksums

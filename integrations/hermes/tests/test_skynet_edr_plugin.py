@@ -683,6 +683,28 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             }],
         )
 
+    def test_safe_detection_handler_delivers_before_short_lived_worker_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "SKYNET_EDR_STATE_DIR": tmp,
+                    "SKYNET_EDR_PLUGIN_GENERATION": "a" * 64,
+                },
+            ):
+                plugin = load_plugin()
+                with patch.object(plugin, "_ensure_worker") as ensure_worker:
+                    result = plugin._safe_detection_simulation(
+                        {"scenario": "malware-marker"}
+                    )
+                ensure_worker.assert_not_called()
+                self.assertEqual(json.loads(result)["detection_signal"], "submitted")
+                events_path = Path(tmp) / "events-v1.jsonl"
+                self.assertTrue(events_path.exists())
+                events = [json.loads(line) for line in events_path.read_text().splitlines()]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["attributes"]["rule_id"], "EDR-MALWARE-001")
+
     def test_cron_create_and_update_emit_only_completed_schedule_mutations(self):
         ctx = FakeContext()
         self.plugin.register(ctx)

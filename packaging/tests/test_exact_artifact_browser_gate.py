@@ -139,7 +139,7 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
             with self.subTest(workflow=workflow.name):
                 self.assertIn("https://github.com/NousResearch/hermes-agent.git", text)
                 self.assertIn(PIN, text)
-                self.assertIn("a1865d5948930a0c86af1d6cb069cf923cf541818bbd886a44acc61569dfa84e", text)
+                self.assertIn("125dd99f041aa6d89a13294db9a618f303bd982ac3f828824f2111da27919a70", text)
                 self.assertLess(text.index("Verify accepted reproducible DEB identity"), text.index("exact-artifact-browser-gate.sh"))
                 self.assertLess(text.index("Prepare frozen Hermes and browser dependencies before artifact build"), text.index("packaging/scripts/build-tarball.sh"))
                 self.assertGreaterEqual(text.count("sha256sum -c checksums.txt"), 5)

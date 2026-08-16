@@ -121,6 +121,7 @@ def _initial_queue_size() -> int:
 
 _event_queue: queue.Queue[str] = queue.Queue(maxsize=_initial_queue_size())
 _worker_lock = threading.Lock()
+_delivery_lock = threading.Lock()
 _worker_started = False
 _worker_stop = threading.Event()
 _worker_thread: threading.Thread | None = None
@@ -166,6 +167,7 @@ def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
         redacted_fields=[
             _redacted_field("attributes.result_preview", "[REDACTED:secret]")
         ],
+        synchronous=True,
     )
     return json.dumps(
         {
@@ -527,6 +529,7 @@ def _write_event(
     attributes: dict[str, Any],
     artifact: dict[str, Any] | None = None,
     redacted_fields: list[dict[str, str]] | None = None,
+    synchronous: bool = False,
 ) -> None:
     if not _enabled():
         return
@@ -562,6 +565,10 @@ def _write_event(
     if artifact is not None:
         event["artifact"] = artifact
     line = json.dumps(event, separators=(",", ":"), sort_keys=True)
+    if synchronous:
+        _deliver_line(line)
+        _report_transport_counters()
+        return
     _ensure_worker()
     try:
         _event_queue.put_nowait(line)
@@ -600,17 +607,23 @@ def _transport_worker() -> None:
             continue
         idle_ticks = 0
         try:
-            _replay_fallback(max_records=4)
-            if _fallback_has_pending():
-                _append_fallback(line)
-            else:
-                status = _send_frame(line)
-                if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
-                    _append_fallback(line)
+            _deliver_line(line)
         finally:
             _event_queue.task_done()
             _report_transport_counters()
             _send_health_report()
+
+
+def _deliver_line(line: str) -> None:
+    """Deliver or durably spool one line while preserving producer order."""
+    with _delivery_lock:
+        _replay_fallback(max_records=4)
+        if _fallback_has_pending():
+            _append_fallback(line)
+            return
+        status = _send_frame(line)
+        if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
+            _append_fallback(line)
 
 
 def _report_transport_counters() -> None:
