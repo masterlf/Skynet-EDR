@@ -577,10 +577,12 @@ def _write_event(
 
 def _ensure_worker() -> None:
     global _worker_started, _worker_thread
-    if _worker_started:
-        return
     with _worker_lock:
-        if _worker_started:
+        if _worker_thread is not None and _worker_thread.is_alive():
+            _worker_started = True
+            return
+        _worker_started = False
+        if _worker_stop.is_set():
             return
         _worker_thread = threading.Thread(
             target=_transport_worker, name="skynet-edr-forwarder", daemon=True
@@ -590,38 +592,54 @@ def _ensure_worker() -> None:
 
 
 def _transport_worker() -> None:
-    _send_health_report()
-    idle_ticks = 0
-    while not _worker_stop.is_set():
-        try:
-            line = _event_queue.get(timeout=0.05)
-        except queue.Empty:
-            idle_ticks += 1
-            if idle_ticks >= 20:
-                _replay_fallback(max_records=16)
+    global _worker_started
+    try:
+        _send_health_report()
+        idle_ticks = 0
+        while not _worker_stop.is_set():
+            try:
+                line = _event_queue.get(timeout=0.05)
+            except queue.Empty:
+                idle_ticks += 1
+                if idle_ticks >= 20:
+                    _replay_fallback(max_records=16)
+                    _report_transport_counters()
+                    _send_health_report()
+                    idle_ticks = 0
+                continue
+            idle_ticks = 0
+            try:
+                delivery_status = _deliver_line(line)
+                if delivery_status == "delivery_failed":
+                    with _lock:
+                        _transport_counters["queue_drops"] += 1
+            finally:
+                _event_queue.task_done()
                 _report_transport_counters()
                 _send_health_report()
-                idle_ticks = 0
-            continue
-        idle_ticks = 0
-        try:
-            _deliver_line(line)
-        finally:
-            _event_queue.task_done()
-            _report_transport_counters()
-            _send_health_report()
+    finally:
+        with _worker_lock:
+            if _worker_thread is threading.current_thread():
+                _worker_started = False
 
 
 def _deliver_line(line: str) -> str:
     """Deliver or durably spool one line while preserving producer order."""
     with _delivery_lock:
-        _replay_fallback(max_records=4)
-        if _fallback_has_pending():
+        try:
+            if _replay_fallback(max_records=4) is None:
+                return "delivery_failed"
+            pending = _fallback_has_pending()
+            if pending is None:
+                return "delivery_failed"
+            if pending:
+                return "spooled" if _append_fallback(line) else "delivery_failed"
+            status = _send_frame(line)
+            if status in {"persisted", "duplicate", "collision", "rejected_permanent"}:
+                return status
             return "spooled" if _append_fallback(line) else "delivery_failed"
-        status = _send_frame(line)
-        if status in {"persisted", "duplicate", "collision", "rejected_permanent"}:
-            return status
-        return "spooled" if _append_fallback(line) else "delivery_failed"
+        except (OSError, UnicodeError, ValueError):
+            return "delivery_failed"
 
 
 def _report_transport_counters() -> None:
@@ -775,12 +793,12 @@ def _append_fallback(line: str) -> bool:
     encoded_bytes = len(line.encode("utf-8")) + 1
     if encoded_bytes > MAX_INGEST_FRAME_BYTES + 1:
         return False
-    path = _spool_path()
-    _ensure_private_dir(path.parent)
-    configured_cap = _safe_positive_int_env("SKYNET_EDR_FALLBACK_MAX_BYTES", DEFAULT_FALLBACK_MAX_BYTES)
-    cap = min(configured_cap, MAX_FALLBACK_MAX_BYTES)
-    with _spool_state_lock():
-        try:
+    try:
+        path = _spool_path()
+        _ensure_private_dir(path.parent)
+        configured_cap = _safe_positive_int_env("SKYNET_EDR_FALLBACK_MAX_BYTES", DEFAULT_FALLBACK_MAX_BYTES)
+        cap = min(configured_cap, MAX_FALLBACK_MAX_BYTES)
+        with _spool_state_lock():
             current_size = path.stat().st_size if path.exists() else 0
             try:
                 checkpoint = min(_read_checkpoint(_checkpoint_path()), current_size)
@@ -801,17 +819,17 @@ def _append_fallback(line: str) -> bool:
             with _lock:
                 _transport_counters["fallback_records"] += 1
             return True
-        except OSError:
-            return False
+    except (OSError, UnicodeError, ValueError):
+        return False
 
 
-def _replay_fallback(*, max_records: int) -> int:
+def _replay_fallback(*, max_records: int) -> int | None:
     path = _spool_path()
-    with _spool_state_lock():
-        if not path.exists():
-            return 0
-        checkpoint = _checkpoint_path()
-        try:
+    try:
+        with _spool_state_lock():
+            if not path.exists():
+                return 0
+            checkpoint = _checkpoint_path()
             offset = _read_checkpoint(checkpoint)
             with _open_private_read(path) as handle:
                 size = os.fstat(handle.fileno()).st_size
@@ -830,20 +848,22 @@ def _replay_fallback(*, max_records: int) -> int:
                     offset = handle.tell()
                     _write_checkpoint(checkpoint, offset)
                     advanced += 1
-                return advanced
-        except (OSError, UnicodeDecodeError, ValueError):
-            return 0
+            return advanced
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
-def _fallback_has_pending() -> bool:
+def _fallback_has_pending() -> bool | None:
     path = _spool_path()
-    with _spool_state_lock():
-        try:
+    try:
+        with _spool_state_lock():
+            if not path.exists():
+                return False
             with _open_private_read(path) as handle:
                 size = os.fstat(handle.fileno()).st_size
             return _read_checkpoint(_checkpoint_path()) < size
-        except (OSError, ValueError):
-            return path.exists()
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def _setup_logging() -> logging.Logger:

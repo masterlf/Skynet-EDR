@@ -788,6 +788,55 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         self.assertEqual(inaccessible_response["delivery_status"], "delivery_failed")
         self.assertEqual(target.read_text(encoding="utf-8"), "")
 
+    def test_fallback_lock_and_parent_errors_return_typed_failure(self):
+        lock = self.state_dir / ".events-v1.jsonl.lock"
+        lock.symlink_to(lock.name)
+        with patch.object(self.plugin, "_send_frame", return_value="retry_later"):
+            lock_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(lock_response["detection_signal"], "not_submitted")
+        self.assertEqual(lock_response["delivery_status"], "delivery_failed")
+        lock.unlink()
+
+        with patch.dict(os.environ, {"SKYNET_EDR_STATE_DIR": "/proc/1"}), patch.object(
+            self.plugin, "_send_frame", return_value="retry_later"
+        ):
+            parent_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(parent_response["detection_signal"], "not_submitted")
+        self.assertEqual(parent_response["delivery_status"], "delivery_failed")
+
+    def test_storage_error_does_not_kill_worker_and_dead_worker_restarts(self):
+        lock = self.state_dir / ".events-v1.jsonl.lock"
+        lock.symlink_to(lock.name)
+        with patch.object(self.plugin, "_send_frame", return_value="retry_later"):
+            self.plugin._write_event(
+                event_type="agent.session.started",
+                source_kind="sensor",
+                trust_level="sensor_observation",
+                severity="informational",
+                title="Storage failure liveness test",
+                attributes={"fake": True},
+            )
+            self.plugin._event_queue.join()
+        self.assertIsNotNone(self.plugin._worker_thread)
+        self.assertTrue(self.plugin._worker_thread.is_alive())
+        lock.unlink()
+
+        old_worker = self.plugin._worker_thread
+        with patch.object(threading, "excepthook"), patch.object(
+            self.plugin, "_deliver_line", side_effect=RuntimeError("test crash")
+        ):
+            self.plugin._event_queue.put_nowait('{"event_id":"evt_worker_restart"}')
+            self.plugin._event_queue.join()
+            old_worker.join(timeout=2)
+        self.assertFalse(old_worker.is_alive())
+        self.plugin._ensure_worker()
+        self.assertIsNot(self.plugin._worker_thread, old_worker)
+        self.assertTrue(self.plugin._worker_thread.is_alive())
+
     def test_safe_detection_handler_delivers_before_short_lived_worker_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
