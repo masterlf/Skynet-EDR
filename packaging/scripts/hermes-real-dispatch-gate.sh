@@ -115,9 +115,9 @@ if redaction.get("contains_sensitive_data") is not True or redaction.get("redact
 }]:
     raise SystemExit("safe simulation result redaction mismatch")
 
-for path in (spool_path, final_output, plugin_log):
+for path in (spool_path, final_output, plugin_log, session_db):
     if path.exists() and forbidden.name.encode() in path.read_bytes():
-        raise SystemExit(f"forbidden marker survived EDR producer surface: {path.name}")
+        raise SystemExit(f"forbidden marker survived reviewed output or storage: {path.name}")
 
 connection = sqlite3.connect(session_db)
 try:
