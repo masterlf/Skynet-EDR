@@ -105,6 +105,12 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertIn("Telemetry degraded", browser)
         self.assertIn("request.url().includes(':8787')", browser)
         self.assertNotIn("http://127.0.0.1:8787", browser)
+        self.assertIn("process.env.HERMES_DASHBOARD_SESSION_TOKEN", browser)
+        self.assertIn("sessionToken.length < 32", browser)
+        self.assertIn("sessionToken.length > 256", browser)
+        self.assertIn("extraHTTPHeaders: { 'X-Hermes-Session-Token': sessionToken }", browser)
+        self.assertIn("const page = await context.newPage()", browser)
+        self.assertIn("await context.close()", browser)
 
     def test_both_workflows_gate_one_deb_before_upload_or_publication(self) -> None:
         gate = GATE.read_text(encoding="utf-8")

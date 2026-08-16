@@ -11,6 +11,10 @@ if (!url || !['normal', 'alert-delivery'].includes(lane) || !manifestPath || !br
 if (!url.startsWith('http://127.0.0.1:') || url.includes(':8787')) {
   throw new Error('browser target must be the loopback Hermes origin, never the daemon');
 }
+const sessionToken = process.env.HERMES_DASHBOARD_SESSION_TOKEN;
+if (typeof sessionToken !== 'string' || sessionToken.length < 32 || sessionToken.length > 256 || /\s/.test(sessionToken)) {
+  throw new Error('a bounded Hermes dashboard session token is required');
+}
 const requireFromRuntime = createRequire(join(browserRuntime, 'package.json'));
 const { chromium } = requireFromRuntime('playwright');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -40,8 +44,11 @@ if (dashboard.integrity !== sri || dashboard.version !== manifest.payload_versio
 }
 
 const browser = await chromium.launch({ headless: true });
+const context = await browser.newContext({
+  extraHTTPHeaders: { 'X-Hermes-Session-Token': sessionToken },
+});
 try {
-  const page = await browser.newPage();
+  const page = await context.newPage();
   const failures = [];
   page.on('request', (request) => {
     if (request.url().includes(':8787')) failures.push('browser attempted direct daemon access');
@@ -59,5 +66,6 @@ try {
   if (failures.length) throw new Error(failures.join('; '));
   process.stdout.write(JSON.stringify({ generation, lane, status: 'PASS' }) + '\n');
 } finally {
+  await context.close();
   await browser.close();
 }
