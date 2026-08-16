@@ -124,6 +124,8 @@ if value.get('version') != '0.7.0-alpha.1' or value.get('has_api') is not True o
     raise SystemExit('packaged dashboard route registration mismatch')
 PY
 
+(cd "$browser_runtime" && node "$GITHUB_WORKSPACE/packaging/scripts/test-hermes-browser-origin-proxy.mjs" \
+  "$browser_runtime")
 (cd "$browser_runtime" && node "$GITHUB_WORKSPACE/packaging/scripts/hermes-browser-smoke.mjs" \
   "http://127.0.0.1:${HERMES_PORT}/skynet-edr/risks" normal \
   /usr/share/skynet-edr/hermes-plugin/manifest.json "$browser_runtime")

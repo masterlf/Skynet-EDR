@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
+import { installAuthenticatedOriginProxy } from './hermes-browser-origin-proxy.mjs';
 
 const [url, lane, manifestPath, browserRuntime] = process.argv.slice(2);
 if (!url || !['normal', 'alert-delivery'].includes(lane) || !manifestPath || !browserRuntime) {
@@ -48,18 +49,7 @@ const context = await browser.newContext({ serviceWorkers: 'block' });
 try {
   const page = await context.newPage();
   const failures = [];
-  const targetOrigin = new URL(url).origin;
-  await page.route('**/*', async (route) => {
-    const request = route.request();
-    if (new URL(request.url()).origin !== targetOrigin) {
-      failures.push(`blocked cross-origin request: ${request.url()}`);
-      await route.abort('blockedbyclient');
-      return;
-    }
-    await route.continue({
-      headers: { ...request.headers(), 'X-Hermes-Session-Token': sessionToken },
-    });
-  });
+  await installAuthenticatedOriginProxy(context, url, sessionToken, failures);
   page.on('request', (request) => {
     if (request.url().includes(':8787')) failures.push('browser attempted direct daemon access');
   });

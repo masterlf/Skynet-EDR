@@ -117,11 +117,17 @@ class ExactArtifactBrowserGateTests(unittest.TestCase):
         self.assertIn("sessionToken.length > 256", browser)
         self.assertNotIn("extraHTTPHeaders", browser)
         self.assertIn("serviceWorkers: 'block'", browser)
-        self.assertIn("new URL(request.url()).origin !== targetOrigin", browser)
-        self.assertIn("blocked cross-origin request", browser)
-        self.assertIn("headers: { ...request.headers(), 'X-Hermes-Session-Token': sessionToken }", browser)
+        self.assertIn("installAuthenticatedOriginProxy(context, url, sessionToken, failures)", browser)
         self.assertIn("const page = await context.newPage()", browser)
         self.assertIn("await context.close()", browser)
+
+        proxy = (ROOT / "packaging/scripts/hermes-browser-origin-proxy.mjs").read_text(encoding="utf-8")
+        self.assertIn("context.route('**/*'", proxy)
+        self.assertIn("requestUrl.origin !== targetOrigin", proxy)
+        self.assertIn("maxRedirects: 0", proxy)
+        self.assertIn("blocked authenticated redirect", proxy)
+        self.assertNotIn("route.continue", proxy)
+        self.assertIn("test-hermes-browser-origin-proxy.mjs", GATE.read_text(encoding="utf-8"))
 
     def test_both_workflows_gate_one_deb_before_upload_or_publication(self) -> None:
         gate = GATE.read_text(encoding="utf-8")
