@@ -2,11 +2,11 @@
 
 ## Audience and purpose
 
-This page is the public contract for the installable Skynet-EDR `v0.6.0` stable SemVer evaluation release. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. Stable identity in this pre-1.0 product is not a production support commitment. Exact rule claims and scenario evidence are in the [v0.6.0 protection matrix](PROTECTION_MATRIX_v0.6.0.md).
+This page is the public contract for the installable Skynet-EDR `v0.7.0-alpha.1` prerelease. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. Prerelease identity is not a production support commitment. Exact rule claims and scenario evidence remain in the [v0.6.0 protection matrix](PROTECTION_MATRIX_v0.6.0.md); this enrollment port does not widen rule coverage.
 
 ## Product boundary
 
-Skynet-EDR is a passive, local-first, Linux `x86_64`/`amd64` pre-1.0 stable SemVer evaluation release. It accepts and stores redacted local security evidence, applies bounded correlation, and exposes local read-only visibility. It detects and records; it does not block, pause, approve, quarantine, contain, or otherwise change an agent action.
+Skynet-EDR is a passive, local-first, Linux `x86_64`/`amd64` prerelease. It accepts and stores redacted local security evidence, applies bounded correlation, and exposes local read-only visibility. It detects and records; it does not block, pause, approve, quarantine, contain, or otherwise change an agent action.
 
 The product does not replace endpoint EDR, SIEM, IAM, DLP, runtime guardrails, or an incident-response service. Operators remain responsible for validating incidents, controlling runtime access, preserving evidence, and taking any response action.
 
@@ -19,7 +19,7 @@ The product does not replace endpoint EDR, SIEM, IAM, DLP, runtime guardrails, o
 
 Unsupported or unproven: `arm64`/`aarch64`, musl/Alpine, non-systemd hosts, Windows, macOS, and any distribution or architecture not listed above. RPM and Arch artifacts do not establish RHEL/Fedora/Arch runtime compatibility. The tarball installer does not provision the `skynet-edr-ingest` group or sysusers/tmpfiles state needed for authenticated continuous ingress; do not infer ingress readiness from a successful tarball installation.
 
-Published checksums provide integrity checking, but this pre-1.0 stable SemVer evaluation release has no package signatures, signed checksum manifest, SBOM, provenance attestation, or bounded Hermes compatibility range.
+Published checksums provide integrity checking, but this prerelease has no package signatures, signed checksum manifest, SBOM, or provenance attestation. Hermes compatibility is bounded to exact version `0.20.0` and the `default` profile.
 
 ## Runtime and integration coverage
 
@@ -27,7 +27,7 @@ Published checksums provide integrity checking, but this pre-1.0 stable SemVer e
 |---|---|---|
 | Canonical schema, redaction, local SQLite storage, CLI, loopback read-only HTTP visibility | Live | Implemented local surfaces subject to their documented validation and availability limits. |
 | Hermes lifecycle plugin and authenticated AF_UNIX ingestion | Live producer | The only shipped live producer path. It is passive and depends on explicit local enrollment, producer-supplied facts, successful ingestion, and bounded queues/checkpoints. |
-| Autonomous Hermes enrollment | Unproven / blocked | The mandatory disposable Ubuntu 24.04 amd64/systemd clean-host gate for Hermes 0.19.0 has not passed. No live deployment may claim autonomous `ENROLLED`; the operational verdict is `S3_ADAPTER_BLOCK`. The separate Hermes 0.20.0 browser gate does not authorize enrollment. |
+| Autonomous Hermes enrollment | Exact-cell prerelease | The transaction fails closed outside Ubuntu 24.04 amd64/systemd, DEB, Hermes 0.20.0, and the default profile. `ENROLLED` requires an authorized complete user-manager restart, healthy protocol-v3 producer evidence, and a fresh committed attestation receipt; copied files or plugin-enable success are insufficient. |
 | `EDR-MCP-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-CRON-001` | Live, narrow | Exact Hermes producer shapes only; cron coverage is limited to authoritative successful built-in `cronjob` create/update outcomes. |
 | `EDR-EXFIL-001`, `EDR-MALWARE-001` | Live, narrow | Exact reviewed event shapes, joins, ordering, and bounded correlation only. Absence of an incident is not proof that an action was safe. |
 | Canonical JSONL from another producer and normalized Hermes trace import | Producer-dependent | The engine can evaluate documented input, but coverage exists only when an external producer supplies valid redacted events. |

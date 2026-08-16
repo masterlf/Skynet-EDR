@@ -14,7 +14,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 MODEL = "spike-model"
-FIXED_REPLY = "SPIKE_OK"
+SPIKE_REPLY = "SPIKE_OK"
+ENROLLMENT_REPLY = "SKYNET_EDR_ENROLLMENT_OK"
+ALLOWED_REPLIES = frozenset({SPIKE_REPLY, ENROLLMENT_REPLY})
+FIXED_REPLY = SPIKE_REPLY
 MAX_REQUEST_BYTES = 1_048_576
 REQUEST_TIMEOUT_SECONDS = 5.0
 
@@ -176,9 +179,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    global FIXED_REPLY
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=19000)
+    parser.add_argument(
+        "--reply", choices=sorted(ALLOWED_REPLIES), default=SPIKE_REPLY,
+        help="fixed benign reply contract",
+    )
     args = parser.parse_args()
+    FIXED_REPLY = args.reply
     server = HTTPServer(("127.0.0.1", args.port), FixtureHandler)
     print(f"fixture listening on 127.0.0.1:{args.port}", flush=True)
     server.serve_forever()

@@ -95,6 +95,27 @@ class Hermes020MockOpenAITests(unittest.TestCase):
         self.assertIn(b'"content":"SPIKE_OK"', payload)
         self.assertTrue(payload.endswith(b"data: [DONE]\n\n"))
 
+    def test_enrollment_reply_contract_is_explicitly_selectable(self):
+        original = getattr(self.fixture, "FIXED_REPLY")
+        setattr(self.fixture, "FIXED_REPLY", getattr(self.fixture, "ENROLLMENT_REPLY"))
+        try:
+            request = json.dumps(
+                {"model": "spike-model", "messages": [], "stream": False}
+            ).encode()
+            status, payload = self.request(
+                "POST",
+                "/v1/chat/completions",
+                body=request,
+                headers={"Content-Type": "application/json"},
+            )
+        finally:
+            setattr(self.fixture, "FIXED_REPLY", original)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(payload)["choices"][0]["message"]["content"],
+            "SKYNET_EDR_ENROLLMENT_OK",
+        )
+
     def test_unknown_post_and_model_fail_closed(self):
         status, _ = self.request("POST", "/unknown", body=b"{}")
         self.assertEqual(status, 404)

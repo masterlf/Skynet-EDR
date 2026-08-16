@@ -247,7 +247,7 @@ class ThreatValidationTests(unittest.TestCase):
         threat_validation = THREAT_VALIDATION_DOC.read_text(encoding="utf-8")
 
         self.assertNotIn("v0.5.0 plans durable local alerting", architecture)
-        self.assertIn("current v0.6.0", architecture.lower())
+        self.assertIn("current v0.7.0-alpha.1", architecture.lower())
         self.assertNotIn("This v0.5.1 hotfix", deployment)
         self.assertIn("This v0.6.0 stable SemVer evaluation release", deployment)
         self.assertIn("manifest, matrix, and public-matrix SHA-256", threat_validation)

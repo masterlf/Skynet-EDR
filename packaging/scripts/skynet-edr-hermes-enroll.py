@@ -41,8 +41,8 @@ ALLOWED_FILES = (
     "desktop/plugin.js",
 )
 SUPPORTED_HOST = {"id": "ubuntu", "version": "24.04", "arch": "x86_64", "init": "systemd"}
-SUPPORTED_HERMES = {"0.19.0"}
-PAYLOAD_VERSION = "0.6.0"
+SUPPORTED_HERMES = {"0.20.0"}
+PAYLOAD_VERSION = "0.7.0-alpha.1"
 SYSTEM_SOURCE = Path("/usr/share/skynet-edr/hermes-plugin/skynet-edr")
 SYSTEM_MANIFEST = SYSTEM_SOURCE.parent / "manifest.json"
 SYSTEM_STATE_ROOT = Path("/var/lib/skynet-edr-hermes-enrollment")
@@ -51,20 +51,20 @@ SYSTEM_ADAPTER = Path("/usr/libexec/skynet-edr/hermes-enrollment-adapter.py")
 MAX_PAYLOAD_FILE = 8 * 1024 * 1024
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 REVIEWED_UNITS = ["hermes-gateway.service"]
-ATTEST_BUDGET_NS = 15_000_000_000
+ATTEST_BUDGET_NS = 30_000_000_000
 ADAPTER_CLEANUP_GRACE_NS = 15_000_000_000
-JOURNAL_KEYS = {"schema", "transaction_nonce", "operation", "target", "objects", "phase", "result", "manual_recovery"}
+JOURNAL_KEYS = {"schema", "transaction_nonce", "operation", "target", "objects", "phase", "result", "manual_recovery", "disabled_config_sha256"}
 JOURNAL_OBJECT_KEYS = {"source_parent", "source_name", "source_identity", "quarantine_parent", "quarantine_name", "quarantine_identity"}
 IDENTITY_KEYS = {"dev", "ino", "type", "mode", "uid", "gid", "nlink", "size", "tree_sha256"}
 PARENT_IDENTITY_KEYS = {"dev", "ino", "mode", "uid", "gid"}
 JOURNAL_OBJECT_NAMES = {"backend", "desktop", "metadata", "observation"}
-JOURNAL_PHASES = {"STARTED", "DISABLED", "ADAPTER_RESTORED", "QUARANTINING", "QUARANTINED"}
+JOURNAL_PHASES = {"STARTED", "DISABLED", "PLUGIN_QUARANTINING", "PLUGIN_QUARANTINED", "ADAPTER_RESTORED", "QUARANTINING", "QUARANTINED"}
 MANUAL_RECOVERY = ("Manual root recovery required: inspect the exact quarantine and transaction journal; "
                    "restore only an identity-matching object to an absent source with atomic no-replace rename. "
                    "No quarantined managed content is removed automatically.")
 ATTEST_RESPONSE_KEYS = {
     "plugin_enabled", "loaded_generation", "process_fresh", "daemon", "producer",
-    "real_hook", "restart_blast_radius", "identities", "commit_sequence",
+    "real_hook", "real_dispatch", "restart_blast_radius", "identities", "commit_sequence",
 }
 ATTEST_OBSERVATION_KEYS = ATTEST_RESPONSE_KEYS | {
     "target_uid", "observed_generation", "transaction_nonce",
@@ -375,6 +375,7 @@ def validate_attest_response(response: dict[str, Any], env: dict[str, str], even
     daemon = response.get("daemon")
     producer = response.get("producer")
     hook = response.get("real_hook")
+    dispatch = response.get("real_dispatch")
     identities = response.get("identities")
     expected_units = {"user@" + env["SKYNET_EDR_TARGET_UID"] + ".service",
                       "hermes-gateway.service", "skynet-edr.service"}
@@ -415,6 +416,13 @@ def validate_attest_response(response: dict[str, Any], env: dict[str, str], even
         and type(hook.get("event_id")) is str and hook["event_id"] == event_id
         and type(hook.get("receipt_status")) is str and hook["receipt_status"] == "persisted"
     )
+    dispatch_ok = (
+        type(dispatch) is dict
+        and set(dispatch) == {"completed", "events_committed"}
+        and type(dispatch.get("completed")) is bool and dispatch["completed"] is True
+        and type(dispatch.get("events_committed")) is int
+        and dispatch["events_committed"] == 3
+    )
     if (type(event_id) is not str
             or re.fullmatch(r"evt_skynet_attest_[0-9a-f]{64}", event_id) is None
             or type(response) is not dict
@@ -423,7 +431,7 @@ def validate_attest_response(response: dict[str, Any], env: dict[str, str], even
             or type(response.get("loaded_generation")) is not str
             or response["loaded_generation"] != env["SKYNET_EDR_GENERATION"]
             or type(response.get("process_fresh")) is not bool or response["process_fresh"] is not True
-            or not daemon_ok or not producer_ok or not hook_ok
+            or not daemon_ok or not producer_ok or not hook_ok or not dispatch_ok
             or type(response.get("restart_blast_radius")) is not str
             or response["restart_blast_radius"] != "complete_user_manager"
             or not identity_values_ok
@@ -577,6 +585,26 @@ def detach_nondestructive(source_fd: int, source_name: str, quarantine_fd: int,
     return actual
 
 
+def _regular_object_sha256(parent: Path, name: str, owner: int) -> str:
+    try:
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise EnrollmentError("config_identity", "MANUAL_RECOVERY_REQUIRED") from exc
+    try:
+        identity = object_identity(parent_fd, name, owner)
+        if identity["type"] != "regular":
+            raise EnrollmentError("config_identity", "MANUAL_RECOVERY_REQUIRED")
+        fingerprint = {
+            "gid": identity["gid"], "mode": stat.S_IMODE(identity["mode"]),
+            "sha256": identity["tree_sha256"], "size": identity["size"], "uid": identity["uid"],
+        }
+        return hashlib.sha256(
+            json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("ascii")
+        ).hexdigest()
+    finally:
+        os.close(parent_fd)
+
+
 def restore_nondestructive(quarantine_fd: int, quarantine_name: str, source_fd: int,
                            source_name: str, expected: dict[str, Any], owner: int) -> dict[str, Any]:
     if _parent_identity(quarantine_fd)["dev"] != _parent_identity(source_fd)["dev"]:
@@ -609,6 +637,7 @@ def new_quarantine_journal(nonce: str, operation: str, uid: int, home: Path,
     return {"schema": 1, "transaction_nonce": nonce, "operation": operation,
             "target": {"uid": uid, "home": str(home), "profile": profile, "generation": generation},
             "objects": {}, "phase": "STARTED", "result": None,
+            "disabled_config_sha256": None,
             "manual_recovery": MANUAL_RECOVERY}
 
 
@@ -631,6 +660,8 @@ def load_quarantine_journal(path: Path) -> dict[str, Any]:
         raise EnrollmentError("journal", "MANUAL_RECOVERY_REQUIRED") from exc
     target = value.get("target") if type(value) is dict else None
     objects = value.get("objects") if type(value) is dict else None
+    phase = value.get("phase") if type(value) is dict else None
+    disabled_config_sha256 = value.get("disabled_config_sha256") if type(value) is dict else None
     if (type(value) is not dict or set(value) != JOURNAL_KEYS
             or type(value.get("schema")) is not int or value["schema"] != 1
             or re.fullmatch(r"[0-9a-f]{64}", value.get("transaction_nonce", "")) is None
@@ -639,7 +670,10 @@ def load_quarantine_journal(path: Path) -> dict[str, Any]:
             or type(target.get("uid")) is not int or target["uid"] < 0
             or type(target.get("home")) is not str or type(target.get("profile")) is not str
             or re.fullmatch(r"[0-9a-f]{64}", target.get("generation", "")) is None
-            or type(objects) is not dict or value.get("phase") not in JOURNAL_PHASES
+            or type(objects) is not dict or phase not in JOURNAL_PHASES
+            or not ((phase == "STARTED" and disabled_config_sha256 is None)
+                    or (phase != "STARTED" and type(disabled_config_sha256) is str
+                        and re.fullmatch(r"[0-9a-f]{64}", disabled_config_sha256) is not None))
             or not set(objects).issubset(JOURNAL_OBJECT_NAMES)
             or value.get("result") not in {None, "QUARANTINED", "MANUAL_RECOVERY_REQUIRED"}
             or value.get("manual_recovery") != MANUAL_RECOVERY):
@@ -1395,7 +1429,9 @@ def apply(request: dict[str, Any], source: Path, state_root: Path, observations:
 
 def _quarantine_one(journal_path: Path, journal: dict[str, Any], key: str,
                     source_fd: int, source_name: str, quarantine_fd: int,
-                    quarantine_name: str, owner: int) -> None:
+                    quarantine_name: str, owner: int, *, transition_phase: str = "QUARANTINING") -> None:
+    if transition_phase not in {"PLUGIN_QUARANTINING", "QUARANTINING"}:
+        raise EnrollmentError("journal", "MANUAL_RECOVERY_REQUIRED")
     record = journal["objects"].get(key)
     if record is None:
         try:
@@ -1412,7 +1448,7 @@ def _quarantine_one(journal_path: Path, journal: dict[str, Any], key: str,
             "quarantine_identity": source_identity,
         }
         journal["objects"][key] = record
-        journal["phase"] = "QUARANTINING"
+        journal["phase"] = transition_phase
         write_quarantine_journal(journal_path, journal)
     if (_parent_identity(source_fd) != record["source_parent"]
             or _parent_identity(quarantine_fd) != record["quarantine_parent"]):
@@ -1553,10 +1589,30 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
                         or disabled.get("loaded_generation") is not None \
                         or type(disabled.get("process_fresh")) is not bool:
                     raise EnrollmentError("enablement", "MANUAL_RECOVERY_REQUIRED")
+                journal["disabled_config_sha256"] = _regular_object_sha256(home, "config.yaml", uid)
                 journal["phase"] = "DISABLED"
                 write_quarantine_journal(journal_path, journal)
-            if journal["phase"] == "DISABLED":
-                restored = run_adapter(adapter, "rollback", adapter_env(home, profile, observations, generation, uid), observations)
+            if journal["phase"] in {"DISABLED", "PLUGIN_QUARANTINING"}:
+                if plugins_parent is not None:
+                    plugin_fd = os.open(plugins_parent, os.O_RDONLY | os.O_DIRECTORY)
+                    bindings["backend"] = (plugin_fd, transaction_fd)
+                    _quarantine_one(
+                        journal_path, journal, "backend", plugin_fd, "skynet-edr",
+                        transaction_fd, "backend", uid, transition_phase="PLUGIN_QUARANTINING",
+                    )
+                if desktop_parent is not None:
+                    desktop_fd = os.open(desktop_parent, os.O_RDONLY | os.O_DIRECTORY)
+                    bindings["desktop"] = (desktop_fd, transaction_fd)
+                    _quarantine_one(
+                        journal_path, journal, "desktop", desktop_fd, "skynet-edr",
+                        transaction_fd, "desktop", uid, transition_phase="PLUGIN_QUARANTINING",
+                    )
+                journal["phase"] = "PLUGIN_QUARANTINED"
+                write_quarantine_journal(journal_path, journal)
+            if journal["phase"] == "PLUGIN_QUARANTINED":
+                rollback_env = adapter_env(home, profile, observations, generation, uid)
+                rollback_env["SKYNET_EDR_EXPECTED_HERMES_CONFIG_SHA256"] = journal["disabled_config_sha256"]
+                restored = run_adapter(adapter, "rollback", rollback_env, observations)
                 if set(restored) != ADAPTER_BASE_KEYS["rollback"] | ADAPTER_ENVELOPE_KEYS \
                         or restored.get("prepared") is not False \
                         or type(restored.get("plugin_enabled")) is not bool \
@@ -1565,28 +1621,32 @@ def unenroll(request: dict[str, Any], source: Path, state_root: Path, observatio
                     raise EnrollmentError("rollback", "MANUAL_RECOVERY_REQUIRED")
                 journal["phase"] = "ADAPTER_RESTORED"
                 write_quarantine_journal(journal_path, journal)
-            if plugins_parent is not None:
-                # opened_user_directory already pins and validates this proc-fd path.
-                plugin_fd = os.open(plugins_parent, os.O_RDONLY | os.O_DIRECTORY)
-                bindings["backend"] = (plugin_fd, transaction_fd)
-                _quarantine_one(journal_path, journal, "backend", plugin_fd, "skynet-edr",
-                                transaction_fd, "backend", uid)
-            if desktop_parent is not None:
-                desktop_fd = os.open(desktop_parent, os.O_RDONLY | os.O_DIRECTORY)
-                bindings["desktop"] = (desktop_fd, transaction_fd)
-                _quarantine_one(journal_path, journal, "desktop", desktop_fd, "skynet-edr",
-                                transaction_fd, "desktop", uid)
-            for key, path, name in (("metadata", state_root / "enrollment.json", "metadata"),
-                                    ("observation", observations, "observation")):
-                parent_fd = private_state_fd if path.parent == state_root else os.open(
-                    path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-                )
-                bindings[key] = (parent_fd, transaction_fd)
-                _quarantine_one(journal_path, journal, key, parent_fd, path.name,
-                                transaction_fd, name, expected_owner)
-            journal["phase"] = "QUARANTINED"
-            journal["result"] = "QUARANTINED"
-            write_quarantine_journal(journal_path, journal)
+            if journal["phase"] in {"ADAPTER_RESTORED", "QUARANTINING"}:
+                for key, path, name in (("metadata", state_root / "enrollment.json", "metadata"),
+                                        ("observation", observations, "observation")):
+                    parent_fd = private_state_fd if path.parent == state_root else os.open(
+                        path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    )
+                    bindings[key] = (parent_fd, transaction_fd)
+                    _quarantine_one(journal_path, journal, key, parent_fd, path.name,
+                                    transaction_fd, name, expected_owner)
+                journal["phase"] = "QUARANTINED"
+                journal["result"] = "QUARANTINED"
+                write_quarantine_journal(journal_path, journal)
+            for key in journal["objects"]:
+                if key in bindings:
+                    continue
+                if key == "backend" and plugins_parent is not None:
+                    source_fd = os.open(plugins_parent, os.O_RDONLY | os.O_DIRECTORY)
+                elif key == "desktop" and desktop_parent is not None:
+                    source_fd = os.open(desktop_parent, os.O_RDONLY | os.O_DIRECTORY)
+                elif key == "metadata":
+                    source_fd = private_state_fd
+                elif key == "observation":
+                    source_fd = os.open(observations.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                else:
+                    raise EnrollmentError("quarantine_identity", "MANUAL_RECOVERY_REQUIRED")
+                bindings[key] = (source_fd, transaction_fd)
             _fresh_quarantine_proof(journal, bindings)
             return emit("QUARANTINED", "unenrolled", noop=repeated,
                         success=True)

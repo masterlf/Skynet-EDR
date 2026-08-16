@@ -19,8 +19,8 @@ done
 [[ -f "$deb" && ! -L "$deb" && -d "$hermes_repo/.git" ]] || usage
 deb=$(realpath -- "$deb")
 
-readonly PRODUCT_VERSION="0.6.0"
-readonly DEB_VERSION="0.6.0"
+readonly PRODUCT_VERSION="0.7.0-alpha.1"
+readonly DEB_VERSION="0.7.0~alpha.1"
 HERMES_REF=f5be9236e00ddf2f2a412697f267078fc4ee068e
 readonly HERMES_REF
 readonly HERMES_PORT="9119"
@@ -114,7 +114,7 @@ if len(matches) != 1:
     raise SystemExit('packaged dashboard plugin registration count mismatch')
 value=matches[0]
 tab=value.get('tab') if isinstance(value.get('tab'), dict) else {}
-if value.get('version') != '0.6.0' or value.get('has_api') is not True or tab.get('path') != '/skynet-edr/risks':
+if value.get('version') != '0.7.0-alpha.1' or value.get('has_api') is not True or tab.get('path') != '/skynet-edr/risks':
     raise SystemExit('packaged dashboard route registration mismatch')
 PY
 
