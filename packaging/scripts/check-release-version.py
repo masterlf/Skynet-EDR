@@ -586,7 +586,7 @@ def main() -> None:
         ),
         "integrations/hermes/skynet-edr/README.md": (
             rf"^Passive Hermes Agent telemetry plugin for Skynet-EDR v({CANONICAL_RELEASE_VERSION_PATTERN})\.$",
-            rf"^- No inline blocking in v({CANONICAL_RELEASE_VERSION_PATTERN})\.$",
+            rf"^  v({CANONICAL_RELEASE_VERSION_PATTERN}) performs a bounded wait for its ordered terminal outcome\.$",
         ),
     }
     for path, patterns in authoritative_doc_versions.items():

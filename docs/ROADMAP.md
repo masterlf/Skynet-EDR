@@ -4,13 +4,13 @@ This page is the authoritative product milestone map. The [implementation plan](
 
 **Roadmap snapshot:** 2026-08-16
 
-**Shipped baseline:** `v0.6.0`
+**Shipped baseline:** `v0.7.0-alpha.1`
 
 **Product MVP target:** `v0.7.0`
 
 ## Executive decision
 
-`v0.6.0` is a credible passive **engineering MVP and stable SemVer evaluation release**. It is not yet a third-party-usable product MVP.
+`v0.7.0-alpha.1` is the public autonomous-enrollment baseline. It is not yet a third-party-usable product MVP.
 
 The shortest defensible path is `v0.7.0`: one external operator can install, enroll, exercise, understand, operate, restore, and remove Skynet-EDR on one exact supported host/runtime cell using only public artifacts and documentation.
 
@@ -27,19 +27,19 @@ No additional detection rule is required for this MVP. The remaining risk is not
 
 The release remains passive and is published as a prerelease. It has no production support commitment; signing, provenance, SBOM policy, broader platform validation, and repeatable runtime upgrade/rollback proof remain open. Release promotion is conditioned on the exact release SHA passing the disposable clean-host package/systemd, browser, threat-validation, and Hermes enrollment gates.
 
-The shipped `v0.6.0` authority remains historical evidence. The current alpha.1 candidate advances only the exact Hermes 0.20 enrollment cell and release identity; it does not claim that the remaining third-party product-MVP exit gates below have passed.
+The shipped `v0.6.0` authority remains historical evidence. Public `v0.7.0-alpha.1` proves the exact Hermes 0.20 enrollment cell. The current alpha.2 candidate adds one bounded real detection and investigation journey; it does not claim that the remaining third-party product-MVP exit gates below have passed.
 
-## Current milestone: v0.7.0-alpha.1 autonomous enrollment prerelease
+## Current milestone: v0.7.0-alpha.2 real detection journey prerelease
 
 | Product gate | Verified current state | MVP consequence |
 |---|---|---|
-| Public release | `v0.6.0` is published from commit `edcf304f7ee53b9df38cfb8cac9f2bfb4871cb24`; current `main` is newer maintenance commit `81ce989e920accbaeb953c2e0ef668e4dfea9d8a` | Release identity exists; future candidates must bind reviewed source, tag, artifacts, and installed bytes again |
+| Public release | `v0.7.0-alpha.1` is published from merge commit `38fdc6e5d90ccc1c669616e2381386a020bbbc02`; alpha.2 starts from that exact public tree | Alpha.2 must bind reviewed source, tag, artifacts, installed bytes, and acceptance evidence again |
 | Package path | Disposable Ubuntu 24.04 DEB/systemd, process identity, state access, and loopback API gates pass | Ubuntu 24.04 DEB is the only Tier 1 MVP package path |
 | Other artifacts | RPM, Arch, and tarball artifacts are published without corresponding native runtime qualification | They remain explicitly unqualified or are omitted from the MVP release; publication is not support |
 | Detection quality | Seven narrow rule paths are `DETECTED_AND_TESTED`; hostile malformed cases and benign near misses are versioned | Sufficient floor for MVP; claims remain narrow |
-| Detection gaps | Three producer-dark rules and standalone secret access remain `NOT_COVERED`; real Hermes discovery/dispatcher ABI is `NOT_TESTED` | No claim expansion; at least one rule must gain real-host end-to-end evidence |
-| Hermes enrollment | The strict transaction is ported to exact Hermes 0.20.0/default-profile behavior | Alpha.1 promotion requires exact package-owned clean-host apply/verify/unenroll proof with sealed evidence |
-| Live producer health | The signed Hermes 0.20.0 release passed discovery, gateway health, and real-dispatch feasibility | Candidate acceptance still binds the exact package/plugin generation and fresh process/source evidence |
+| Detection gaps | Three producer-dark rules and standalone secret access remain `NOT_COVERED`; alpha.2 adds real-dispatch evidence only for `EDR-MALWARE-001` | No rule-set expansion and no generalization from the one exercised journey |
+| Hermes enrollment | Public alpha.1 passed the exact package-owned clean-host transaction on Hermes 0.20.0/default profile | Any alpha.2 byte change requires a fresh complete clean-host pass and sealed evidence |
+| Live producer health | Hermes 0.20.0 discovery, deferred-tool dispatch, hooks, and protocol-v3 ingestion are proven on the exact support cell | Candidate acceptance must still bind the exact alpha.2 package/plugin generation and fresh process/source evidence |
 | Triage | SQLite incidents and Risk Explorer are authoritative local investigation surfaces | A local MVP does not require webhook, email, SIEM, or a dedicated alert outbox |
 | Local notices | Post-commit stdout/journald notices are best effort; SQLite remains authoritative | Documentation and acceptance must prevent operators from treating journald as guaranteed delivery |
 | Operations | Store retention/pruning and qualified backup/restore are absent; upgrade/rollback evidence is maintainer-controlled | Bounded store lifecycle and clean-host restore proof block MVP |
@@ -87,9 +87,9 @@ Earlier plans used `M0–M6`, `S0–S8`, `S3–S7`, and several incompatible mea
 
 | Previous workstream | Rebased status |
 |---|---|
-| Product contract and release baseline | Delivered through `v0.6.0` |
-| Minimal detection/redaction floor | Delivered for seven narrow synthetic scenarios; real Hermes dispatcher proof remains open |
-| S3 enrollment | Transaction model and fixtures exist; external qualification never passed and the target Hermes version is stale |
+| Product contract and release baseline | Delivered through public `v0.7.0-alpha.1`; alpha.2 advances the next bounded journey |
+| Minimal detection/redaction floor | Delivered for seven narrow synthetic scenarios; alpha.2 is adding one exact real-host `EDR-MALWARE-001` journey without widening the other claims |
+| S3 enrollment | Delivered and qualified on the exact public alpha.1 Ubuntu 24.04/Hermes 0.20.0 cell; alpha.2 must requalify its changed package bytes |
 | S4 alerting/triage | Durable incidents and Risk Explorer exist; best-effort notices exist; a dedicated outbox is not MVP scope |
 | S5 operations/supply chain | Partially open: retention, restore qualification, SBOM, and origin proof remain |
 | S6 full detection validation | Sufficient synthetic floor exists; real-host journey remains open |
@@ -141,6 +141,8 @@ This spike is mandatory because the existing enrollment transaction never passed
 
 ### `v0.7.0-alpha.1` — Autonomous enrollment on the supported cell
 
+**Status:** shipped publicly on 2026-08-16.
+
 **Outcome:** a clean host can enroll and unenroll Hermes 0.20.0 using public package bytes.
 
 **Work:**
@@ -160,6 +162,8 @@ This spike is mandatory because the existing enrollment transaction never passed
 
 ### `v0.7.0-alpha.2` — Real detection and investigation journey
 
+**Status:** current candidate; promotion gates remain open until exact-artifact acceptance and review complete.
+
 **Outcome:** one supported attack simulation becomes an actionable incident through the real product path.
 
 **Work:**
@@ -171,7 +175,7 @@ This spike is mandatory because the existing enrollment transaction never passed
 - update the public coverage evidence to distinguish this real-host path from synthetic fixture evidence;
 - keep the other six rules at their exact existing evidence level rather than generalizing from one journey.
 
-**Exit gate:** the safe simulation produces exactly the expected incident and no forbidden synthetic marker survives any stored or displayed surface.
+**Exit gate:** the safe simulation produces exactly the expected incident, reports submission only after an authenticated terminal ACK or durable fallback write, and leaves no forbidden synthetic marker on any stored or displayed surface.
 
 **Budget:** 3–5 developer-days.
 

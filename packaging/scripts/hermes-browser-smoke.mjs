@@ -19,7 +19,7 @@ if (typeof sessionToken !== 'string' || sessionToken.length < 32 || sessionToken
 const requireFromRuntime = createRequire(join(browserRuntime, 'package.json'));
 const { chromium } = requireFromRuntime('playwright');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-if (manifest.schema !== 1 || manifest.payload_version !== '0.7.0-alpha.1') {
+if (manifest.schema !== 1 || manifest.payload_version !== '0.7.0-alpha.2') {
   throw new Error('installed package manifest version mismatch');
 }
 function canonicalize(value) {
@@ -56,7 +56,7 @@ try {
   page.on('console', (message) => { if (message.type() === 'error') failures.push(`console: ${message.text()}`); });
   page.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
   await page.goto(url, { waitUntil: 'networkidle', timeout: 60_000 });
-  for (const text of ['EDR 0.7.0-alpha.1', 'Engine Online', 'Backend available', 'Passive mode']) {
+  for (const text of ['EDR 0.7.0-alpha.2', 'Engine Online', 'Backend available', 'Passive mode']) {
     await page.getByText(text, { exact: true }).waitFor({ timeout: 30_000 });
   }
   const telemetry = lane === 'normal' ? 'Telemetry disabled' : 'Telemetry degraded';

@@ -1,9 +1,10 @@
 """Skynet-EDR passive telemetry plugin for Hermes Agent.
 
-The plugin is intentionally non-blocking. It observes Hermes lifecycle hooks,
-emits canonical ``skynet.event.v0`` JSONL records to a local spool, and writes a
-sanitized operational log. It never executes tool content, never performs
-network egress, and never stores raw tool output.
+Passive hooks are intentionally non-blocking. They and the bounded synchronous
+safe simulation share one ordered transport queue. The plugin emits canonical
+``skynet.event.v0`` JSONL records to a local spool and writes a sanitized
+operational log. It never executes tool content, never performs network egress,
+and never stores raw tool output.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 try:
@@ -33,11 +34,13 @@ except ImportError:  # pragma: no cover - continuous ingestion is Linux-first
     fcntl = None
 
 PLUGIN_NAME = "skynet-edr"
-PLUGIN_VERSION = "0.7.0-alpha.1"
+PLUGIN_VERSION = "0.7.0-alpha.2"
 SCHEMA_VERSION = "skynet.event.v0"
 DEFAULT_MAX_FIELD_CHARS = 4096
 DEFAULT_MAX_LOG_BYTES = 1_048_576
 DEFAULT_EVENT_QUEUE_SIZE = 1024
+DEFAULT_SYNC_DELIVERY_TIMEOUT_MS = 3_000
+MAX_SYNC_DELIVERY_TIMEOUT_MS = 15_000
 DEFAULT_FALLBACK_MAX_BYTES = 64 * 1024 * 1024
 MAX_FALLBACK_MAX_BYTES = 256 * 1024 * 1024
 MAX_INGEST_FRAME_BYTES = 262_144
@@ -59,6 +62,8 @@ _RESULT_CLASSIFICATION_KEYS = frozenset(
     {"result", "output", "content", "text", "body", "message", "data"}
 )
 _INVALID_TOOL_NAME = "invalid_tool"
+_SAFE_SIMULATION_TOOL = "skynet_edr_safe_detection_simulation"
+_SAFE_SIMULATION_SCENARIO = "malware-marker"
 
 _SECRET_RE = re.compile(
     r"(?i)(authorization\s*:\s*bearer\s+\S+|x-api-key\s*[:=]\s*\S+|api[_-]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
@@ -117,8 +122,14 @@ def _initial_queue_size() -> int:
     return min(65_536, max(1, value))
 
 
-_event_queue: queue.Queue[str] = queue.Queue(maxsize=_initial_queue_size())
+class _DeliveryItem(NamedTuple):
+    line: str
+    completion: queue.Queue[str] | None
+
+
+_event_queue: queue.Queue[_DeliveryItem] = queue.Queue(maxsize=_initial_queue_size())
 _worker_lock = threading.Lock()
+_delivery_lock = threading.Lock()
 _worker_started = False
 _worker_stop = threading.Event()
 _worker_thread: threading.Thread | None = None
@@ -133,9 +144,78 @@ _transport_counters = {
 _last_reported_transport_counters = dict(_transport_counters)
 
 
+def _safe_detection_simulation(args: Any, **_kwargs: Any) -> str:
+    """Emit one fixed synthetic detection event and return only a redacted summary."""
+    if type(args) is not dict or args != {"scenario": _SAFE_SIMULATION_SCENARIO}:
+        raise ValueError("unsupported safe detection simulation request")
+    delivery_status = _write_event(
+        event_type="agent.tool.completed",
+        source_kind="mcp_tool",
+        trust_level="tool_output",
+        severity="high",
+        title="Hermes safe detection simulation completed",
+        attributes={
+            "hook": "post_tool_call",
+            "tool_name": _SAFE_SIMULATION_TOOL,
+            "result_omitted": True,
+            "result_length": 0,
+            "network_indicator": False,
+            "direct_ip": False,
+            "delivery_indicator": False,
+            "sensitive_access": False,
+            "prompt_injection_indicator": False,
+            "malware_indicator": True,
+            "malware_signature": "skynet_fake_malware_test_string",
+            "rule_id": "EDR-MALWARE-001",
+        },
+        redacted_fields=[],
+        synchronous=True,
+    )
+    submitted = delivery_status in {"persisted", "duplicate", "spooled"}
+    return json.dumps(
+        {
+            "status": "simulated" if submitted else "failed",
+            "scenario": _SAFE_SIMULATION_SCENARIO,
+            "detection_signal": "submitted" if submitted else "not_submitted",
+            "delivery_status": delivery_status,
+            "sensitive_output": "[REDACTED:secret]",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def register(ctx: Any) -> None:
     """Register passive Hermes hooks."""
     _setup_logging().info("registering Skynet-EDR Hermes plugin hooks version=%s", PLUGIN_VERSION)
+    register_tool = getattr(ctx, "register_tool", None)
+    if callable(register_tool) and _enabled():
+        register_tool(
+            name=_SAFE_SIMULATION_TOOL,
+            toolset="skynet_edr",
+            schema={
+                "name": _SAFE_SIMULATION_TOOL,
+                "description": (
+                    "Run Skynet-EDR's fixed local-only malware-marker simulation. "
+                    "It emits one bounded local event and performs no external action."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario": {
+                            "type": "string",
+                            "enum": [_SAFE_SIMULATION_SCENARIO],
+                        }
+                    },
+                    "required": ["scenario"],
+                    "additionalProperties": False,
+                },
+            },
+            handler=_safe_detection_simulation,
+            is_async=False,
+            description="Fixed local-only Skynet-EDR detection simulation",
+            emoji="shield",
+        )
     ctx.register_hook("on_session_start", _safe_hook(_on_session_start))
     ctx.register_hook("on_session_end", _safe_hook(_on_session_end))
     ctx.register_hook("pre_llm_call", _safe_hook(_pre_llm_call))
@@ -290,6 +370,8 @@ def _pre_tool_call(*args: Any, **kwargs: Any) -> None:
 
 def _post_tool_call(*args: Any, **kwargs: Any) -> None:
     tool_name, params, result, tool_name_truncated = _extract_post_tool_call(args, kwargs)
+    if tool_name == _SAFE_SIMULATION_TOOL:
+        return
     params_classification = _bounded_selected_text(params, _PARAM_CLASSIFICATION_KEYS)
     params_classification["truncated"] = (
         params_classification["truncated"] or tool_name_truncated
@@ -324,6 +406,10 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
     if malware_signature:
         attrs["malware_signature"] = malware_signature
         attrs["rule_id"] = "EDR-MALWARE-001"
+    redacted_fields: list[dict[str, str]] = []
+    result_replacement = _redaction_replacement(result_strings)
+    if result_replacement is not None:
+        redacted_fields.append(_redacted_field("attributes.result_preview", result_replacement))
     _write_event(
         event_type="agent.tool.completed",
         source_kind=indicators["source_kind"],
@@ -332,6 +418,7 @@ def _post_tool_call(*args: Any, **kwargs: Any) -> None:
         title=f"Hermes tool completed: {tool_name}",
         attributes=attrs,
         artifact=artifact,
+        redacted_fields=redacted_fields,
     )
     if _completed_cron_schedule_mutation(tool_name, params, result, kwargs):
         _write_event(
@@ -435,6 +522,20 @@ def _reject_nonstandard_json_constant(_constant: str) -> None:
     raise ValueError("non-standard JSON constant")
 
 
+def _parse_ack(ack: bytearray) -> dict[str, Any] | None:
+    if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+        return None
+    try:
+        response = json.loads(
+            bytes(ack[:-1]),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (TypeError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+    return response if type(response) is dict else None
+
+
 def _write_event(
     *,
     event_id: str | None = None,
@@ -446,9 +547,10 @@ def _write_event(
     attributes: dict[str, Any],
     artifact: dict[str, Any] | None = None,
     redacted_fields: list[dict[str, str]] | None = None,
-) -> None:
+    synchronous: bool = False,
+) -> str:
     if not _enabled():
-        return
+        return "disabled"
     now = _now_ms()
     event_id = event_id or _event_id(event_type, now, attributes)
     redacted_fields = redacted_fields or []
@@ -481,55 +583,104 @@ def _write_event(
     if artifact is not None:
         event["artifact"] = artifact
     line = json.dumps(event, separators=(",", ":"), sort_keys=True)
-    _ensure_worker()
+    return _submit_line(line, synchronous=synchronous)
+
+
+def _submit_line(line: str, *, synchronous: bool) -> str:
+    if not _ensure_worker():
+        return "delivery_failed"
+    completion: queue.Queue[str] | None = queue.Queue(maxsize=1) if synchronous else None
     try:
-        _event_queue.put_nowait(line)
+        _event_queue.put_nowait(_DeliveryItem(line=line, completion=completion))
     except queue.Full:
         with _lock:
             _transport_counters["queue_drops"] += 1
+        return "delivery_failed"
+    _ensure_worker()
+    if completion is None:
+        return "queued"
+    timeout = min(
+        MAX_SYNC_DELIVERY_TIMEOUT_MS,
+        max(50, _safe_positive_int_env("SKYNET_EDR_SYNC_DELIVERY_TIMEOUT_MS", DEFAULT_SYNC_DELIVERY_TIMEOUT_MS)),
+    ) / 1000
+    try:
+        return completion.get(timeout=timeout)
+    except queue.Empty:
+        return "delivery_failed"
 
 
-def _ensure_worker() -> None:
+def _ensure_worker() -> bool:
     global _worker_started, _worker_thread
-    if _worker_started:
-        return
     with _worker_lock:
-        if _worker_started:
-            return
+        if _worker_thread is not None and _worker_thread.is_alive():
+            _worker_started = True
+            return True
+        _worker_started = False
+        if _worker_stop.is_set():
+            return False
         _worker_thread = threading.Thread(
             target=_transport_worker, name="skynet-edr-forwarder", daemon=True
         )
         _worker_thread.start()
         _worker_started = True
+        return True
 
 
 def _transport_worker() -> None:
-    _send_health_report()
-    idle_ticks = 0
-    while not _worker_stop.is_set():
-        try:
-            line = _event_queue.get(timeout=0.05)
-        except queue.Empty:
-            idle_ticks += 1
-            if idle_ticks >= 20:
-                _replay_fallback(max_records=16)
+    global _worker_started
+    try:
+        _send_health_report()
+        idle_ticks = 0
+        while not _worker_stop.is_set():
+            try:
+                item = _event_queue.get(timeout=0.05)
+            except queue.Empty:
+                idle_ticks += 1
+                if idle_ticks >= 20:
+                    _replay_fallback(max_records=16)
+                    _report_transport_counters()
+                    _send_health_report()
+                    idle_ticks = 0
+                continue
+            idle_ticks = 0
+            delivery_status = "delivery_failed"
+            try:
+                delivery_status = _deliver_line(item.line)
+                if delivery_status == "delivery_failed":
+                    with _lock:
+                        _transport_counters["queue_drops"] += 1
+            finally:
+                if item.completion is not None:
+                    try:
+                        item.completion.put_nowait(delivery_status)
+                    except queue.Full:
+                        pass
+                _event_queue.task_done()
                 _report_transport_counters()
                 _send_health_report()
-                idle_ticks = 0
-            continue
-        idle_ticks = 0
+    finally:
+        with _worker_lock:
+            if _worker_thread is threading.current_thread():
+                _worker_started = False
+
+
+def _deliver_line(line: str) -> str:
+    """Deliver or durably spool one line while preserving producer order."""
+    with _delivery_lock:
         try:
-            _replay_fallback(max_records=4)
-            if _fallback_has_pending():
-                _append_fallback(line)
-            else:
-                status = _send_frame(line)
-                if status not in {"persisted", "duplicate", "collision", "rejected_permanent"}:
-                    _append_fallback(line)
-        finally:
-            _event_queue.task_done()
-            _report_transport_counters()
-            _send_health_report()
+            if _replay_fallback(max_records=4) is None:
+                return "delivery_failed"
+            pending = _fallback_has_pending()
+            if pending is None:
+                return "delivery_failed"
+            if pending:
+                return "spooled" if _append_fallback(line) else "delivery_failed"
+            status = _send_frame(line)
+            if status in {"persisted", "duplicate", "collision", "rejected_permanent"}:
+                return status
+            return "spooled" if _append_fallback(line) else "delivery_failed"
+        except (OSError, UnicodeError, ValueError):
+            return "delivery_failed"
 
 
 def _report_transport_counters() -> None:
@@ -595,9 +746,9 @@ def _send_frame(line: str) -> str:
                 ack.extend(chunk)
                 if b"\n" in chunk:
                     break
-        if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+        response = _parse_ack(ack)
+        if response is None:
             return "retry_later"
-        response = json.loads(bytes(ack[:-1]))
         status = response.get("status")
         if (
             response.get("version") == 1
@@ -671,9 +822,9 @@ def _send_health_report() -> bool:
                 ack.extend(chunk)
                 if b"\n" in chunk:
                     break
-        if len(ack) > 4096 or not ack.endswith(b"\n") or ack.count(b"\n") != 1:
+        response = _parse_ack(ack)
+        if response is None:
             return False
-        response = json.loads(bytes(ack[:-1]))
         return response.get("version") == 1 and response.get("status") == "health_recorded"
     except (OSError, ValueError, json.JSONDecodeError):
         return False
@@ -683,12 +834,12 @@ def _append_fallback(line: str) -> bool:
     encoded_bytes = len(line.encode("utf-8")) + 1
     if encoded_bytes > MAX_INGEST_FRAME_BYTES + 1:
         return False
-    path = _spool_path()
-    _ensure_private_dir(path.parent)
-    configured_cap = _safe_positive_int_env("SKYNET_EDR_FALLBACK_MAX_BYTES", DEFAULT_FALLBACK_MAX_BYTES)
-    cap = min(configured_cap, MAX_FALLBACK_MAX_BYTES)
-    with _spool_state_lock():
-        try:
+    try:
+        path = _spool_path()
+        _ensure_private_dir(path.parent)
+        configured_cap = _safe_positive_int_env("SKYNET_EDR_FALLBACK_MAX_BYTES", DEFAULT_FALLBACK_MAX_BYTES)
+        cap = min(configured_cap, MAX_FALLBACK_MAX_BYTES)
+        with _spool_state_lock():
             current_size = path.stat().st_size if path.exists() else 0
             try:
                 checkpoint = min(_read_checkpoint(_checkpoint_path()), current_size)
@@ -709,17 +860,17 @@ def _append_fallback(line: str) -> bool:
             with _lock:
                 _transport_counters["fallback_records"] += 1
             return True
-        except OSError:
-            return False
+    except (OSError, UnicodeError, ValueError):
+        return False
 
 
-def _replay_fallback(*, max_records: int) -> int:
+def _replay_fallback(*, max_records: int) -> int | None:
     path = _spool_path()
-    with _spool_state_lock():
-        if not path.exists():
-            return 0
-        checkpoint = _checkpoint_path()
-        try:
+    try:
+        with _spool_state_lock():
+            if not path.exists():
+                return 0
+            checkpoint = _checkpoint_path()
             offset = _read_checkpoint(checkpoint)
             with _open_private_read(path) as handle:
                 size = os.fstat(handle.fileno()).st_size
@@ -738,20 +889,22 @@ def _replay_fallback(*, max_records: int) -> int:
                     offset = handle.tell()
                     _write_checkpoint(checkpoint, offset)
                     advanced += 1
-                return advanced
-        except (OSError, UnicodeDecodeError, ValueError):
-            return 0
+            return advanced
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
-def _fallback_has_pending() -> bool:
+def _fallback_has_pending() -> bool | None:
     path = _spool_path()
-    with _spool_state_lock():
-        try:
+    try:
+        with _spool_state_lock():
+            if not path.exists():
+                return False
             with _open_private_read(path) as handle:
                 size = os.fstat(handle.fileno()).st_size
             return _read_checkpoint(_checkpoint_path()) < size
-        except (OSError, ValueError):
-            return path.exists()
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def _setup_logging() -> logging.Logger:

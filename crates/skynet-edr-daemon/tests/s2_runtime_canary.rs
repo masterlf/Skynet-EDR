@@ -649,7 +649,7 @@ def stats(values):
  values=sorted(values);n=len(values);return {'sample_count':n,'p50':values[(n-1)//2],'p95':values[max(0,(95*n+99)//100-1)],'max':values[-1]}
 status_histogram=dict(collections.Counter(acks));normal_generated=generated;normal_enqueued=enqueued[0];normal_counters=dict(plugin._transport_counters);normal_backlog=plugin._event_queue.qsize()
 os.environ.update(SKYNET_EDR_STATE_DIR=str(fault_state),SKYNET_EDR_INGEST_SOCKET=fault_socket)
-plugin._ensure_worker=lambda:None;plugin._event_queue=queue.Queue(maxsize=1)
+plugin._ensure_worker=lambda:True;plugin._event_queue=queue.Queue(maxsize=1)
 fault_args={'event_type':'agent.session.started','source_kind':'sensor','trust_level':'sensor_observation','severity':'informational','title':'S2 fault queue probe','attributes':{'fault_probe':True}}
 orig_write(**fault_args);orig_write(**fault_args);plugin._event_queue.get_nowait()
 probe=copy.deepcopy(canonical[0]);probe_id='evt_s2_fault_collision';probe['event_id']=probe_id;probe['provenance']['source_event_id']=probe_id;probe['provenance']['span_id']=probe_id;probe['provenance']['trace_id']='s2-fault-collision';fault_line=json.dumps(probe,separators=(',',':'),sort_keys=True)

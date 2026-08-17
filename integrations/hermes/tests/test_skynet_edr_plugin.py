@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import os
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -105,9 +106,13 @@ class FakeResponse:
 class FakeContext:
     def __init__(self):
         self.hooks = {}
+        self.tools = {}
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
+
+    def register_tool(self, **kwargs):
+        self.tools[kwargs["name"]] = kwargs
 
 
 class SkynetEdrHermesPluginTests(unittest.TestCase):
@@ -287,6 +292,12 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             b'{"version":1,"event_id":"evt_other","status":"persisted"}\n',
             b'{"version":1,"status":"duplicate"}\n',
             b'{"version":1,"event_id":"evt_ack_expected","status":"persisted"}\ntrailing',
+            b'[]\n',
+            b'null\n',
+            b'"ack"\n',
+            b'1\n',
+            b'{"version":1,"version":1,"event_id":"evt_ack_expected","status":"persisted"}\n',
+            b'{"version":NaN,"event_id":"evt_ack_expected","status":"persisted"}\n',
         ]
         for ack in bad_acks:
             with self.subTest(ack=ack), patch.object(
@@ -301,6 +312,26 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
         collision = b'{"version":1,"event_id":"evt_ack_expected","status":"collision"}\n'
         with patch.object(self.plugin.socket, "socket", return_value=FakeSocket(collision)):
             self.assertEqual(self.plugin._send_frame(line), "collision")
+
+    def test_health_ack_requires_strict_json_object_root(self):
+        os.environ["SKYNET_EDR_PLUGIN_GENERATION"] = "a" * 64
+
+        class FakeSocket:
+            def __init__(self, ack): self.ack = ack
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def settimeout(self, _timeout): pass
+            def connect(self, _path): pass
+            def sendall(self, _payload): pass
+            def recv(self, _size):
+                ack, self.ack = self.ack, b""
+                return ack
+
+        for ack in (b'[]\n', b'null\n', b'"ack"\n', b'1\n', b'{"version":1,"version":1,"status":"health_recorded"}\n'):
+            with self.subTest(ack=ack), patch.object(
+                self.plugin.socket, "socket", return_value=FakeSocket(ack)
+            ):
+                self.assertFalse(self.plugin._send_health_report())
 
     def test_v3_event_transport_wraps_without_mutating_canonical_payload(self):
         os.environ["HERMES_RUNTIME_ROLE"] = "gateway"
@@ -590,6 +621,393 @@ class SkynetEdrHermesPluginTests(unittest.TestCase):
             },
         )
         self.assertTrue((self.state_dir / "skynet-edr-plugin.log").exists())
+
+    def test_registers_passive_hooks_when_optional_tool_api_is_absent(self):
+        class HookOnlyContext:
+            def __init__(self):
+                self.hooks = {}
+
+            def register_hook(self, name, callback):
+                self.hooks[name] = callback
+
+        ctx = HookOnlyContext()
+        self.plugin.register(ctx)
+        self.assertEqual(
+            set(ctx.hooks),
+            {
+                "on_session_start",
+                "on_session_end",
+                "pre_llm_call",
+                "pre_tool_call",
+                "post_tool_call",
+            },
+        )
+
+    def test_registers_zero_io_safe_detection_simulation_tool_and_redacts_result(self):
+        ctx = FakeContext()
+        self.plugin.register(ctx)
+
+        self.assertEqual(set(ctx.tools), {"skynet_edr_safe_detection_simulation"})
+        tool = ctx.tools["skynet_edr_safe_detection_simulation"]
+        self.assertEqual(tool["toolset"], "skynet_edr")
+        self.assertFalse(tool["is_async"])
+        self.assertEqual(
+            tool["schema"]["parameters"],
+            {
+                "type": "object",
+                "properties": {
+                    "scenario": {"type": "string", "enum": ["malware-marker"]}
+                },
+                "required": ["scenario"],
+                "additionalProperties": False,
+            },
+        )
+
+        with self.assertRaises(ValueError):
+            tool["handler"]({})
+        with self.assertRaises(ValueError):
+            tool["handler"]({"scenario": "malware-marker", "secret": "operator-input"})
+
+        args = {"scenario": "malware-marker"}
+        result = tool["handler"](args)
+        response = json.loads(result)
+        self.assertEqual(
+            response,
+            {
+                "detection_signal": "submitted",
+                "delivery_status": "spooled",
+                "scenario": "malware-marker",
+                "sensitive_output": "[REDACTED:secret]",
+                "status": "simulated",
+            },
+        )
+        self.assertNotIn("skynet_fake_malware_test_string_do_not_execute", result)
+        self.assertNotIn("FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE", result)
+        completed_before_post = [
+            event for event in self.read_events()
+            if event["event_type"] == "agent.tool.completed"
+        ]
+        self.assertEqual(
+            len(completed_before_post),
+            1,
+            "the handler must emit the safe event even without a post hook",
+        )
+        ctx.hooks["post_tool_call"](tool["name"], args, result)
+
+        events = self.read_events()
+        serialized = json.dumps(events, sort_keys=True)
+        self.assertNotIn("FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE", serialized)
+        completed = [event for event in events if event["event_type"] == "agent.tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertTrue(completed[0]["attributes"]["malware_indicator"])
+        self.assertEqual(completed[0]["attributes"]["rule_id"], "EDR-MALWARE-001")
+        self.assertFalse(completed[0]["redaction"]["contains_sensitive_data"])
+        self.assertEqual(completed[0]["redaction"]["redacted_fields"], [])
+        self.assertEqual(completed[0]["attributes"]["hook"], "post_tool_call")
+        self.assertEqual(completed[0]["attributes"]["result_length"], 0)
+        self.assertNotIn("result_preview", completed[0]["attributes"])
+
+    def test_safe_detection_reports_only_confirmed_delivery_outcomes(self):
+        accepted = {"persisted", "duplicate", "spooled"}
+        for outcome in sorted(
+            accepted | {"disabled", "collision", "rejected_permanent", "delivery_failed"}
+        ):
+            with self.subTest(outcome=outcome), patch.object(
+                self.plugin, "_write_event", return_value=outcome
+            ):
+                response = json.loads(
+                    self.plugin._safe_detection_simulation(
+                        {"scenario": "malware-marker"}
+                    )
+                )
+                self.assertEqual(response["delivery_status"], outcome)
+                if outcome in accepted:
+                    self.assertEqual(response["detection_signal"], "submitted")
+                    self.assertEqual(response["status"], "simulated")
+                else:
+                    self.assertEqual(response["detection_signal"], "not_submitted")
+                    self.assertEqual(response["status"], "failed")
+
+    def test_safe_detection_preserves_fifo_order_behind_real_pre_hook(self):
+        os.environ["SKYNET_EDR_PLUGIN_GENERATION"] = "a" * 64
+        socket_path = self.state_dir / "ordered.sock"
+        os.environ["SKYNET_EDR_INGEST_SOCKET"] = str(socket_path)
+        first_received = threading.Event()
+        release_first = threading.Event()
+        received = []
+
+        def server():
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(socket_path))
+                listener.listen(3)
+                for index in range(3):
+                    conn, _ = listener.accept()
+                    with conn:
+                        declared = int.from_bytes(conn.recv(4), "big")
+                        payload = bytearray()
+                        while len(payload) < declared:
+                            payload.extend(conn.recv(declared - len(payload)))
+                        envelope = json.loads(payload)
+                        event = envelope["event"]
+                        received.append(event["title"])
+                        if index == 0:
+                            first_received.set()
+                            self.assertTrue(release_first.wait(2))
+                        ack = json.dumps(
+                            {"version": 1, "event_id": event["event_id"], "status": "persisted"},
+                            separators=(",", ":"),
+                        ).encode() + b"\n"
+                        conn.sendall(ack)
+
+        listener_thread = threading.Thread(target=server, daemon=True)
+        listener_thread.start()
+        with patch.object(self.plugin, "_send_health_report", return_value=True):
+            self.plugin._write_event(
+                event_type="agent.session.started",
+                source_kind="sensor",
+                trust_level="sensor_observation",
+                severity="informational",
+                title="Busy predecessor",
+                attributes={"fake": True},
+            )
+            self.assertTrue(first_received.wait(2))
+            self.plugin._pre_tool_call(
+                "skynet_edr_safe_detection_simulation", {"scenario": "malware-marker"}
+            )
+            result = {}
+
+            def run_simulation():
+                result.update(
+                    json.loads(
+                        self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+                    )
+                )
+
+            simulation_thread = threading.Thread(target=run_simulation, daemon=True)
+            simulation_thread.start()
+            time.sleep(0.05)
+            release_first.set()
+            simulation_thread.join(timeout=3)
+            self.plugin._event_queue.join()
+        listener_thread.join(timeout=3)
+        self.assertFalse(simulation_thread.is_alive())
+        self.assertFalse(listener_thread.is_alive())
+        self.assertEqual(
+            received,
+            [
+                "Busy predecessor",
+                "Hermes tool requested: skynet_edr_safe_detection_simulation",
+                "Hermes safe detection simulation completed",
+            ],
+        )
+        self.assertEqual(result["delivery_status"], "persisted")
+        self.assertEqual(result["detection_signal"], "submitted")
+
+    def test_disabled_plugin_does_not_register_tool_or_claim_submission(self):
+        with patch.dict(os.environ, {"SKYNET_EDR_HERMES_PLUGIN_ENABLED": "0"}):
+            plugin = load_plugin()
+            ctx = FakeContext()
+            plugin.register(ctx)
+            self.assertNotIn("skynet_edr_safe_detection_simulation", ctx.tools)
+            response = json.loads(
+                plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(response["detection_signal"], "not_submitted")
+        self.assertEqual(response["delivery_status"], "disabled")
+        self.assertEqual(response["status"], "failed")
+
+    def test_synchronous_delivery_requires_ack_or_durable_fallback(self):
+        line = '{"event_id":"evt_delivery_contract"}'
+        terminal = {"persisted", "duplicate", "collision", "rejected_permanent"}
+        for outcome in terminal:
+            with self.subTest(outcome=outcome), patch.object(
+                self.plugin, "_replay_fallback"
+            ), patch.object(
+                self.plugin, "_fallback_has_pending", return_value=False
+            ), patch.object(
+                self.plugin, "_send_frame", return_value=outcome
+            ), patch.object(self.plugin, "_append_fallback") as append:
+                self.assertEqual(self.plugin._deliver_line(line), outcome)
+                append.assert_not_called()
+        for persisted, expected in [(True, "spooled"), (False, "delivery_failed")]:
+            with self.subTest(fallback_persisted=persisted), patch.object(
+                self.plugin, "_replay_fallback"
+            ), patch.object(
+                self.plugin, "_fallback_has_pending", return_value=False
+            ), patch.object(
+                self.plugin, "_send_frame", return_value="retry_later"
+            ), patch.object(
+                self.plugin, "_append_fallback", return_value=persisted
+            ):
+                self.assertEqual(self.plugin._deliver_line(line), expected)
+
+    def test_missing_identity_or_socket_is_success_only_after_durable_spool(self):
+        line = '{"event_id":"evt_transport_unavailable"}'
+        with patch.object(self.plugin, "_transport_identity", return_value=None):
+            self.assertEqual(self.plugin._deliver_line(line), "spooled")
+        self.assertTrue((self.state_dir / "events-v1.jsonl").exists())
+
+        isolated = self.state_dir / "socket-unavailable"
+        isolated.mkdir(mode=0o700)
+        with patch.dict(
+            os.environ,
+            {
+                "SKYNET_EDR_STATE_DIR": str(isolated),
+                "SKYNET_EDR_INGEST_SOCKET": str(isolated / "missing.sock"),
+            },
+        ), patch.object(
+            self.plugin, "_transport_identity", return_value=("a" * 64, "b" * 64)
+        ):
+            self.assertEqual(self.plugin._deliver_line(line), "spooled")
+        self.assertTrue((isolated / "events-v1.jsonl").exists())
+
+    def test_full_or_inaccessible_fallback_reports_delivery_failure(self):
+        with patch.dict(os.environ, {"SKYNET_EDR_FALLBACK_MAX_BYTES": "1"}), patch.object(
+            self.plugin, "_replay_fallback"
+        ), patch.object(
+            self.plugin, "_fallback_has_pending", return_value=False
+        ), patch.object(
+            self.plugin, "_send_frame", return_value="retry_later"
+        ):
+            full_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(full_response["detection_signal"], "not_submitted")
+        self.assertEqual(full_response["delivery_status"], "delivery_failed")
+        self.assertEqual(self.plugin._transport_counters["fallback_full"], 1)
+
+        fallback = self.state_dir / "events-v1.jsonl"
+        target = self.state_dir / "inaccessible-target"
+        target.write_text("", encoding="utf-8")
+        fallback.symlink_to(target)
+        with patch.object(self.plugin, "_replay_fallback"), patch.object(
+            self.plugin, "_fallback_has_pending", return_value=False
+        ), patch.object(self.plugin, "_send_frame", return_value="retry_later"):
+            inaccessible_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(inaccessible_response["detection_signal"], "not_submitted")
+        self.assertEqual(inaccessible_response["delivery_status"], "delivery_failed")
+        self.assertEqual(target.read_text(encoding="utf-8"), "")
+
+    def test_fallback_lock_and_parent_errors_return_typed_failure(self):
+        lock = self.state_dir / ".events-v1.jsonl.lock"
+        lock.symlink_to(lock.name)
+        with patch.object(self.plugin, "_send_frame", return_value="retry_later"):
+            lock_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(lock_response["detection_signal"], "not_submitted")
+        self.assertEqual(lock_response["delivery_status"], "delivery_failed")
+        lock.unlink()
+
+        with patch.dict(os.environ, {"SKYNET_EDR_STATE_DIR": "/proc/1"}), patch.object(
+            self.plugin, "_send_frame", return_value="retry_later"
+        ):
+            parent_response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(parent_response["detection_signal"], "not_submitted")
+        self.assertEqual(parent_response["delivery_status"], "delivery_failed")
+
+    def test_storage_error_does_not_kill_worker_and_dead_worker_restarts(self):
+        lock = self.state_dir / ".events-v1.jsonl.lock"
+        lock.symlink_to(lock.name)
+        with patch.object(self.plugin, "_send_frame", return_value="retry_later"):
+            self.plugin._write_event(
+                event_type="agent.session.started",
+                source_kind="sensor",
+                trust_level="sensor_observation",
+                severity="informational",
+                title="Storage failure liveness test",
+                attributes={"fake": True},
+            )
+            self.plugin._event_queue.join()
+        self.assertIsNotNone(self.plugin._worker_thread)
+        self.assertTrue(self.plugin._worker_thread.is_alive())
+        lock.unlink()
+
+        old_worker = self.plugin._worker_thread
+        with patch.object(threading, "excepthook"), patch.object(
+            self.plugin, "_deliver_line", side_effect=RuntimeError("test crash")
+        ):
+            self.plugin._event_queue.put_nowait(
+                self.plugin._DeliveryItem('{"event_id":"evt_worker_restart"}', None)
+            )
+            self.plugin._event_queue.join()
+            old_worker.join(timeout=2)
+        self.assertFalse(old_worker.is_alive())
+        self.plugin._ensure_worker()
+        self.assertIsNot(self.plugin._worker_thread, old_worker)
+        self.assertTrue(self.plugin._worker_thread.is_alive())
+
+    def test_safe_detection_handler_delivers_before_short_lived_worker_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "SKYNET_EDR_STATE_DIR": tmp,
+                    "SKYNET_EDR_PLUGIN_GENERATION": "a" * 64,
+                },
+            ):
+                plugin = load_plugin()
+                result = plugin._safe_detection_simulation({"scenario": "malware-marker"})
+                response = json.loads(result)
+                self.assertEqual(response["detection_signal"], "submitted")
+                self.assertEqual(response["delivery_status"], "spooled")
+                events_path = Path(tmp) / "events-v1.jsonl"
+                self.assertTrue(events_path.exists())
+                events = [json.loads(line) for line in events_path.read_text().splitlines()]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["attributes"]["rule_id"], "EDR-MALWARE-001")
+                self.assertEqual(events[0]["attributes"]["hook"], "post_tool_call")
+                self.assertEqual(events[0]["attributes"]["result_length"], 0)
+                self.assertFalse(events[0]["redaction"]["contains_sensitive_data"])
+                self.assertEqual(events[0]["redaction"]["redacted_fields"], [])
+                plugin._worker_stop.set()
+                plugin._worker_thread.join(timeout=2)
+
+    def test_safe_detection_fails_typed_when_worker_is_stopped(self):
+        self.plugin._worker_stop.set()
+        started = time.monotonic()
+        response = json.loads(
+            self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+        )
+        self.assertLess(time.monotonic() - started, 0.1)
+        self.assertEqual(response["delivery_status"], "delivery_failed")
+        self.assertEqual(response["detection_signal"], "not_submitted")
+
+    def test_safe_detection_fails_typed_when_ordered_queue_is_full(self):
+        with patch.object(self.plugin, "_ensure_worker", return_value=True):
+            for index in range(self.plugin._event_queue.maxsize):
+                self.plugin._event_queue.put_nowait(
+                    self.plugin._DeliveryItem(f'{{"event_id":"evt_full_{index}"}}', None)
+                )
+            response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+        self.assertEqual(response["delivery_status"], "delivery_failed")
+        self.assertEqual(response["detection_signal"], "not_submitted")
+        while not self.plugin._event_queue.empty():
+            self.plugin._event_queue.get_nowait()
+            self.plugin._event_queue.task_done()
+
+    def test_synchronous_worker_crash_notifies_failure_and_allows_restart(self):
+        with patch.object(threading, "excepthook"), patch.object(
+            self.plugin, "_send_health_report", return_value=True
+        ), patch.object(self.plugin, "_deliver_line", side_effect=RuntimeError("test crash")):
+            response = json.loads(
+                self.plugin._safe_detection_simulation({"scenario": "malware-marker"})
+            )
+            crashed_worker = self.plugin._worker_thread
+            crashed_worker.join(timeout=2)
+        self.assertEqual(response["delivery_status"], "delivery_failed")
+        self.assertEqual(response["detection_signal"], "not_submitted")
+        self.assertFalse(crashed_worker.is_alive())
+        self.assertFalse(self.plugin._worker_started)
+        self.assertTrue(self.plugin._ensure_worker())
+        self.assertIsNot(self.plugin._worker_thread, crashed_worker)
+        self.assertTrue(self.plugin._worker_thread.is_alive())
 
     def test_cron_create_and_update_emit_only_completed_schedule_mutations(self):
         ctx = FakeContext()

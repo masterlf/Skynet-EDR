@@ -1,13 +1,88 @@
 //! Canonical Skynet event envelope v0 regression tests.
 
 use skynet_edr_core::{
-    parse_canonical_event_json, serialize_canonical_event_json, ArtifactKind,
-    CanonicalEventEnvelope, EventSchemaVersion, RedactionReason, Severity, SourceKind, TrustLevel,
+    built_in_ai_agent_sequence_rules, parse_canonical_event_json, serialize_canonical_event_json,
+    ArtifactKind, CanonicalEventEnvelope, ContinuousIngestStatus, EventSchemaVersion, LocalStore,
+    RedactionReason, Severity, SourceKind, TrustLevel,
 };
+use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
 const FIXTURE: &str = include_str!("fixtures/canonical_event_v0.json");
 const HERMES_GOLDEN_JSONL: &str = include_str!("fixtures/hermes_agent_golden_events_v0.jsonl");
 const OPENCLAW_GOLDEN_JSONL: &str = include_str!("fixtures/openclaw_agent_golden_events_v0.jsonl");
+
+#[test]
+fn safe_simulation_python_producer_emits_a_rust_valid_canonical_event() {
+    let test_root = std::env::var_os("SKYNET_EDR_STATE_DIR")
+        .map(PathBuf::from)
+        .expect("SKYNET_EDR_STATE_DIR must be set to private test storage");
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock follows Unix epoch")
+        .as_nanos();
+    let state_dir = test_root.join(format!(
+        "safe-simulation-producer-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&state_dir).expect("private plugin state directory is created");
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../integrations/hermes/skynet-edr/__init__.py");
+    let script = r"
+import importlib.util
+import os
+spec = importlib.util.spec_from_file_location('skynet_edr_cross_language_test', os.environ['PLUGIN_PATH'])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module._safe_detection_simulation({'scenario': 'malware-marker'})
+";
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .env("PLUGIN_PATH", &plugin_path)
+        .env("SKYNET_EDR_STATE_DIR", &state_dir)
+        .env("SKYNET_EDR_HERMES_PLUGIN_ENABLED", "1")
+        .env("SKYNET_EDR_PLUGIN_GENERATION", "a".repeat(64))
+        .env(
+            "SKYNET_EDR_INGEST_SOCKET",
+            state_dir.join("missing-ingest.sock"),
+        )
+        .output()
+        .expect("Python plugin producer executes");
+    assert!(
+        output.status.success(),
+        "Python producer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let spool = fs::read_to_string(state_dir.join("events-v1.jsonl"))
+        .expect("synchronous producer writes a fallback event before returning");
+    let lines: Vec<_> = spool.lines().collect();
+    assert_eq!(lines.len(), 1, "safe simulation emits exactly one event");
+    let event = parse_canonical_event_json(lines[0])
+        .expect("Python-produced safe simulation event passes Rust validation");
+    assert_eq!(event.event_type, "agent.tool.completed");
+    assert_eq!(event.attributes["rule_id"], "EDR-MALWARE-001");
+    assert!(!event.redaction.contains_sensitive_data);
+    assert!(event.redaction.redacted_fields.is_empty());
+    let store =
+        LocalStore::open(state_dir.join("events.sqlite")).expect("cross-language test store opens");
+    let result = store
+        .commit_continuous_event(
+            "test:hermes-gateway",
+            &event,
+            &built_in_ai_agent_sequence_rules(),
+            128,
+        )
+        .expect("Python-produced event passes the daemon's continuous-ingestion contract");
+    assert_eq!(result.status, ContinuousIngestStatus::Persisted);
+    assert_eq!(result.opened_incidents, 1);
+    let incidents = store
+        .list_incidents()
+        .expect("incident list remains readable");
+    assert_eq!(incidents.len(), 1);
+    assert!(incidents[0].id.as_str().contains("EDR-MALWARE-001"));
+    drop(store);
+    fs::remove_dir_all(&state_dir).expect("cross-language test state is removed");
+}
 
 #[test]
 fn canonical_event_v0_fixture_round_trips_with_mandatory_security_metadata() {

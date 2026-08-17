@@ -1,12 +1,12 @@
 # Hermes Plugin Telemetry
 
-Skynet-EDR v0.7.0-alpha.1 ships a passive Hermes Agent plugin. The plugin is the preferred
+Skynet-EDR v0.7.0-alpha.2 ships a passive Hermes Agent plugin. The plugin is the preferred
 non-invasive live telemetry path for Hermes hosts.
 
 ## Positioning
 
 The plugin is a sensor, not an inline control point. It does not block, approve,
-rewrite, or delay Hermes actions in v0.7.0-alpha.1. Blocking/policy enforcement
+rewrite, or delay Hermes actions in v0.7.0-alpha.2. Blocking/policy enforcement
 remains a future guard-mode feature.
 
 ```text
@@ -62,7 +62,7 @@ hermes plugins enable skynet-edr
 
 ## Hooks
 
-The v0.7.0-alpha.1 plugin registers:
+The v0.7.0-alpha.2 plugin registers:
 
 | Hook | Purpose |
 |---|---|
@@ -156,7 +156,7 @@ The log rotates to `.1` when it exceeds `SKYNET_EDR_MAX_LOG_BYTES`.
 
 ## Detection limits
 
-The v0.7.0-alpha.1 plugin records indicators, not verdicts. Tool parameters and results are examined by a deterministic structured walker bounded to depth 4, 64 visited items/identities, 4,096 Unicode scalar values per string, and 16,384 examined scalar values per hook side. Only complete bounded strings under exact selected keys are classified; cycles, aliases, unsupported objects, and exceeded limits set `classification_truncated=true` without stringifying hostile objects. A negative indicator on a truncated event is not a safety claim.
+The v0.7.0-alpha.2 plugin records indicators, not verdicts. Tool parameters and results are examined by a deterministic structured walker bounded to depth 4, 64 visited items/identities, 4,096 Unicode scalar values per string, and 16,384 examined scalar values per hook side. Only complete bounded strings under exact selected keys are classified; cycles, aliases, unsupported objects, and exceeded limits set `classification_truncated=true` without stringifying hostile objects. A negative indicator on a truncated event is not a safety claim.
 
 `network_indicator` catches
 common egress forms such as `curl`, `wget`, URLs, `/dev/tcp`, `nc`, and `ncat`.

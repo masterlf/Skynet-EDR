@@ -2,7 +2,7 @@
 
 ## Audience and purpose
 
-This page is the public contract for the installable Skynet-EDR `v0.7.0-alpha.1` prerelease. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. Prerelease identity is not a production support commitment. Exact rule claims and scenario evidence remain in the [v0.6.0 protection matrix](PROTECTION_MATRIX_v0.6.0.md); this enrollment port does not widen rule coverage.
+This page is the public contract for the installable Skynet-EDR `v0.7.0-alpha.2` prerelease. It separates implemented behavior from package availability, adapter requirements, and roadmap intent. Prerelease identity is not a production support commitment. Exact rule claims and scenario evidence remain in the [v0.6.0 protection matrix](PROTECTION_MATRIX_v0.6.0.md); alpha.2 adds one real-host journey for an existing rule without widening the rule set.
 
 ## Product boundary
 
@@ -29,7 +29,8 @@ Published checksums provide integrity checking, but this prerelease has no packa
 | Hermes lifecycle plugin and authenticated AF_UNIX ingestion | Live producer | The only shipped live producer path. It is passive and depends on explicit local enrollment, producer-supplied facts, successful ingestion, and bounded queues/checkpoints. |
 | Autonomous Hermes enrollment | Exact-cell prerelease | The transaction fails closed outside Ubuntu 24.04 amd64/systemd, DEB, Hermes 0.20.0, and the default profile. `ENROLLED` requires an authorized complete user-manager restart, healthy protocol-v3 producer evidence, and a fresh committed attestation receipt; copied files or plugin-enable success are insufficient. |
 | `EDR-MCP-001`, `EDR-PI-001`, `EDR-MSG-001`, `EDR-NET-001`, `EDR-CRON-001` | Live, narrow | Exact Hermes producer shapes only; cron coverage is limited to authoritative successful built-in `cronjob` create/update outcomes. |
-| `EDR-EXFIL-001`, `EDR-MALWARE-001` | Live, narrow | Exact reviewed event shapes, joins, ordering, and bounded correlation only. Absence of an incident is not proof that an action was safe. |
+| `EDR-EXFIL-001` | Live, narrow | Exact reviewed event shapes, joins, ordering, and bounded correlation only. Absence of an incident is not proof that an action was safe. |
+| `EDR-MALWARE-001` | Live, narrow; one real-host simulation | A fixed Hermes plugin tool exercises the default deferred dispatcher, local AF_UNIX telemetry, correlation, API, and Risk Explorer. It accepts no arbitrary content, performs no arbitrary or external I/O, returns only a redacted status, and proves only the allowlisted malware-marker shape. |
 | Canonical JSONL from another producer and normalized Hermes trace import | Producer-dependent | The engine can evaluate documented input, but coverage exists only when an external producer supplies valid redacted events. |
 | OpenClaw, Codex, Claude Code, and similar runtimes | Producer-dependent or unsupported | No shipped live producer is provided for these runtimes. OpenClaw documentation is an adapter contract and fixture model, not a live integration. |
 | Read-only MCP handlers | Implemented handler surface, not a network server | The crate provides metadata and side-effect-free handlers; it does not start a networked MCP server. |
