@@ -42,6 +42,45 @@ jobs:
       - name: Run public install enrollment dispatch persistence and browser journey
         run: |
           set -o pipefail
+          # Temporary exception-only diagnostic; remove before a qualifying run.
+          sudo python3 - <<'PY'
+          from pathlib import Path
+          import sitecustomize
+          path = Path(sitecustomize.__file__)
+          assert path == Path('/usr/lib/python3.12/sitecustomize.py')
+          with path.open('a') as stream:
+              stream.write('''
+          def _skynet_journey_trace_install():
+              import os, sys, json
+              source = '/usr/libexec/skynet-edr/hermes-enrollment-adapter.py'
+              if not sys.argv or sys.argv[0] != source or os.geteuid() != 0:
+                  return
+              count = 0
+              def observe(frame, event, value):
+                  nonlocal count
+                  if frame.f_code.co_filename != source:
+                      return None
+                  frame.f_trace_lines = False
+                  if event == 'exception' and count < 100:
+                      count += 1
+                      error = value[1]
+                      category = getattr(error, 'category', None)
+                      if not isinstance(category, str) or not category.replace('_', '').isalpha() or len(category) > 50:
+                          category = None
+                      record = {'function': frame.f_code.co_name, 'line': frame.f_lineno,
+                                'exception': type(error).__name__, 'category': category}
+                      try:
+                          fd = os.open('/var/lib/skynet-public-journey/adapter-trace.jsonl',
+                                       os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                          os.write(fd, (json.dumps(record) + '\\n').encode())
+                          os.close(fd)
+                      except OSError:
+                          pass
+                  return observe
+              sys.settrace(observe)
+          _skynet_journey_trace_install()
+          ''')
+          PY
           sudo env PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
             timeout --signal=TERM --kill-after=20s 12m \
             bash packaging/scripts/public-live-journey.sh --disposable-host \
