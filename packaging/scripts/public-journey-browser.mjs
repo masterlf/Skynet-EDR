@@ -22,10 +22,10 @@ async function main() {
   stage = 'launch';
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ serviceWorkers: 'block' });
+  const page = await context.newPage();
+  const failures = [];
   try {
-    const failures = [];
     await installAuthenticatedOriginProxy(context, url, token, failures);
-    const page = await context.newPage();
     page.on('pageerror', () => failures.push('browser runtime error'));
     page.on('request', request => {
       if (new URL(request.url()).port === '8787') failures.push('direct daemon access');
@@ -54,14 +54,29 @@ async function main() {
         || detail.evidence[0].event_id !== binding.event_id) {
       throw new Error('browser response does not match persisted evidence');
     }
-    stage = 'rendered-evidence';
+    stage = 'rendered-panel';
     const panel = page.getByRole('region', { name: 'Malware-like content supplied to AI runtime' });
+    await panel.waitFor({ timeout: 30_000 });
+    stage = 'rendered-event';
     await panel.getByText(' · event ' + binding.event_id, { exact: false }).waitFor({ timeout: 30_000 });
+    stage = 'rendered-severity';
     await panel.getByText('High', { exact: true }).first().waitFor();
+    stage = 'browser-errors';
     const body = await page.locator('body').innerText();
     if (body.includes('FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE')) failures.push('redaction failure');
     if (failures.length) throw new Error('public journey browser validation failed');
     process.stdout.write('{"status":"PASS","same_event_rendered":true}\n');
+  } catch (error) {
+    // Fixed counts help distinguish host rendering from API contract failures.
+    process.stderr.write(JSON.stringify({
+      browser_stage: stage,
+      panel_count: await page.locator('#skynet-risk-detail-panel').count(),
+      event_visible_in_body: (await page.locator('body').innerText()).includes(binding.event_id),
+      invalid_detail_count: await page.getByText('The read-only backend did not return a valid risk detail.', { exact: true }).count(),
+      runtime_error_count: failures.filter(value => value === 'browser runtime error').length,
+      transport_error_count: failures.filter(value => value !== 'browser runtime error').length,
+    }) + '\n');
+    throw error;
   } finally {
     await context.close();
     await browser.close();
