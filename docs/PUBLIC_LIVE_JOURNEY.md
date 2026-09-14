@@ -48,7 +48,8 @@ The harness provisions `skynet-journey`, its canonical default Hermes profile,
 It installs the DEB, enables linger, and authorizes the enrollment adapter to
 stop/start that synthetic account's complete user manager. It rejects existing
 target accounts, paths, packages, and occupied ports. It must not run on an
-existing Hermes host or workstation.
+existing Hermes host or workstation. It sets `/home` to root-owned mode 0755
+and the new account's home to mode 0700 to satisfy the enrollment trust boundary.
 
 ## Run the journey
 
@@ -84,8 +85,9 @@ and browser binding. GitHub Actions retains only this verdict, with the test
 commit and run URL providing execution identity. A green run is integration
 evidence, not independent operator acceptance or broad detection effectiveness.
 
-A nonzero exit reports a fixed stage such as `enrollment`, `dispatch`,
-`persistence`, or `browser`. Private runtime output stays in root-owned mode-0700
+A nonzero exit reports a fixed stage such as `enrollment-check`, `dispatch`,
+`persistence`, or `browser`, plus allowlisted enrollment diagnostic codes.
+Private runtime output stays in root-owned mode-0700
 test storage. Bounded stored/API/session evidence and browser text are checked
 for the known forbidden synthetic marker; this does not prove universal
 redaction or test arbitrary secret-bearing input.

@@ -81,9 +81,14 @@ PY
 install -d -m 0700 "$lab"
 stage=provision
 dpkg --install "$deb" >"$lab/install.log" 2>&1
+# Hosted images can use group-writable home ancestors and account defaults.
+# This harness has already required a disposable host and an absent target.
+chown root:root /home
+chmod 0755 /home
 useradd --create-home --shell /bin/bash "$account"
 created_account=yes
 target_uid=$(id -u "$account")
+chmod 0700 "$target_home"
 install -d -o "$account" -g "$account" -m 0700 "$target_home/.hermes"
 cat >/usr/bin/hermes <<'SH'
 #!/bin/sh
