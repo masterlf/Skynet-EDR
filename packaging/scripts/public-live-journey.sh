@@ -210,14 +210,40 @@ curl --noproxy '*' --fail --silent --show-error --max-time 120 \
   --data '{"jsonrpc":"2.0","id":"public-journey","method":"message/send","params":{"message":{"role":"ROLE_USER","parts":[{"text":"Run the explicit Skynet-EDR safe detection simulation once.","mediaType":"text/plain"}],"messageId":"public-journey-safe-simulation"}}}' \
   http://127.0.0.1:9900/ >"$lab/dispatch.json"
 verify_chain() {
-  [[ "$(run_as systemctl --user show hermes-gateway.service --property=MainPID --value)" == "$gateway_pid" ]]
+  if [[ "$(run_as systemctl --user show hermes-gateway.service --property=MainPID --value)" != "$gateway_pid" ]]; then
+    printf '{"status":"FAIL","check":"gateway identity changed"}\n' >&2
+    return 1
+  fi
   python3 "$repo/packaging/scripts/public_journey_evidence.py" verify \
     --before "$lab/before.json" --dispatch "$lab/dispatch.json" \
     --session-db "$target_home/.hermes/state.db" --uid "$target_uid" \
     --generation "$generation" --gateway-pid "$gateway_pid"
 }
+wait_for_chain() {
+  local journey_readback_deadline=$((SECONDS + 30))
+  while true; do
+    if verify_chain >"$1" 2>"$lab/evidence-error.json"; then return; fi
+    # A persisted handler ACK can precede the following health report.
+    # Retry only health convergence, never enrollment, dispatch, or bad evidence.
+    if ((SECONDS >= journey_readback_deadline)) || ! python3 - "$lab/evidence-error.json" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1]))
+    assert value.get("check") in {
+        "ingestion health", "one healthy authenticated gateway source required"
+    }
+except (OSError, ValueError, AssertionError):
+    raise SystemExit(1)
+PY
+    then
+      cat "$lab/evidence-error.json" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
 stage=persistence
-verify_chain >"$lab/binding.json"
+wait_for_chain "$lab/binding.json"
 
 stage=browser
 session_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
@@ -232,7 +258,7 @@ for _ in $(seq 1 90); do
 done
 HERMES_DASHBOARD_SESSION_TOKEN="$session_token" node "$repo/packaging/scripts/public-journey-browser.mjs" \
   "$browser_runtime" "$lab/binding.json" >"$lab/browser.json"
-verify_chain >"$lab/final-binding.json"
+wait_for_chain "$lab/final-binding.json"
 cmp "$lab/binding.json" "$lab/final-binding.json"
 stage=complete
 printf '{"schema":"skynet.public-journey.v1","status":"PASS","package_sha256":"%s","hermes_commit":"%s","enrollment":"ENROLLED","rule_id":"EDR-MALWARE-001","incident_count":1,"live_ack":true,"browser_event_binding":true}\n' "$expected_sha" "$hermes_ref"

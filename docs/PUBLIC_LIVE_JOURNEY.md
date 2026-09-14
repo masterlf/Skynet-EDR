@@ -85,6 +85,9 @@ new event, durable receipt, authenticated gateway UID/PID and package generation
 exactly one high-severity incident, and its API evidence. The browser opens the
 same incident and renders the same event ID. The binding is checked again after
 browser inspection. No test inserts events/incidents or mocks the daemon API.
+Read-only health checks allow up to 30 seconds for the producer's next report
+after a persisted ACK. Incorrect evidence fails immediately; enrollment and the
+simulation are never retried within a run.
 
 ## Results and cleanup
 
