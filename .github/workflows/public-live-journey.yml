@@ -1,0 +1,54 @@
+name: Public live detection journey
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-journey:
+    name: Published DEB to live Hermes incident
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/skynet-public-journey-browsers
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify evidence checker regressions
+        run: python3 -m unittest discover -s packaging/tests -p test_public_journey_evidence.py
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.3'
+          enable-cache: false
+      - name: Prepare public dependencies and immutable release artifact
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus-user-session python3-venv
+          sudo git clone --depth 1 --branch v2026.8.3 https://github.com/NousResearch/hermes-agent.git /opt/skynet-journey-hermes
+          test "$(sudo git -C /opt/skynet-journey-hermes rev-parse HEAD)" = 3c27eb6234bf91b8ceee9e9071591b31e9b148cb
+          sudo "$(command -v uv)" sync --frozen --project /opt/skynet-journey-hermes --python /usr/bin/python3
+          npm ci --ignore-scripts --no-audit --no-fund --prefix packaging/browser-gate
+          npm exec --prefix packaging/browser-gate -- playwright install --with-deps chromium
+          curl --fail --location --proto '=https' --tlsv1.2 --output "$RUNNER_TEMP/skynet-edr.deb" \
+            https://github.com/masterlf/Skynet-EDR/releases/download/v0.7.0-alpha.2/skynet-edr_0.7.0-alpha.2_amd64.deb
+          printf '%s  %s\n' aca54b93ecea85f8b789d5d8600b5ae1554b1513089a6778a5253fc1e11eaee4 "$RUNNER_TEMP/skynet-edr.deb" | sha256sum -c -
+      - name: Run public install enrollment dispatch persistence and browser journey
+        run: |
+          set -o pipefail
+          sudo env PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=20s 12m \
+            bash packaging/scripts/public-live-journey.sh --disposable-host \
+              --deb "$RUNNER_TEMP/skynet-edr.deb" \
+              --hermes-repo /opt/skynet-journey-hermes \
+              --browser-runtime "$GITHUB_WORKSPACE/packaging/browser-gate" \
+            | tee "$RUNNER_TEMP/public-journey.json"
+      - name: Retain bounded public verdict
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-live-journey-verdict
+          path: ${{ runner.temp }}/public-journey.json
+          if-no-files-found: warn
+          retention-days: 30
