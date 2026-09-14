@@ -32,6 +32,7 @@ sudo git clone --depth 1 --branch v2026.8.3 \
 test "$(sudo git -C /opt/skynet-journey-hermes rev-parse HEAD)" = \
   3c27eb6234bf91b8ceee9e9071591b31e9b148cb
 sudo "$(command -v uv)" sync --frozen --project /opt/skynet-journey-hermes --python /usr/bin/python3
+sudo chmod -R go-w /opt/skynet-journey-hermes
 npm ci --ignore-scripts --no-audit --no-fund --prefix packaging/browser-gate
 export PLAYWRIGHT_BROWSERS_PATH=/tmp/skynet-public-journey-browsers
 npm exec --prefix packaging/browser-gate -- playwright install --with-deps chromium
