@@ -35,6 +35,9 @@ fixture_pid=""; dashboard_pid=""; target_uid=""; created_account=""
 finish() {
   result=$?
   trap - EXIT
+  if ((result != 0)) && [[ "$stage" == enrollment-apply ]]; then
+    timeout 40 python3 "$repo/packaging/scripts/public-journey-enrollment-probe.py" >&2 || true
+  fi
   [[ -z "$dashboard_pid" ]] || kill "$dashboard_pid" 2>/dev/null || true
   [[ -z "$fixture_pid" ]] || kill "$fixture_pid" 2>/dev/null || true
   if [[ "$created_account" == yes ]]; then
