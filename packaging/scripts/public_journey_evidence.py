@@ -17,7 +17,6 @@ MAX_ROWS = 256
 FORBIDDEN_MARKER = "FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE"
 SAFE_REPLY = "SKYNET_EDR_SAFE_DETECTION_OK"
 RULE = "EDR-MALWARE-001"
-TOOL = "skynet_edr_safe_detection_simulation"
 DB = Path("/var/lib/skynet-edr/skynet.sqlite")
 
 
@@ -198,13 +197,16 @@ def verify_chain(
         if row["event"]["id"] not in baseline_ids
         and row["event"].get("attributes", {}).get("event_type")
         == "agent.tool.completed"
-        and row["event"]["attributes"].get("tool_name") == TOOL
+        and row["event"]["attributes"].get("malware_signature")
+        == "skynet_fake_malware_test_string"
     ]
     require(len(completed) == 1, "one fresh simulation event required")
     event = completed[0]["event"]
     attrs = event["attributes"]
     require(
-        attrs.get("rule_id") == RULE
+        event.get("source", {}).get("kind") == "mcp_tool"
+        and attrs.get("tool_class") == "mcp"
+        and attrs.get("access_class") == "none"
         and attrs.get("malware_indicator") is True
         and attrs.get("result_omitted") is True,
         "simulation classification",

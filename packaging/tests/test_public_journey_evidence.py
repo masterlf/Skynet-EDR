@@ -70,10 +70,12 @@ class PublicJourneyEvidenceTests(unittest.TestCase):
         self.event = {
             "id": "evt_journey_test",
             "severity": "high",
+            "source": {"kind": "mcp_tool"},
             "attributes": {
                 "event_type": "agent.tool.completed",
-                "tool_name": "skynet_edr_safe_detection_simulation",
-                "rule_id": "EDR-MALWARE-001",
+                "tool_class": "mcp",
+                "access_class": "none",
+                "malware_signature": "skynet_fake_malware_test_string",
                 "malware_indicator": True,
                 "result_omitted": True,
             },
@@ -131,6 +133,14 @@ class PublicJourneyEvidenceTests(unittest.TestCase):
         result = self.verify()
         self.assertEqual(result["event_id"], self.event["id"])
         self.assertEqual(result["incident_id"], self.incident["id"])
+
+    def test_projection_matches_safe_marker_without_raw_tool_name_or_rule(self):
+        self.assertNotIn("tool_name", self.event["attributes"])
+        self.assertNotIn("rule_id", self.event["attributes"])
+        self.verify()
+        self.event["attributes"]["malware_signature"] = "eicar_test_string"
+        with self.assertRaises(ValueError):
+            self.verify()
 
     def test_old_incident_cannot_satisfy_new_dispatch(self):
         self.before = copy.deepcopy(self.after)
