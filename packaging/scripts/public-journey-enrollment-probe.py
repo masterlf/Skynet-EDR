@@ -54,16 +54,50 @@ for name in ("CONFIG", "DROPIN", "STATE_ROOT"):
         "parent-" + name,
         lambda name=name: adapter._trusted_parent(getattr(adapter, name)),
     )
-report("plugin-discovery", lambda: adapter._plugin_enabled(context))
+
+
+def plugin_discovery():
+    print(
+        json.dumps(
+            {"probe": "plugin-enabled", "enabled": adapter._plugin_enabled(context)}
+        )
+    )
+
+
+report("plugin-discovery", plugin_discovery)
 snapshot = adapter._scope(context) / "snapshot.json"
 if snapshot.is_file():
     value = json.loads(snapshot.read_text())
+    target = adapter.STATE_ROOT.parent / "targets" / snapshot.parent.name
+    observation = target / "observations.json"
+    action = (
+        json.loads(observation.read_text()).get("action")
+        if observation.is_file()
+        else None
+    )
+    print(
+        json.dumps(
+            {
+                "probe": "last-completed-action",
+                "action": action
+                if action in {"prepare", "enable", "attest"}
+                else "none",
+            }
+        )
+    )
+    current = adapter._snapshot_sha256(
+        adapter._read_regular_snapshot(context["home"] / "config.yaml")
+    )
     print(
         json.dumps(
             {
                 "probe": "preparation-progress",
                 "config_contract_saved": "enabled_hermes_config_sha256" in value,
                 "attestation_saved": "attestation" in value,
+                "enabled_config_matches": current
+                == value.get("enabled_hermes_config_sha256"),
+                "disabled_config_matches": current
+                == value.get("disabled_hermes_config_sha256"),
             },
             sort_keys=True,
         )
