@@ -153,6 +153,12 @@ if snapshot.is_file():
                     "mode_equal": actual["mode"] == expected["mode"],
                     "uid_equal": actual["uid"] == expected["uid"],
                     "gid_equal": actual["gid"] == expected["gid"],
+                    "baseline_mode": value["hermes_config"]["mode"],
+                    "actual_mode": actual["mode"],
+                    "baseline_uid_matches": actual["uid"]
+                    == value["hermes_config"]["uid"],
+                    "baseline_gid_matches": actual["gid"]
+                    == value["hermes_config"]["gid"],
                     "different_sections": sorted(
                         key
                         for key in roots

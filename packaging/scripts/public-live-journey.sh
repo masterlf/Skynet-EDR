@@ -181,6 +181,9 @@ enroll() {
     --adapter /usr/libexec/skynet-edr/hermes-enrollment-adapter.py
 }
 stage=enrollment-check
+# Hermes' enable command secures this file to 0600; establish that baseline
+# before the adapter predicts an exact configuration-and-metadata fingerprint.
+chmod 0600 "$target_home/.hermes/config.yaml"
 stat --printf='journey path mode=%a uid=%u path=%n\n' \
   /home "$target_home" "$target_home/.hermes" /usr /usr/share /usr/share/skynet-edr \
   /usr/share/skynet-edr/hermes-plugin /usr/share/skynet-edr/hermes-plugin/skynet-edr >&2
