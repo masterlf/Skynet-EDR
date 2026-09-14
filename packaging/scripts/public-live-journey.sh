@@ -35,10 +35,6 @@ fixture_pid=""; dashboard_pid=""; target_uid=""; created_account=""
 finish() {
   result=$?
   trap - EXIT
-  if ((result != 0)) && [[ "$stage" == enrollment-apply ]]; then
-    [[ ! -f "$lab/adapter-trace.jsonl" ]] || cat "$lab/adapter-trace.jsonl" >&2
-    timeout 40 "$hermes_repo/.venv/bin/python" "$repo/packaging/scripts/public-journey-enrollment-probe.py" >&2 || true
-  fi
   [[ -z "$dashboard_pid" ]] || kill "$dashboard_pid" 2>/dev/null || true
   [[ -z "$fixture_pid" ]] || kill "$fixture_pid" 2>/dev/null || true
   if [[ "$created_account" == yes ]]; then
@@ -156,6 +152,10 @@ Environment=SKYNET_EDR_SPIKE_KEY=skynet-edr-fake-key-not-valid
 Environment=PYTHONDONTWRITEBYTECODE=1
 UNIT
 chown -R "$account:$account" "$target_home/.config/systemd/user/hermes-gateway.service.d"
+# This Hermes unit needs an explicit link to the authoritative global drop-in.
+# Enrollment creates and replaces the root-owned target; never copy its values.
+ln -s /etc/systemd/user/hermes-gateway.service.d/50-skynet-edr.conf \
+  "$target_home/.config/systemd/user/hermes-gateway.service.d/50-skynet-edr.conf"
 run_as systemctl --user daemon-reload
 run_as systemctl --user restart hermes-gateway.service
 for _ in $(seq 1 60); do
@@ -185,9 +185,6 @@ stage=enrollment-check
 # Hermes' enable command secures this file to 0600; establish that baseline
 # before the adapter predicts an exact configuration-and-metadata fingerprint.
 chmod 0600 "$target_home/.hermes/config.yaml"
-stat --printf='journey path mode=%a uid=%u path=%n\n' \
-  /home "$target_home" "$target_home/.hermes" /usr /usr/share /usr/share/skynet-edr \
-  /usr/share/skynet-edr/hermes-plugin /usr/share/skynet-edr/hermes-plugin/skynet-edr >&2
 if enroll check >"$lab/check.json"; then exit 1; fi
 python3 - "$lab/check.json" <<'PY'
 import json, sys
@@ -234,7 +231,7 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 HERMES_DASHBOARD_SESSION_TOKEN="$session_token" node "$repo/packaging/scripts/public-journey-browser.mjs" \
-  "$browser_runtime" "$lab/binding.json" >"$lab/browser.json" 2>"$lab/browser-error.log"
+  "$browser_runtime" "$lab/binding.json" >"$lab/browser.json"
 verify_chain >"$lab/final-binding.json"
 cmp "$lab/binding.json" "$lab/final-binding.json"
 stage=complete

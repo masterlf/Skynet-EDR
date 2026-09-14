@@ -4,6 +4,8 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { installAuthenticatedOriginProxy } from './hermes-browser-origin-proxy.mjs';
 
+let stage = 'inputs';
+async function main() {
 const [runtime, bindingPath] = process.argv.slice(2);
 const token = process.env.HERMES_DASHBOARD_SESSION_TOKEN;
 const url = 'http://127.0.0.1:9119/skynet-edr/risks';
@@ -17,6 +19,7 @@ if (binding.rule_id !== 'EDR-MALWARE-001' || !/^inc:EDR-MALWARE-001:[a-f0-9]{64}
 }
 const require = createRequire(join(runtime, 'package.json'));
 const { chromium } = require('playwright');
+stage = 'launch';
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ serviceWorkers: 'block' });
 try {
@@ -27,13 +30,17 @@ try {
   page.on('request', request => {
     if (new URL(request.url()).port === '8787') failures.push('direct daemon access');
   });
+  stage = 'navigation';
   await page.goto(url, { waitUntil: 'networkidle', timeout: 60_000 });
+  stage = 'health';
   await page.getByText('Engine Online', { exact: true }).waitFor({ timeout: 30_000 });
   await page.getByText('Telemetry healthy', { exact: false }).waitFor({ timeout: 30_000 });
+  stage = 'risk-list';
   const list = page.getByRole('list', { name: 'Current page risk list' });
   const row = list.getByRole('button').filter({ hasText: 'Detection rule EDR-MALWARE-001' });
   await row.waitFor({ timeout: 30_000 });
   if (await row.count() !== 1) throw new Error('expected one rendered simulation incident');
+  stage = 'risk-detail';
   const responsePromise = page.waitForResponse(response => {
     const target = new URL(response.url());
     return target.origin === new URL(url).origin
@@ -47,6 +54,7 @@ try {
       || detail.evidence[0].event_id !== binding.event_id) {
     throw new Error('browser response does not match persisted evidence');
   }
+  stage = 'rendered-evidence';
   const panel = page.getByRole('region', { name: 'Malware-like content supplied to AI runtime' });
   await panel.getByText(' · event ' + binding.event_id, { exact: false }).waitFor({ timeout: 30_000 });
   await panel.getByText('High', { exact: true }).first().waitFor();
@@ -58,3 +66,9 @@ try {
   await context.close();
   await browser.close();
 }
+}
+await main().catch(() => {
+  // Never publish browser exceptions, response bodies, or the session token.
+  process.stderr.write(JSON.stringify({ status: 'FAIL', browser_stage: stage }) + '\n');
+  process.exitCode = 1;
+});
