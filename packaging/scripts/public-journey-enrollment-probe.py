@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Disposable-host diagnostics after a failed package-owned enrollment only."""
 
+import base64
 import importlib.util
 import json
 import os
 import pwd
 from pathlib import Path
+
+import yaml
 
 assert os.geteuid() == 0
 spec = importlib.util.spec_from_file_location(
@@ -104,7 +107,60 @@ if snapshot.is_file():
     )
     # The packaged helper uses a temporary Hermes home for CLI round-trip checks.
     # This probe never applies configuration or restarts a service.
+    captured = []
+    original_read = adapter._read_regular_snapshot
+
+    def capture_temporary_snapshot(path):
+        result = original_read(path)
+        if (
+            str(path).startswith("/run/.skynet-edr-hermes-contract.")
+            and path.name == "config.yaml"
+        ):
+            captured.append(result)
+        return result
+
+    adapter._read_regular_snapshot = capture_temporary_snapshot
     report(
         "temporary-config-round-trip",
         lambda: adapter._expected_config_contract(context, value["hermes_config"]),
     )
+    adapter._read_regular_snapshot = original_read
+    if captured:
+        actual = original_read(context["home"] / "config.yaml")
+        expected = captured[0]
+        actual_yaml = yaml.safe_load(base64.b64decode(actual["data"]))
+        expected_yaml = yaml.safe_load(base64.b64decode(expected["data"]))
+        roots = {
+            "model",
+            "providers",
+            "plugins",
+            "gateway",
+            "platform_toolsets",
+            "agent",
+            "terminal",
+            "security",
+            "privacy",
+            "_config_version",
+            "compression",
+            "auxiliary",
+        }
+        print(
+            json.dumps(
+                {
+                    "probe": "configuration-difference",
+                    "bytes_equal": actual["data"] == expected["data"],
+                    "yaml_equal": actual_yaml == expected_yaml,
+                    "mode_equal": actual["mode"] == expected["mode"],
+                    "uid_equal": actual["uid"] == expected["uid"],
+                    "gid_equal": actual["gid"] == expected["gid"],
+                    "different_sections": sorted(
+                        key
+                        for key in roots
+                        if actual_yaml.get(key) != expected_yaml.get(key)
+                    ),
+                    "temporary_home_in_expected": b"/run/.skynet-edr-hermes-contract."
+                    in base64.b64decode(expected["data"]),
+                },
+                sort_keys=True,
+            )
+        )

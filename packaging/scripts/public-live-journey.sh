@@ -36,7 +36,7 @@ finish() {
   result=$?
   trap - EXIT
   if ((result != 0)) && [[ "$stage" == enrollment-apply ]]; then
-    timeout 40 python3 "$repo/packaging/scripts/public-journey-enrollment-probe.py" >&2 || true
+    timeout 40 "$hermes_repo/.venv/bin/python" "$repo/packaging/scripts/public-journey-enrollment-probe.py" >&2 || true
   fi
   [[ -z "$dashboard_pid" ]] || kill "$dashboard_pid" 2>/dev/null || true
   [[ -z "$fixture_pid" ]] || kill "$fixture_pid" 2>/dev/null || true
