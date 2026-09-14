@@ -1,86 +1,73 @@
-# Quickstart
+# Quickstart: see a real Hermes incident
 
-This page is the shortest local path from package/source checkout to a verified Skynet-EDR MVP baseline.
+The supported evaluation cell is **Ubuntu 24.04 amd64, systemd, the native DEB,
+Hermes 0.20.0, and the default profile**. Skynet-EDR is passive: the simulation
+records an incident; it does not block an agent action.
 
-For full package-manager commands, checksums, upgrades, and uninstall steps, use [Install](INSTALL.md). For operator posture after first boot, use [Operations](OPERATIONS.md).
+## Run the complete demonstration
 
-## Prerequisites
+Follow [Public live detection journey](PUBLIC_LIVE_JOURNEY.md) on a fresh
+disposable VM with no credentials. The public harness installs the released
+DEB, provisions a synthetic Hermes account, uses the package-owned enrollment
+transaction, runs the safe simulation through the real gateway dispatcher, and
+opens its incident in Risk Explorer. Model responses come from a loopback
+fixture; no model account or API key is needed.
 
-- Linux `amd64` for the current packaged MVP.
-- A release package from `https://github.com/masterlf/Skynet-EDR/releases`, or a Rust toolchain for source builds.
-- A local shell with permission to install packages if testing `.deb`, `.rpm`, Arch, or service integration.
-- Fake test data only. Do not use real secrets, live customer data, or real exfiltration targets in lab verification.
+The same commands run in the **Public live detection journey** workflow. The
+harness rejects an existing Hermes launcher, test account, installed package,
+occupied service ports, or previous test state. It creates and restarts a
+dedicated user's complete systemd manager. Use only a disposable host that you
+are authorized to provision.
 
-## Install or build
+A successful verdict contains:
 
-### Option A: release package
-
-1. Download the package for your distribution from GitHub Releases.
-2. Verify checksums as described in [Install](INSTALL.md#download-release-packages).
-3. Install using the package-specific section in [Install](INSTALL.md):
-   - [Debian/Ubuntu/Mint](INSTALL.md#install-from-deb-on-ubuntu-debian-or-mint)
-   - [RHEL-compatible/Fedora](INSTALL.md#install-from-rpm-on-rhel-compatible-linux-or-fedora)
-   - [Arch Linux](INSTALL.md#install-on-arch-linux)
-   - [Custom tarball](INSTALL.md#custom-unpackaged-install)
-
-### Option B: source checkout
-
-```bash
-cargo build --workspace --all-features
-cargo test --workspace --all-features
+```json
+{
+  "schema": "skynet.public-journey.v1",
+  "status": "PASS",
+  "enrollment": "ENROLLED",
+  "rule_id": "EDR-MALWARE-001",
+  "incident_count": 1,
+  "live_ack": true,
+  "browser_event_binding": true
+}
 ```
 
-The main CLI binary is `skynet-edr` from `skynet-edr-cli`; release packages install it on `PATH`.
+The actual verdict also records the DEB SHA-256 and Hermes commit. An old incident
+or fallback-only submission fails the test.
 
-## Initialize and inspect local state
+## Understand the incident
 
-Use the CLI storage commands documented in [Local storage and CLI](LOCAL_STORAGE.md):
+Risk Explorer displays **Malware-like content supplied to AI runtime** with
+rule `EDR-MALWARE-001`, severity **High**, and one evidence event. The test opens
+that row and checks its event identifier against SQLite and the authenticated
+Hermes API response.
 
-```bash
-skynet-edr status
-skynet-edr store init
-skynet-edr events list --limit 5
-skynet-edr incidents list --limit 5
-```
+This proves one allowlisted safe-marker journey. It does not measure general
+malware or prompt-injection detection, and it does not widen the other six
+rules' evidence level. See the [support contract](MVP_SUPPORT_MATRIX.md) and
+[protection matrix](PROTECTION_MATRIX_v0.6.0.md).
 
-Expected first-run behavior is boring: no incidents unless you ingest fixtures or run a lab scenario. Boring is good. Boring pays fewer incident-response invoices.
+## Evaluate an existing Hermes installation
 
-## Ingest a redacted event fixture
+For an existing supported host, use [Install](INSTALL.md) and
+[Fail-closed Hermes enrollment](HERMES_ENROLLMENT.md). Review the enrollment
+request and account-wide user-manager restart impact before applying it. The
+disposable harness is not an installer for an existing account.
 
-The canonical event schema fixture is documented in [Canonical event schema](EVENT_SCHEMA.md#fixtures). From a source checkout, run:
+After enrollment, check `/api/status` and the gateway producer's fresh protocol-v3
+health. A running daemon alone does not prove that Hermes telemetry arrives.
+Use [Operations](OPERATIONS.md) for degraded health and diagnostics.
 
-```bash
-cargo test -p skynet-edr-core --test canonical_event_schema
-```
-
-For Hermes trace ingestion, use the workflow in [Hermes event ingestion](HERMES_EVENT_INGESTION.md#cli-usage). The ingestion path must preserve provenance, trust level, and redaction metadata.
-
-## Run the read-only visibility surfaces
-
-- CLI inspection: [Local storage and CLI](LOCAL_STORAGE.md#event-inspection-commands)
-- Local HTTP visibility: [Local read-only HTTP API and console](LOCAL_HTTP_API.md#initial-routes)
-- MCP handler-library contract (not an operator-runnable Hermes integration): [Read-only MCP integration](MCP_READ_ONLY.md#tools)
-
-These surfaces are read-only in the current MVP. They should expose redacted evidence and metadata, not become a remote-control plane.
-
-## Verify documentation and quality gates
+## Development and offline checks
 
 ```bash
 python3 packaging/scripts/check-docs.py
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+python3 packaging/scripts/threat-validation.py
 ```
 
-If packaging files changed, also run:
-
-```bash
-packaging/scripts/validate-packaging.sh
-```
-
-## Next reads
-
-- Product model: [Concepts](CONCEPTS.md)
-- System shape: [Architecture](ARCHITECTURE.md)
-- Detection model: [Detections](DETECTIONS.md)
-- Safe lab validation: [Linux lab testing](LINUX_LAB_TESTING.md)
+These checks complement the real journey; unit fixtures do not establish live
+enrollment, gateway dispatch, or browser rendering.
