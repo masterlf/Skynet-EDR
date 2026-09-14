@@ -66,7 +66,7 @@ trap 'exit 1' TERM INT
 [[ ! -e "$target_home" && ! -L "$target_home" ]]
 ! getent passwd "$account" >/dev/null
 ! dpkg-query -W -f='${db:Status-Abbrev}' skynet-edr 2>/dev/null | grep -q '^ii '
-for directory in /opt /opt/skynet-journey-hermes; do
+for directory in /opt /opt/skynet-journey-hermes /usr/share; do
   [[ "$(stat -c %u "$directory")" == 0 ]]
   [[ -z "$(find "$directory" -maxdepth 0 -perm /022 -print)" ]]
 done

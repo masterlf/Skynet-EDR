@@ -25,8 +25,8 @@ installer action and version. From the Skynet-EDR repository:
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends git curl dbus-user-session python3-venv
 # Required launcher trust boundary; change only on this disposable VM.
-sudo chown root:root /opt
-sudo chmod 0755 /opt
+sudo chown root:root /opt /usr/share
+sudo chmod 0755 /opt /usr/share
 sudo git clone --depth 1 --branch v2026.8.3 \
   https://github.com/NousResearch/hermes-agent.git /opt/skynet-journey-hermes
 test "$(sudo git -C /opt/skynet-journey-hermes rev-parse HEAD)" = \
