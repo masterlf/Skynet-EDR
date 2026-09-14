@@ -48,7 +48,7 @@ try {
     throw new Error('browser response does not match persisted evidence');
   }
   const panel = page.getByRole('region', { name: 'Malware-like content supplied to AI runtime' });
-  await panel.getByText(binding.event_id, { exact: true }).waitFor({ timeout: 30_000 });
+  await panel.getByText(' · event ' + binding.event_id, { exact: false }).waitFor({ timeout: 30_000 });
   await panel.getByText('High', { exact: true }).first().waitFor();
   const body = await page.locator('body').innerText();
   if (body.includes('FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE')) failures.push('redaction failure');

@@ -29,6 +29,7 @@ readonly lab=/var/lib/skynet-public-journey
 readonly account=skynet-journey
 readonly target_home=/home/skynet-journey
 stage=preflight
+error_line=0
 fixture_pid=""; dashboard_pid=""; target_uid=""; created_account=""
 
 finish() {
@@ -40,12 +41,13 @@ finish() {
     systemctl stop "user@${target_uid}.service" skynet-edr.service >/dev/null 2>&1 || true
   fi
   if ((result != 0)); then
-    printf '{"schema":"skynet.public-journey.v1","status":"FAIL","stage":"%s"}\n' "$stage"
+    printf '{"schema":"skynet.public-journey.v1","status":"FAIL","stage":"%s","line":%s}\n' "$stage" "$error_line"
   fi
   # Preserve private evidence and enrollment recovery state; discard the VM after inspection.
   exit "$result"
 }
 trap finish EXIT
+trap 'error_line=$LINENO' ERR
 trap 'exit 1' TERM INT
 
 [[ "$(. /etc/os-release; printf '%s:%s' "$ID" "$VERSION_ID")" == ubuntu:24.04 ]]
@@ -158,13 +160,15 @@ enroll() {
     --observations /var/lib/skynet-edr-hermes-enrollment/observations.json \
     --adapter /usr/libexec/skynet-edr/hermes-enrollment-adapter.py
 }
-stage=enrollment
+stage=enrollment-check
 if enroll check >"$lab/check.json"; then exit 1; fi
 python3 - "$lab/check.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1]))["state"] == "ABSENT"
 PY
+stage=enrollment-apply
 enroll apply >"$lab/apply.json"
+stage=enrollment-verify
 enroll verify >"$lab/verify.json"
 python3 - "$lab/apply.json" "$lab/verify.json" <<'PY'
 import json, sys
