@@ -41,6 +41,12 @@ finish() {
     systemctl stop "user@${target_uid}.service" skynet-edr.service >/dev/null 2>&1 || true
   fi
   if ((result != 0)); then
+    for verb in check apply verify; do
+      if [[ -f "$lab/$verb.json" ]]; then
+        python3 "$repo/packaging/scripts/public_journey_evidence.py" enrollment-diagnostic \
+          --enrollment-result "$lab/$verb.json" >&2 || true
+      fi
+    done
     printf '{"schema":"skynet.public-journey.v1","status":"FAIL","stage":"%s","line":%s}\n' "$stage" "$error_line"
   fi
   # Preserve private evidence and enrollment recovery state; discard the VM after inspection.

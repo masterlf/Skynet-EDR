@@ -26,6 +26,48 @@ def require(condition: bool, category: str) -> None:
         raise ValueError(category)
 
 
+def enrollment_diagnostic(value: dict) -> dict:
+    """Expose only fixed enrollment codes, never private paths or payloads."""
+    states = {
+        "ABSENT",
+        "DRIFTED",
+        "ENROLLED",
+        "DEGRADED",
+        "RELOAD_REQUIRED",
+        "ROLLBACK_REQUIRED",
+        "MANUAL_RECOVERY_REQUIRED",
+    }
+    categories = {
+        "invalid_input",
+        "identity",
+        "root_denied",
+        "ownership",
+        "untrusted_ancestor",
+        "untrusted_path",
+        "unsupported_contract",
+        "authorization",
+        "payload_identity",
+        "invalid_target",
+        "untrusted_runtime",
+        "internal_failure",
+        "enrollment_state",
+        "adapter_failure",
+        "unsupported_layout",
+        "observation_failure",
+        "installed_state",
+        "enablement",
+        "reload_boundary",
+        "producer_health",
+        "active_transaction",
+    }
+    return {
+        "state": value.get("state") if value.get("state") in states else "unknown",
+        "category": value.get("category")
+        if value.get("category") in categories
+        else "unknown",
+    }
+
+
 def reject_duplicate_keys(pairs: list) -> dict:
     result = {}
     for key, value in pairs:
@@ -261,7 +303,8 @@ def verify_session(path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("snapshot", "verify"))
+    parser.add_argument("mode", choices=("snapshot", "verify", "enrollment-diagnostic"))
+    parser.add_argument("--enrollment-result", type=Path)
     parser.add_argument("--before", type=Path)
     parser.add_argument("--dispatch", type=Path)
     parser.add_argument("--session-db", type=Path)
@@ -270,6 +313,14 @@ def main() -> int:
     parser.add_argument("--gateway-pid", type=int)
     args = parser.parse_args()
     try:
+        if args.mode == "enrollment-diagnostic":
+            print(
+                json.dumps(
+                    enrollment_diagnostic(read_json(args.enrollment_result)),
+                    sort_keys=True,
+                )
+            )
+            return 0
         after = read_snapshot()
         if args.mode == "snapshot":
             require(after["incidents"] == [], "baseline must contain no incidents")

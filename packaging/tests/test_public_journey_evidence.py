@@ -17,6 +17,24 @@ SPEC.loader.exec_module(journey)
 
 
 class PublicJourneyEvidenceTests(unittest.TestCase):
+    def test_enrollment_diagnostics_only_report_known_public_codes(self):
+        self.assertEqual(
+            journey.enrollment_diagnostic(
+                {"state": "DRIFTED", "category": "ownership"}
+            ),
+            {"state": "DRIFTED", "category": "ownership"},
+        )
+        self.assertEqual(
+            journey.enrollment_diagnostic(
+                {
+                    "state": journey.FORBIDDEN_MARKER,
+                    "category": "private_value",
+                    "raw": "hidden",
+                }
+            ),
+            {"state": "unknown", "category": "unknown"},
+        )
+
     def setUp(self):
         self.source = {
             "source_id": "uid:1234:gateway:" + "a" * 64 + ":" + "b" * 64,
