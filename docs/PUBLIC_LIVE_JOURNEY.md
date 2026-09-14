@@ -50,12 +50,11 @@ stop/start that synthetic account's complete user manager. It rejects existing
 target accounts, paths, packages, and occupied ports. It must not run on an
 existing Hermes host or workstation. It sets `/home` to root-owned mode 0755
 and the new account's home to mode 0700 to satisfy the enrollment trust boundary.
-The synthetic user's unit explicitly links to the root-owned enrollment drop-in
-at `/etc/systemd/user/hermes-gateway.service.d/50-skynet-edr.conf`. This is required
-for this Hermes installation to load the managed settings. The released adapter's
-manager-environment fallback alone failed its unit-environment read-back in the
-public test. The harness does not change the adapter or its attestation checks;
-this extra service wiring is part of the tested installation contract.
+It also pre-creates `/etc/systemd/user/hermes-gateway.service.d` as root-owned
+mode 0755. The adapter's directory creation honors the caller's umask; with this
+harness's private umask 077, a newly created directory would be inaccessible to
+the user's systemd manager. Enrollment owns the drop-in file and all its values.
+The harness does not change the adapter or its attestation checks.
 
 ## Run the journey
 

@@ -152,10 +152,9 @@ Environment=SKYNET_EDR_SPIKE_KEY=skynet-edr-fake-key-not-valid
 Environment=PYTHONDONTWRITEBYTECODE=1
 UNIT
 chown -R "$account:$account" "$target_home/.config/systemd/user/hermes-gateway.service.d"
-# This Hermes unit needs an explicit link to the authoritative global drop-in.
-# Enrollment creates and replaces the root-owned target; never copy its values.
-ln -s /etc/systemd/user/hermes-gateway.service.d/50-skynet-edr.conf \
-  "$target_home/.config/systemd/user/hermes-gateway.service.d/50-skynet-edr.conf"
+# Keep the managed drop-in traversable despite this harness's private umask.
+# Enrollment creates the file; the user's systemd manager must be able to read it.
+install -d -o root -g root -m 0755 /etc/systemd/user/hermes-gateway.service.d
 run_as systemctl --user daemon-reload
 run_as systemctl --user restart hermes-gateway.service
 for _ in $(seq 1 60); do
