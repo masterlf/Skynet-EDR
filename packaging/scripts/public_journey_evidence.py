@@ -21,9 +21,13 @@ TOOL = "skynet_edr_safe_detection_simulation"
 DB = Path("/var/lib/skynet-edr/skynet.sqlite")
 
 
+class EvidenceError(ValueError):
+    """A failed check identified by a fixed string from this verifier."""
+
+
 def require(condition: bool, category: str) -> None:
     if not condition:
-        raise ValueError(category)
+        raise EvidenceError(category)
 
 
 def enrollment_diagnostic(value: dict) -> dict:
@@ -365,9 +369,17 @@ def main() -> int:
         sqlite3.Error,
         http.client.HTTPException,
         RecursionError,
-    ):
-        # Never echo runtime payloads, exception messages, or private paths.
-        print('{"status":"FAIL","stage":"evidence"}', file=sys.stderr)
+    ) as error:
+        # Only our fixed check labels may be exposed; parser/I/O text stays private.
+        check = (
+            str(error)
+            if isinstance(error, EvidenceError)
+            else "unavailable or malformed evidence"
+        )
+        print(
+            json.dumps({"status": "FAIL", "stage": "evidence", "check": check}),
+            file=sys.stderr,
+        )
         return 1
 
 

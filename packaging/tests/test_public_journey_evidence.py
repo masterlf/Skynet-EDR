@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
 import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -17,6 +19,22 @@ SPEC.loader.exec_module(journey)
 
 
 class PublicJourneyEvidenceTests(unittest.TestCase):
+    def test_cli_reports_failed_check_but_never_parser_exception_text(self):
+        for error, expected in (
+            (journey.EvidenceError("ingestion health"), "ingestion health"),
+            (ValueError(journey.FORBIDDEN_MARKER), "unavailable or malformed evidence"),
+        ):
+            output = io.StringIO()
+            with (
+                patch("sys.argv", ["journey", "snapshot"]),
+                patch.object(journey, "read_snapshot", side_effect=error),
+                patch("sys.stderr", output),
+            ):
+                self.assertEqual(journey.main(), 1)
+            value = json.loads(output.getvalue())
+            self.assertEqual(value["check"], expected)
+            self.assertNotIn(journey.FORBIDDEN_MARKER, output.getvalue())
+
     def test_enrollment_diagnostics_only_report_known_public_codes(self):
         self.assertEqual(
             journey.enrollment_diagnostic(

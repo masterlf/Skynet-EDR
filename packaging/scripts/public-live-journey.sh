@@ -172,6 +172,9 @@ enroll() {
     --adapter /usr/libexec/skynet-edr/hermes-enrollment-adapter.py
 }
 stage=enrollment-check
+stat --printf='journey path mode=%a uid=%u path=%n\n' \
+  /home "$target_home" "$target_home/.hermes" /usr /usr/share /usr/share/skynet-edr \
+  /usr/share/skynet-edr/hermes-plugin /usr/share/skynet-edr/hermes-plugin/skynet-edr >&2
 if enroll check >"$lab/check.json"; then exit 1; fi
 python3 - "$lab/check.json" <<'PY'
 import json, sys
