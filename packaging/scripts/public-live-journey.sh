@@ -81,6 +81,12 @@ PY
 install -d -m 0700 "$lab"
 stage=provision
 dpkg --install "$deb" >"$lab/install.log" 2>&1
+systemctl start skynet-edr.service
+for _ in $(seq 1 30); do
+  if curl --noproxy '*' --fail --silent --max-time 1 http://127.0.0.1:8787/api/status >/dev/null; then break; fi
+  sleep 1
+done
+curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:8787/api/status >/dev/null
 # Hosted images can use group-writable home ancestors and account defaults.
 # This harness has already required a disposable host and an absent target.
 chown root:root /home
