@@ -60,7 +60,7 @@ async function main() {
     stage = 'rendered-event';
     await panel.getByText(' · event ' + binding.event_id, { exact: false }).waitFor({ timeout: 30_000 });
     stage = 'rendered-severity';
-    await panel.getByText('High', { exact: true }).first().waitFor();
+    await panel.getByText('high', { exact: true }).first().waitFor({ timeout: 30_000 });
     stage = 'browser-errors';
     const body = await page.locator('body').innerText();
     if (body.includes('FAKE_SKYNET_EDR_ALPHA2_SECRET_DO_NOT_EXPOSE')) failures.push('redaction failure');
