@@ -32,6 +32,8 @@ sudo git clone --depth 1 --branch v2026.8.3 \
 test "$(sudo git -C /opt/skynet-journey-hermes rev-parse HEAD)" = \
   3c27eb6234bf91b8ceee9e9071591b31e9b148cb
 sudo "$(command -v uv)" sync --frozen --project /opt/skynet-journey-hermes --python /usr/bin/python3
+sudo npm ci --ignore-scripts --no-audit --no-fund --workspace web --prefix /opt/skynet-journey-hermes
+sudo npm run build --workspace web --prefix /opt/skynet-journey-hermes
 sudo chmod -R go-w /opt/skynet-journey-hermes
 npm ci --ignore-scripts --no-audit --no-fund --prefix packaging/browser-gate
 export PLAYWRIGHT_BROWSERS_PATH=/tmp/skynet-public-journey-browsers
@@ -55,6 +57,8 @@ mode 0755. The adapter's directory creation honors the caller's umask; with this
 harness's private umask 077, a newly created directory would be inaccessible to
 the user's systemd manager. Enrollment owns the drop-in file and all its values.
 The harness does not change the adapter or its attestation checks.
+The dashboard is built during preparation and served with `--skip-build`, so
+the synthetic account does not need write access to the trusted Hermes checkout.
 
 ## Run the journey
 

@@ -62,6 +62,7 @@ trap 'exit 1' TERM INT
 [[ "$(git -C "$hermes_repo" rev-parse HEAD)" == "$hermes_ref" ]]
 [[ -z "$(git -C "$hermes_repo" status --porcelain --untracked-files=no)" ]]
 [[ -x "$hermes_repo/.venv/bin/hermes" ]]
+[[ -f "$hermes_repo/hermes_cli/web_dist/index.html" ]]
 [[ ! -e "$lab" && ! -L "$lab" && ! -e /usr/bin/hermes && ! -L /usr/bin/hermes ]]
 [[ ! -e "$target_home" && ! -L "$target_home" ]]
 ! getent passwd "$account" >/dev/null
@@ -221,7 +222,7 @@ verify_chain >"$lab/binding.json"
 stage=browser
 session_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 run_as env HERMES_DASHBOARD_SESSION_TOKEN="$session_token" SKYNET_EDR_HERMES_PLUGIN_ENABLED=0 \
-  /usr/bin/hermes dashboard --host 127.0.0.1 --port 9119 --no-open >"$lab/dashboard.log" 2>&1 &
+  /usr/bin/hermes dashboard --host 127.0.0.1 --port 9119 --no-open --skip-build >"$lab/dashboard.log" 2>&1 &
 dashboard_pid=$!
 for _ in $(seq 1 90); do
   if curl --noproxy '*' --fail --silent --max-time 1 -H "X-Hermes-Session-Token: $session_token" \
