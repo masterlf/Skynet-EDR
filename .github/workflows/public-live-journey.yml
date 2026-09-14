@@ -61,6 +61,17 @@ jobs:
                   if frame.f_code.co_filename != source:
                       return None
                   frame.f_trace_lines = False
+                  if event == 'return' and frame.f_code.co_name in {'_gateway_context_matches', '_process_groups', 'authorization_ok'}:
+                      record = {'function': frame.f_code.co_name, 'result': sorted(value) if isinstance(value, set) else value}
+                      if frame.f_code.co_name == '_gateway_context_matches' and value is False:
+                          record['missing_names'] = sorted(item.split('=', 1)[0] for item in frame.f_locals['expected'] - frame.f_locals['values'])
+                      try:
+                          fd = os.open('/var/lib/skynet-public-journey/adapter-trace.jsonl',
+                                       os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                          os.write(fd, (json.dumps(record) + '\\n').encode())
+                          os.close(fd)
+                      except OSError:
+                          pass
                   if event == 'exception' and count < 100:
                       count += 1
                       error = value[1]
